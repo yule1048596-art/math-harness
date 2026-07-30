@@ -1,0 +1,6 @@
+{"id":"radical-cancellation","problem":"根式相减出现无穷减无穷，怎样先消除抵消再估计？","tags":["asymptotic","radical","cancellation"],"expected_method_keys":["rationalization"]}
+{"id":"infinity-to-zero","problem":"怎样把无穷远处的展开改写成零点附近的局部展开？","tags":["asymptotic","infinity","change-of-variable"],"expected_method_keys":["variable_inversion"]}
+{"id":"targeted-series","problem":"主项可能抵消时，如何决定泰勒级数应保留到哪一阶？","tags":["asymptotic","series","taylor"],"expected_method_keys":["taylor_expansion"]}
+{"id":"large-power","problem":"大幂和指数型表达式直接展开不稳定，应当怎样处理？","tags":["asymptotic","logarithm","exponential"],"expected_method_keys":["log_transform"]}
+{"id":"competing-scales","problem":"多个数量级竞争时，如何找出正确的主导尺度？","tags":["asymptotic","dominant-balance","parameter"],"expected_method_keys":["dominant_balance"]}
+{"id":"factorial-growth","problem":"大参数阶乘或 Gamma 函数的比值应该用什么渐近工具？","tags":["asymptotic","factorial","gamma","stirling"],"expected_method_keys":["stirling"]}

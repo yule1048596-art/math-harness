@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "math-harness"
+version = "0.2.0"
+description = "Workspace-isolated, verifiable memory harness for growing mathematical experts."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "pydantic>=2.10,<3",
+  "sympy>=1.13,<2",
+  "uvicorn>=0.34,<1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx2>=2.9,<3",
+  "pytest>=8.3,<10",
+  "ruff>=0.16,<1",
+]
+llm = [
+  "openai>=2.50,<3",
+]
+
+[project.scripts]
+math-harness-demo = "math_harness.demo:main"
+math-harness-eval = "math_harness.eval_cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/math_harness"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
