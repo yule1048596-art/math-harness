@@ -77,6 +77,7 @@ def test_openai_extractor_uses_structured_responses_contract():
     assert client.responses.kwargs["model"] == "gpt-5.6-terra"
     assert client.responses.kwargs["reasoning"] == {"effort": "low"}
     assert client.responses.kwargs["text_format"] is LLMMethodExtractionOutput
+    assert client.responses.kwargs["max_output_tokens"] == 3_000
     assert client.responses.kwargs["store"] is False
 
 

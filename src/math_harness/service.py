@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 from math_harness.classifier import classify_problem
+from math_harness.config import load_local_environment
 from math_harness.extraction import (
     MethodExtractorProtocol,
     build_method_extractor_from_env,
@@ -64,6 +65,7 @@ class MathHarnessService:
         retriever: MethodRetriever | None = None,
         generator: SolutionGeneratorProtocol | None = None,
     ) -> None:
+        load_local_environment()
         self.workspaces = WorkspaceManager(data_root)
         self.verifier = verifier or SolutionVerifier()
         self.extractor = extractor or build_method_extractor_from_env()

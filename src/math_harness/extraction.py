@@ -67,4 +67,54 @@ def build_method_extractor_from_env() -> MethodExtractorProtocol:
             reasoning_effort=os.getenv("MATH_HARNESS_OPENAI_REASONING_EFFORT", "low"),
         )
         return FallbackMethodExtractor(primary)
-    raise ValueError("MATH_HARNESS_METHOD_EXTRACTOR must be either 'rules' or 'openai'")
+    if provider == "mimo":
+        from math_harness.providers.mimo import (
+            DEFAULT_MIMO_BASE_URL,
+            DEFAULT_MIMO_MODEL,
+            MiMoStructuredMethodExtractor,
+        )
+
+        primary = MiMoStructuredMethodExtractor(
+            api_key=os.getenv("MIMO_API_KEY"),
+            base_url=os.getenv(
+                "MATH_HARNESS_MIMO_BASE_URL",
+                DEFAULT_MIMO_BASE_URL,
+            ),
+            model=os.getenv(
+                "MATH_HARNESS_MIMO_MODEL",
+                DEFAULT_MIMO_MODEL,
+            ),
+            reasoning_effort=os.getenv(
+                "MATH_HARNESS_MIMO_EXTRACTION_REASONING_EFFORT",
+                "none",
+            ),
+            max_output_tokens=_bounded_int_env(
+                "MATH_HARNESS_MIMO_EXTRACTION_MAX_OUTPUT_TOKENS",
+                default=3_000,
+                minimum=256,
+                maximum=8_000,
+            ),
+        )
+        return FallbackMethodExtractor(primary)
+    raise ValueError(
+        "MATH_HARNESS_METHOD_EXTRACTOR must be 'rules', 'openai', or 'mimo'"
+    )
+
+
+def _bounded_int_env(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+    return value
