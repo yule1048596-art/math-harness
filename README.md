@@ -1,16 +1,19 @@
 # Math Harness
 
-一个面向数学专家成长的可运行原型。v0.2 已完成第二条纵向闭环：
+一个面向数学专家成长的可运行原型。v0.3 已完成第一条可验证解题闭环：
 
 1. 创建彼此隔离的工作区；
 2. 录入题目、解答和可选的结构化数学表达式；
 3. 使用受限解析器和 SymPy 验证答案；
 4. 使用规则或结构化 LLM 从解答中提取候选方法卡；
 5. 只有通过验证的方法才会自动晋级；
-6. 在当前工作区内检索相关方法并生成解题计划；
-7. 保存提取提供方、模型、响应 ID、证据、置信度与回退原因；
-8. 用固定训练集和留出集度量学习前后的检索变化；
-9. 用测试证明跨工作区不会发生数据泄漏。
+6. 新题到来时只检索当前工作区已晋级的方法；
+7. 由离线 SymPy 或可选的结构化 LLM 生成候选解；
+8. 候选解必须经过独立验证器，不能由生成模型自行判定正确；
+9. 保存每次尝试的输入、检索方法、候选解、生成轨迹和验证报告；
+10. 根据已验证的结果更新实际使用方法的成功/失败计数；
+11. 以新记录保存人工纠正，不覆盖原始错误历史；
+12. 分别评测方法检索和端到端解题门禁，并保持工作区物理隔离。
 
 ## 快速开始
 
@@ -24,23 +27,44 @@ uv run --no-editable uvicorn math_harness.api:app --reload
 
 API 启动后可访问 `http://127.0.0.1:8000/docs`。
 
-## 可选的 OpenAI 结构化提取器
+## 候选解生成器
 
-默认使用完全离线的规则提取器。启用 OpenAI 时：
+默认生成器是完全离线的 SymPy 实现，不需要密钥。它接受 `math_target`，支持：
+
+- `exact_equivalence`
+- `asymptotic_equivalence`
+- `asymptotic_expansion`
+
+生成器只提交候选答案；现有安全解析器和符号验证器拥有最终验收权。没有
+`math_target` 时，离线生成会明确记为 `generation_failed`，不会编造答案。
+
+## 可选的 OpenAI 结构化组件
+
+方法提取默认使用离线规则，求解默认使用 SymPy。可以独立启用 OpenAI：
 
 ```bash
 uv sync --no-editable --extra dev --extra llm
 export OPENAI_API_KEY="..."
+
+# 可选：方法提取
 export MATH_HARNESS_METHOD_EXTRACTOR="openai"
 export MATH_HARNESS_OPENAI_MODEL="gpt-5.6-terra"
 export MATH_HARNESS_OPENAI_REASONING_EFFORT="low"
+
+# 可选：候选解生成
+export MATH_HARNESS_SOLVER="openai"
+export MATH_HARNESS_OPENAI_SOLVER_MODEL="gpt-5.6-sol"
+export MATH_HARNESS_OPENAI_SOLVER_REASONING_EFFORT="medium"
+export MATH_HARNESS_OPENAI_SOLVER_TIMEOUT_SECONDS="45"
+
 uv run --no-editable uvicorn math_harness.api:app --reload
 ```
 
-默认选择 GPT-5.6 Terra，以兼顾数学语义提取质量与成本；模型和 reasoning effort
-都可以通过环境变量替换。实现采用 OpenAI Responses API 的 Pydantic 结构化输出，
-并设置 `store=False`。如果 SDK、密钥、网络或模型请求失败，本次学习会自动回退到
-规则提取器，错误原因仍会进入审计记录，原始题目不会丢失。
+方法提取默认选择 GPT-5.6 Terra/low，候选求解默认选择
+GPT-5.6 Sol/medium。两条路径都使用 OpenAI Responses API 的 Pydantic
+结构化输出并设置 `store=False`。SDK、密钥、网络或请求失败时，提取会回退到规则，
+求解会回退到 SymPy；提供方、模型、响应 ID、耗时和错误原因仍会进入审计记录。
+模型输出只包含简洁的用户可见推导，不要求或保存隐藏思维链。
 
 相关官方资料：
 
@@ -52,16 +76,18 @@ uv run --no-editable uvicorn math_harness.api:app --reload
 ## 成长评测
 
 `data/pilot/` 包含 6 个渐进估计训练题和 6 个独立留出查询。评测命令会创建一个
-新工作区，先测空知识库，再摄取训练集并复测，输出：
+新工作区，先测空知识库，再摄取训练集并复测，同时运行离线解题门禁。输出：
 
 - `Hit@1`
 - `Recall@K`
 - `Mean Reciprocal Rank`
 - `Zero-result rate`
+- `Verified / needs-review / rejected / generation-failure rate`
 
 当前 pilot 的 `top-3` 结果是学习前 Recall@K `0.0`、学习后 `1.0`。该数据集很小，
-且使用了清晰的人工标签，只用于验证“摄取—验证—学习—检索—度量”工程闭环，
-不能当作真实数学能力基准。
+且使用了清晰的人工标签。离线求解器可自动验证其中 5/6 个结构化案例；
+Gamma/Stirling 案例会诚实地报告生成失败。它们只用于验证工程闭环，不能当作
+真实数学能力基准。
 
 ## 主要 API
 
@@ -73,26 +99,37 @@ GET    /workspaces/{id}/methods
 PATCH  /workspaces/{id}/methods/{method_id}
 POST   /workspaces/{id}/methods/search
 POST   /workspaces/{id}/solve-plan
+POST   /workspaces/{id}/solve
+GET    /workspaces/{id}/attempts
+GET    /workspaces/{id}/attempts/{attempt_id}
+POST   /workspaces/{id}/attempts/{attempt_id}/corrections
 GET    /workspaces/{id}/learning-events
 POST   /workspaces/{id}/evaluations
 GET    /workspaces/{id}/evaluations
+POST   /workspaces/{id}/solve-evaluations
+GET    /workspaces/{id}/solve-evaluations
 ```
 
 方法可由人工在 `pending_review`、`promoted`、`deprecated` 之间调整；每次状态变化
-和每次评测都会写入该工作区自己的学习事件流。
+和每次评测都会写入该工作区自己的学习事件流。求解评测不会保存普通尝试，也不会
+修改方法成功/失败统计。
 
 ## 当前边界
 
 - pilot 仍主要针对文本形式的渐进估计案例；
-- 自然语言题目始终保存，但只有提供 `math_payload` 时才进行确定性数学验证；
+- 摄取时只有提供 `math_payload` 才进行确定性数学验证；求解时对应字段是
+  `math_target`，它不包含答案；
 - 结构化表达式使用 Python/SymPy 风格，如 `sqrt(x**2 + x) - x`；
 - 表达式经过 AST 白名单解析，不执行任意 Python；
 - 每个工作区使用独立 SQLite 文件，并在每条记录上再次校验 `workspace_id`；
-- LLM 只提取可复用方法，不负责给题目判真；验证器是独立的信任边界；
+- LLM 可以提取方法或生成候选解，但不负责给答案判真；验证器是独立信任边界；
 - 目前检索器是词项与标签基线，尚未接入向量检索或数学结构检索；
-- 当前还不自动生成完整候选解，`solve-plan` 只返回可追溯的方法建议。
+- 成功/失败计数是可审计的在线反馈，不是底层模型权重微调；
+- 离线求解器只覆盖有限的表达式等价与级数任务，不是通用定理证明器；
+- 当前符号计算在进程内运行；面向不受信任的多用户服务前，还应加入进程级
+  CPU/内存/时间限制。
 
-## 示例请求
+## 示例：摄取一道已解题
 
 ```json
 {
@@ -108,6 +145,27 @@ GET    /workspaces/{id}/evaluations
   }
 }
 ```
+
+## 示例：生成并验证新题
+
+```json
+{
+  "problem": "求 sqrt(x^2+x)-x 在 x→∞ 时到 O(x^-2) 的渐进展开",
+  "tags": ["asymptotic", "radical"],
+  "top_k": 3,
+  "math_target": {
+    "expression": "sqrt(x**2 + x) - x",
+    "variable": "x",
+    "point": "oo",
+    "mode": "asymptotic_expansion",
+    "remainder_power": 2
+  }
+}
+```
+
+提交到 `POST /workspaces/{id}/solve`。返回的 `SolutionAttempt.status` 可能是
+`verified`、`needs_review`、`rejected` 或 `generation_failed`。只有 `verified`
+和 `rejected` 会分别给实际使用且来自本次检索的方法记一次成功或失败。
 
 ## 数据目录
 

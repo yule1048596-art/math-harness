@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 def utc_now() -> datetime:
@@ -57,6 +57,19 @@ class ExtractionStatus(StrEnum):
     ERROR = "error"
 
 
+class GenerationStatus(StrEnum):
+    SUCCESS = "success"
+    FALLBACK = "fallback"
+    ERROR = "error"
+
+
+class SolutionAttemptStatus(StrEnum):
+    VERIFIED = "verified"
+    NEEDS_REVIEW = "needs_review"
+    REJECTED = "rejected"
+    GENERATION_FAILED = "generation_failed"
+
+
 class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=1000)
@@ -80,15 +93,10 @@ class Workspace(BaseModel):
 _SYMBOL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
-class MathPayload(BaseModel):
-    """Deterministic verification input.
-
-    The natural-language problem and solution remain the source of truth. This
-    payload is a safe, machine-checkable sidecar for the first vertical slice.
-    """
+class SolveMathTarget(BaseModel):
+    """Machine-checkable mathematical target supplied with a solve request."""
 
     expression: str = Field(min_length=1, max_length=1000)
-    expected: str = Field(min_length=1, max_length=1000)
     variable: str = "x"
     parameters: list[str] = Field(default_factory=list, max_length=12)
     point: str = "oo"
@@ -110,6 +118,16 @@ class MathPayload(BaseModel):
         if any(not _SYMBOL_PATTERN.fullmatch(value) for value in values):
             raise ValueError("parameters must be simple ASCII symbol names")
         return values
+
+
+class MathPayload(SolveMathTarget):
+    """Deterministic verification input.
+
+    The natural-language problem and solution remain the source of truth. This
+    payload is a safe, machine-checkable sidecar for the first vertical slice.
+    """
+
+    expected: str = Field(min_length=1, max_length=1000)
 
 
 class ExampleCreate(BaseModel):
@@ -250,6 +268,138 @@ class SolvePlan(BaseModel):
     note: str
 
 
+class SolveRequest(BaseModel):
+    problem: str = Field(min_length=1, max_length=20_000)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    top_k: int = Field(default=5, ge=1, le=20)
+    math_target: SolveMathTarget | None = None
+    max_output_tokens: int = Field(default=3_000, ge=256, le=8_000)
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, values: list[str]) -> list[str]:
+        normalized = []
+        seen = set()
+        for value in values:
+            tag = " ".join(value.strip().lower().split())
+            if tag and tag not in seen:
+                normalized.append(tag)
+                seen.add(tag)
+        return normalized
+
+
+class CandidateStep(BaseModel):
+    explanation: str = Field(min_length=1, max_length=2_000)
+    expression: str | None = Field(max_length=1_000)
+
+
+class CandidateSolution(BaseModel):
+    """Public, concise derivation returned by a solution generator."""
+
+    answer_text: str = Field(min_length=1, max_length=40_000)
+    answer_expression: str | None = Field(max_length=1_000)
+    steps: list[CandidateStep] = Field(max_length=30)
+    used_method_keys: list[str] = Field(max_length=20)
+    assumptions: list[str] = Field(max_length=20)
+    confidence: float = Field(ge=0, le=1)
+
+    @field_validator("used_method_keys", mode="before")
+    @classmethod
+    def validate_method_keys(cls, values: list[str | MethodKind]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            key = _normalize_method_key(value)
+            if key not in seen:
+                normalized.append(key)
+                seen.add(key)
+        return normalized
+
+
+class SolutionGenerationTrace(BaseModel):
+    provider: str = Field(min_length=1, max_length=120)
+    model: str | None = Field(default=None, max_length=120)
+    response_id: str | None = Field(default=None, max_length=200)
+    prompt_version: str = Field(min_length=1, max_length=80)
+    status: GenerationStatus
+    fallback_used: bool = False
+    raw_output: str | None = Field(default=None, max_length=8_000)
+    error: str | None = Field(default=None, max_length=2_000)
+    duration_ms: int = Field(default=0, ge=0)
+
+
+class SolutionGenerationResult(BaseModel):
+    candidate: CandidateSolution | None
+    trace: SolutionGenerationTrace
+
+
+class SolutionAttempt(BaseModel):
+    id: str
+    workspace_id: str
+    problem: str
+    tags: list[str]
+    problem_kind: ProblemKind
+    math_target: SolveMathTarget | None = None
+    recommended_methods: list[MethodMatch]
+    candidate: CandidateSolution | None
+    generation: SolutionGenerationTrace
+    verification: VerificationReport
+    status: SolutionAttemptStatus
+    correction_of: str | None = None
+    created_at: datetime
+
+    @model_validator(mode="after")
+    def validate_attempt_invariants(self) -> SolutionAttempt:
+        if self.status is SolutionAttemptStatus.GENERATION_FAILED:
+            if self.candidate is not None:
+                raise ValueError("generation_failed attempt cannot contain a candidate")
+            if self.verification.status is not VerificationStatus.NEEDS_REVIEW:
+                raise ValueError(
+                    "generation_failed attempt must use needs_review verification"
+                )
+        else:
+            if self.candidate is None:
+                raise ValueError("non-failed attempt must contain a candidate")
+            expected_status = SolutionAttemptStatus(self.verification.status.value)
+            if self.status is not expected_status:
+                raise ValueError("attempt status must match verification status")
+
+        if any(
+            match.method.workspace_id != self.workspace_id
+            for match in self.recommended_methods
+        ):
+            raise ValueError("recommended methods must belong to the attempt workspace")
+        allowed_keys = {match.method.key for match in self.recommended_methods}
+        if self.candidate and not set(self.candidate.used_method_keys) <= allowed_keys:
+            raise ValueError("used methods must come from this attempt's retrieval")
+        return self
+
+
+class SolutionCorrection(BaseModel):
+    answer_text: str = Field(min_length=1, max_length=40_000)
+    answer_expression: str | None = Field(default=None, max_length=1_000)
+    steps: list[CandidateStep] = Field(default_factory=list, max_length=30)
+    used_method_keys: list[str] | None = Field(default=None, max_length=20)
+    assumptions: list[str] = Field(default_factory=list, max_length=20)
+    reviewer_note: str = Field(default="", max_length=4_000)
+
+    @field_validator("used_method_keys", mode="before")
+    @classmethod
+    def validate_optional_method_keys(
+        cls, values: list[str | MethodKind] | None
+    ) -> list[str] | None:
+        if values is None:
+            return None
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            key = _normalize_method_key(value)
+            if key not in seen:
+                normalized.append(key)
+                seen.add(key)
+        return normalized
+
+
 class MethodStatusUpdate(BaseModel):
     status: KnowledgeStatus
 
@@ -319,6 +469,47 @@ class EvaluationRun(BaseModel):
     top_k: int
     metrics: EvaluationMetrics
     cases: list[EvaluationCaseResult]
+    created_at: datetime
+
+
+class SolveEvaluationCase(BaseModel):
+    id: str = Field(min_length=1, max_length=120)
+    problem: str = Field(min_length=1, max_length=20_000)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    math_target: SolveMathTarget
+
+
+class SolveEvaluationRequest(BaseModel):
+    name: str = Field(default="solve-evaluation", min_length=1, max_length=120)
+    cases: list[SolveEvaluationCase] = Field(min_length=1, max_length=200)
+    top_k: int = Field(default=3, ge=1, le=20)
+    max_output_tokens: int = Field(default=3_000, ge=256, le=8_000)
+
+
+class SolveEvaluationCaseResult(BaseModel):
+    case_id: str
+    status: SolutionAttemptStatus
+    verification_status: VerificationStatus
+    retrieved_method_keys: list[str]
+    used_method_keys: list[str]
+    generation_provider: str
+
+
+class SolveEvaluationMetrics(BaseModel):
+    case_count: int = Field(ge=1)
+    verified_rate: float = Field(ge=0, le=1)
+    needs_review_rate: float = Field(ge=0, le=1)
+    rejected_rate: float = Field(ge=0, le=1)
+    generation_failure_rate: float = Field(ge=0, le=1)
+
+
+class SolveEvaluationRun(BaseModel):
+    id: str
+    workspace_id: str
+    name: str
+    top_k: int
+    metrics: SolveEvaluationMetrics
+    cases: list[SolveEvaluationCaseResult]
     created_at: datetime
 
 

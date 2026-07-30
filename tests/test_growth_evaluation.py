@@ -28,6 +28,9 @@ def test_growth_evaluation_improves_on_pilot_holdout(tmp_path):
     assert report["after"]["recall_at_k"] > report["before"]["recall_at_k"]
     assert report["after"]["mean_reciprocal_rank"] > 0
     assert report["after"]["zero_result_rate"] == 0
+    assert report["solve_gate"]["case_count"] == 6
+    assert report["solve_gate"]["verified_rate"] == 0.833333
+    assert report["solve_gate"]["generation_failure_rate"] == 0.166667
 
 
 def test_evaluations_and_manual_status_changes_are_audited(

@@ -10,6 +10,9 @@ from math_harness.models import (
     EvaluationCase,
     EvaluationRequest,
     ExampleCreate,
+    SolveEvaluationCase,
+    SolveEvaluationRequest,
+    SolveMathTarget,
     WorkspaceCreate,
 )
 from math_harness.service import MathHarnessService
@@ -58,6 +61,30 @@ def run_growth_evaluation(
         workspace.id,
         EvaluationRequest(name="after_learning", cases=cases, top_k=top_k),
     )
+    solve_cases = [
+        SolveEvaluationCase(
+            id=f"training-solve-{index}",
+            problem=example.problem,
+            tags=example.tags,
+            math_target=SolveMathTarget.model_validate(
+                example.math_payload.model_dump(exclude={"expected"})
+            ),
+        )
+        for index, example in enumerate(training_examples, start=1)
+        if example.math_payload is not None
+    ]
+    solve_gate = (
+        service.evaluate_solver(
+            workspace.id,
+            SolveEvaluationRequest(
+                name="offline_solution_gate",
+                cases=solve_cases,
+                top_k=top_k,
+            ),
+        )
+        if solve_cases
+        else None
+    )
 
     learned_keys = sorted(
         {
@@ -83,6 +110,9 @@ def run_growth_evaluation(
         },
         "before": baseline.metrics.model_dump(mode="json"),
         "after": after.metrics.model_dump(mode="json"),
+        "solve_gate": (
+            solve_gate.metrics.model_dump(mode="json") if solve_gate else None
+        ),
         "delta": {
             "hit_at_1": round(after.metrics.hit_at_1 - baseline.metrics.hit_at_1, 6),
             "recall_at_k": round(

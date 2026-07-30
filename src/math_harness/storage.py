@@ -16,6 +16,9 @@ from math_harness.models import (
     MethodCard,
     MethodDraft,
     ProblemExample,
+    SolutionAttempt,
+    SolutionAttemptStatus,
+    SolveEvaluationRun,
     Workspace,
     WorkspaceCreate,
     utc_now,
@@ -210,6 +213,44 @@ class WorkspaceStore:
 
                 CREATE INDEX IF NOT EXISTS idx_evaluation_runs_workspace
                     ON evaluation_runs(workspace_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS solution_attempts (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    correction_of TEXT,
+                    report_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY (correction_of)
+                        REFERENCES solution_attempts(id) ON DELETE RESTRICT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_solution_attempts_workspace
+                    ON solution_attempts(workspace_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS attempt_methods (
+                    workspace_id TEXT NOT NULL,
+                    attempt_id TEXT NOT NULL,
+                    method_id TEXT NOT NULL,
+                    method_key TEXT NOT NULL,
+                    rank INTEGER NOT NULL,
+                    score REAL NOT NULL,
+                    used INTEGER NOT NULL,
+                    PRIMARY KEY (workspace_id, attempt_id, method_id),
+                    FOREIGN KEY (attempt_id)
+                        REFERENCES solution_attempts(id) ON DELETE CASCADE,
+                    FOREIGN KEY (method_id) REFERENCES methods(id) ON DELETE RESTRICT
+                );
+
+                CREATE TABLE IF NOT EXISTS solve_evaluation_runs (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    report_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_solve_evaluation_runs_workspace
+                    ON solve_evaluation_runs(workspace_id, created_at);
                 """
             )
             self._ensure_column(connection, "examples", "extraction_json", "TEXT")
@@ -513,6 +554,206 @@ class WorkspaceStore:
             ).fetchall()
         return [
             EvaluationRun.model_validate(json.loads(row["report_json"])) for row in rows
+        ]
+
+    def add_solution_attempt(self, attempt: SolutionAttempt) -> SolutionAttempt:
+        """Persist an immutable attempt and atomically apply method feedback."""
+
+        self._assert_workspace(attempt.workspace_id)
+        used_keys = (
+            set(attempt.candidate.used_method_keys) if attempt.candidate else set()
+        )
+        feedback_delta = 0
+        if attempt.status is SolutionAttemptStatus.VERIFIED:
+            feedback_delta = 1
+        elif attempt.status is SolutionAttemptStatus.REJECTED:
+            feedback_delta = -1
+
+        with self.connection() as connection:
+            if attempt.correction_of is not None:
+                parent = connection.execute(
+                    """
+                    SELECT id FROM solution_attempts
+                    WHERE id = ? AND workspace_id = ?
+                    """,
+                    (attempt.correction_of, self.workspace_id),
+                ).fetchone()
+                if parent is None:
+                    raise RecordNotFound(
+                        "correction parent not found in workspace: "
+                        f"{attempt.correction_of}"
+                    )
+
+            connection.execute(
+                """
+                INSERT INTO solution_attempts (
+                    id, workspace_id, status, correction_of, report_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attempt.id,
+                    attempt.workspace_id,
+                    attempt.status.value,
+                    attempt.correction_of,
+                    _dump(attempt.model_dump(mode="json")),
+                    attempt.created_at.isoformat(),
+                ),
+            )
+
+            credited_method_ids: set[str] = set()
+            for rank, match in enumerate(attempt.recommended_methods, start=1):
+                if match.method.workspace_id != self.workspace_id:
+                    raise ValueError("cross-workspace method feedback rejected")
+                exists = connection.execute(
+                    """
+                    SELECT id FROM methods
+                    WHERE id = ? AND workspace_id = ?
+                    """,
+                    (match.method.id, self.workspace_id),
+                ).fetchone()
+                if exists is None:
+                    raise RecordNotFound(
+                        f"method not found in workspace: {match.method.id}"
+                    )
+                used = match.method.key in used_keys
+                connection.execute(
+                    """
+                    INSERT INTO attempt_methods (
+                        workspace_id, attempt_id, method_id, method_key,
+                        rank, score, used
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.workspace_id,
+                        attempt.id,
+                        match.method.id,
+                        match.method.key,
+                        rank,
+                        match.score,
+                        1 if used else 0,
+                    ),
+                )
+                if (
+                    used
+                    and feedback_delta
+                    and match.method.id not in credited_method_ids
+                ):
+                    credited_method_ids.add(match.method.id)
+                    success_delta = 1 if feedback_delta > 0 else 0
+                    failure_delta = 1 if feedback_delta < 0 else 0
+                    connection.execute(
+                        """
+                        UPDATE methods
+                        SET success_count = success_count + ?,
+                            failure_count = failure_count + ?,
+                            updated_at = ?
+                        WHERE id = ? AND workspace_id = ?
+                        """,
+                        (
+                            success_delta,
+                            failure_delta,
+                            attempt.created_at.isoformat(),
+                            match.method.id,
+                            self.workspace_id,
+                        ),
+                    )
+                    self._record_event(
+                        connection,
+                        "method_outcome_recorded",
+                        match.method.id,
+                        {
+                            "attempt_id": attempt.id,
+                            "method_key": match.method.key,
+                            "outcome": attempt.status.value,
+                        },
+                    )
+
+            self._record_event(
+                connection,
+                "solution_attempt_recorded",
+                attempt.id,
+                {
+                    "status": attempt.status.value,
+                    "verification_status": attempt.verification.status.value,
+                    "generation_provider": attempt.generation.provider,
+                    "used_method_keys": sorted(used_keys),
+                    "credited_method_count": len(credited_method_ids),
+                    "correction_of": attempt.correction_of,
+                },
+            )
+        return attempt
+
+    def get_solution_attempt(self, attempt_id: str) -> SolutionAttempt:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT report_json FROM solution_attempts
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (attempt_id, self.workspace_id),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(
+                f"solution attempt not found in workspace: {attempt_id}"
+            )
+        return SolutionAttempt.model_validate(json.loads(row["report_json"]))
+
+    def list_solution_attempts(self) -> list[SolutionAttempt]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT report_json FROM solution_attempts
+                WHERE workspace_id = ?
+                ORDER BY created_at, id
+                """,
+                (self.workspace_id,),
+            ).fetchall()
+        return [
+            SolutionAttempt.model_validate(json.loads(row["report_json"]))
+            for row in rows
+        ]
+
+    def add_solve_evaluation(self, run: SolveEvaluationRun) -> SolveEvaluationRun:
+        self._assert_workspace(run.workspace_id)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO solve_evaluation_runs (
+                    id, workspace_id, report_json, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (
+                    run.id,
+                    run.workspace_id,
+                    _dump(run.model_dump(mode="json")),
+                    run.created_at.isoformat(),
+                ),
+            )
+            self._record_event(
+                connection,
+                "solve_evaluation_completed",
+                run.id,
+                {
+                    "name": run.name,
+                    "top_k": run.top_k,
+                    "metrics": run.metrics.model_dump(mode="json"),
+                },
+            )
+        return run
+
+    def list_solve_evaluations(self) -> list[SolveEvaluationRun]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT report_json FROM solve_evaluation_runs
+                WHERE workspace_id = ?
+                ORDER BY created_at, id
+                """,
+                (self.workspace_id,),
+            ).fetchall()
+        return [
+            SolveEvaluationRun.model_validate(json.loads(row["report_json"]))
+            for row in rows
         ]
 
     def _record_event(
