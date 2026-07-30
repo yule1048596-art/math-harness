@@ -13,9 +13,10 @@ from math_harness.models import (
     SolutionGenerationResult,
     SolutionGenerationTrace,
     SolveMathTarget,
+    VerificationReport,
 )
 
-PROMPT_VERSION = "math-solver-v1"
+PROMPT_VERSION = "math-solver-v2"
 
 SYSTEM_PROMPT = """\
 You are the candidate-solution component of a mathematical AI harness.
@@ -26,8 +27,14 @@ verification target, and workspace method cards.
 
 Success criteria:
 - Give a direct final answer and a short pedagogical derivation.
-- Put a parser-friendly expression using ** for powers in answer_expression when
-  the supplied verification target makes that possible.
+- Put only the finite, parser-friendly expression in answer_expression when the
+  supplied verification target makes that possible.
+- Use ** for powers; use E and pi for constants; use only sqrt, exp, log, sin,
+  cos, tan, asin, acos, atan, sinh, cosh, tanh, gamma, factorial, Abs, Min,
+  Max, or Rational as functions.
+- Never put O(...), o(...), an equals sign, LaTeX, Unicode math symbols, prose,
+  or a lowercase e constant in answer_expression. The verification target
+  already carries the required remainder order.
 - List only method keys that you actually used and that appear in the supplied cards.
 - State material assumptions explicitly.
 
@@ -104,30 +111,82 @@ class OpenAISolutionGenerator:
         math_target: SolveMathTarget | None,
         max_output_tokens: int,
     ) -> SolutionGenerationResult:
-        started = perf_counter()
-        source = json.dumps(
-            {
-                "problem": problem,
-                "verification_target": (
-                    math_target.model_dump(mode="json") if math_target else None
-                ),
-                "method_cards": [
-                    {
-                        "key": match.method.key,
-                        "name": match.method.name,
-                        "goal": match.method.goal,
-                        "applicable_when": match.method.applicable_when,
-                        "procedure": match.method.procedure,
-                        "failure_modes": match.method.failure_modes,
-                        "retrieval_score": match.score,
-                        "retrieval_reasons": match.reasons,
-                    }
-                    for match in methods
-                ],
-            },
-            ensure_ascii=False,
+        source = self._source_payload(problem, methods, math_target)
+        return self._request_candidate(
+            "Solve the mathematical source JSON:\n"
+            + json.dumps(source, ensure_ascii=False),
+            max_output_tokens,
         )
-        user_content = "Solve the mathematical source JSON:\n" + source
+
+    def repair(
+        self,
+        problem: str,
+        methods: list[MethodMatch],
+        math_target: SolveMathTarget,
+        previous_candidate: CandidateSolution,
+        verification: VerificationReport,
+        max_output_tokens: int,
+    ) -> SolutionGenerationResult:
+        source = self._source_payload(problem, methods, math_target)
+        source.update(
+            {
+                "previous_candidate": previous_candidate.model_dump(mode="json"),
+                "verification_feedback": verification.model_dump(mode="json"),
+            }
+        )
+        result = self._request_candidate(
+            (
+                "Correct the previous candidate using the deterministic verifier "
+                "feedback in this source JSON. Recompute the mathematics, make "
+                "answer_expression agree with the displayed derivation, and return "
+                "one complete replacement candidate:\n"
+            )
+            + json.dumps(source, ensure_ascii=False),
+            max_output_tokens,
+        )
+        return result.model_copy(
+            update={
+                "trace": result.trace.model_copy(
+                    update={
+                        "correction_attempted": True,
+                        "recovery_notes": ["model_correction_requested"],
+                    }
+                )
+            }
+        )
+
+    @staticmethod
+    def _source_payload(
+        problem: str,
+        methods: list[MethodMatch],
+        math_target: SolveMathTarget | None,
+    ) -> dict[str, Any]:
+        return {
+            "problem": problem,
+            "verification_target": (
+                math_target.model_dump(mode="json") if math_target else None
+            ),
+            "method_cards": [
+                {
+                    "key": match.method.key,
+                    "name": match.method.name,
+                    "goal": match.method.goal,
+                    "applicable_when": match.method.applicable_when,
+                    "procedure": match.method.procedure,
+                    "failure_modes": match.method.failure_modes,
+                    "retrieval_score": match.score,
+                    "retrieval_reasons": match.reasons,
+                }
+                for match in methods
+            ],
+        }
+
+    def _request_candidate(
+        self,
+        user_content: str,
+        max_output_tokens: int,
+    ) -> SolutionGenerationResult:
+        started = perf_counter()
         client = self._client_or_create()
         common_options = {
             "model": self.model,
