@@ -4,6 +4,8 @@ import os
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from math_harness.config import load_local_environment
 from math_harness.extraction import (
     FallbackMethodExtractor,
@@ -197,6 +199,8 @@ def test_environment_builders_select_mimo_with_offline_fallback(monkeypatch):
     assert isinstance(generator.primary, MiMoSolutionGenerator)
     assert generator.primary.model == DEFAULT_MIMO_MODEL
     assert generator.primary.reasoning_effort == "none"
+    assert generator.verification_repair_enabled is True
+    assert generator.verification_fallback_enabled is True
     assert isinstance(extractor, FallbackMethodExtractor)
     assert isinstance(extractor.primary, MiMoStructuredMethodExtractor)
     assert extractor.primary.reasoning_effort == "none"
@@ -219,3 +223,28 @@ def test_explicit_env_file_loads_without_overriding_exported_values(
     assert loaded is True
     assert os.environ["MIMO_API_KEY"] == "exported-secret"
     assert os.environ["MATH_HARNESS_MIMO_MODEL"] == DEFAULT_MIMO_MODEL
+
+
+def test_environment_can_disable_verification_recovery(monkeypatch):
+    monkeypatch.setenv("MATH_HARNESS_SOLVER", "mimo")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    monkeypatch.setenv("MATH_HARNESS_VERIFICATION_REPAIR", "false")
+    monkeypatch.setenv("MATH_HARNESS_VERIFICATION_FALLBACK", "off")
+
+    generator = build_solution_generator_from_env()
+
+    assert isinstance(generator, FallbackSolutionGenerator)
+    assert generator.verification_repair_enabled is False
+    assert generator.verification_fallback_enabled is False
+
+
+def test_invalid_verification_recovery_boolean_is_rejected(monkeypatch):
+    monkeypatch.setenv("MATH_HARNESS_SOLVER", "mimo")
+    monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    monkeypatch.setenv("MATH_HARNESS_VERIFICATION_REPAIR", "sometimes")
+
+    with pytest.raises(
+        ValueError,
+        match="MATH_HARNESS_VERIFICATION_REPAIR must be a boolean",
+    ):
+        build_solution_generator_from_env()

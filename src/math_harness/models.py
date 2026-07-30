@@ -323,6 +323,11 @@ class SolutionGenerationTrace(BaseModel):
     prompt_version: str = Field(min_length=1, max_length=80)
     status: GenerationStatus
     fallback_used: bool = False
+    verification_fallback_used: bool = False
+    correction_attempted: bool = False
+    correction_succeeded: bool = False
+    normalization_actions: list[str] = Field(default_factory=list, max_length=20)
+    recovery_notes: list[str] = Field(default_factory=list, max_length=20)
     raw_output: str | None = Field(default=None, max_length=8_000)
     error: str | None = Field(default=None, max_length=2_000)
     duration_ms: int = Field(default=0, ge=0)
@@ -493,6 +498,9 @@ class SolveEvaluationCaseResult(BaseModel):
     retrieved_method_keys: list[str]
     used_method_keys: list[str]
     generation_provider: str
+    fallback_used: bool = False
+    correction_attempted: bool = False
+    correction_succeeded: bool = False
 
 
 class SolveEvaluationMetrics(BaseModel):
@@ -501,6 +509,9 @@ class SolveEvaluationMetrics(BaseModel):
     needs_review_rate: float = Field(ge=0, le=1)
     rejected_rate: float = Field(ge=0, le=1)
     generation_failure_rate: float = Field(ge=0, le=1)
+    fallback_rate: float = Field(default=0, ge=0, le=1)
+    correction_attempt_rate: float = Field(default=0, ge=0, le=1)
+    correction_success_rate: float = Field(default=0, ge=0, le=1)
 
 
 class SolveEvaluationRun(BaseModel):

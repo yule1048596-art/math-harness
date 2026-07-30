@@ -7,6 +7,8 @@ from math_harness.models import (
     CandidateStep,
     GenerationStatus,
     SolveMathTarget,
+    VerificationReport,
+    VerificationStatus,
 )
 from math_harness.providers.openai_solver import OpenAISolutionGenerator
 from math_harness.solving import FallbackSolutionGenerator
@@ -102,3 +104,37 @@ def test_openai_failure_falls_back_to_sympy_with_audit():
     assert result.trace.provider == "openai->sympy"
     assert result.trace.model == "gpt-5.6-sol"
     assert "TimeoutError" in (result.trace.error or "")
+
+
+def test_openai_repair_sends_previous_candidate_and_verifier_feedback():
+    client = FakeClient()
+    generator = OpenAISolutionGenerator(client=client)
+    previous = CandidateSolution(
+        answer_text="错误答案：1/3。",
+        answer_expression="1/3",
+        steps=[CandidateStep(explanation="计算错误。", expression="1/3")],
+        used_method_keys=[],
+        assumptions=[],
+        confidence=0.2,
+    )
+
+    result = generator.repair(
+        "求根式之差的渐进展开",
+        [],
+        _target(),
+        previous,
+        VerificationReport(
+            status=VerificationStatus.REJECTED,
+            summary="期望展开未达到声明的余项阶数。",
+            checks=["scaled_remainder_limit"],
+            computed={"scaled_limit": "oo"},
+        ),
+        2_048,
+    )
+
+    prompt = client.responses.kwargs["input"][1]["content"]
+    assert '"previous_candidate"' in prompt
+    assert '"verification_feedback"' in prompt
+    assert "期望展开未达到声明的余项阶数" in prompt
+    assert result.trace.correction_attempted is True
+    assert result.trace.recovery_notes == ["model_correction_requested"]

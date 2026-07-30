@@ -16,6 +16,7 @@ from math_harness.models import (
     SolutionGenerationTrace,
     SolveMathTarget,
     VerificationMode,
+    VerificationReport,
 )
 
 
@@ -178,17 +179,22 @@ class OfflineSympySolutionGenerator:
 
 
 class FallbackSolutionGenerator:
-    """Fall back to deterministic SymPy when the primary generator fails."""
+    """Recover from generation or verification failures with deterministic SymPy."""
 
     def __init__(
         self,
         primary: SolutionGeneratorProtocol,
         fallback: SolutionGeneratorProtocol | None = None,
+        *,
+        verification_repair_enabled: bool = True,
+        verification_fallback_enabled: bool = True,
     ) -> None:
         self.primary = primary
         self.fallback = fallback or OfflineSympySolutionGenerator()
         self.name = f"{primary.name}->{self.fallback.name}"
         self.prompt_version = getattr(primary, "prompt_version", "unknown")
+        self.verification_repair_enabled = verification_repair_enabled
+        self.verification_fallback_enabled = verification_fallback_enabled
 
     def generate(
         self,
@@ -252,6 +258,104 @@ class FallbackSolutionGenerator:
             }
         )
 
+    def repair_after_verification(
+        self,
+        problem: str,
+        methods: list[MethodMatch],
+        math_target: SolveMathTarget,
+        previous_candidate: CandidateSolution,
+        verification: VerificationReport,
+        max_output_tokens: int,
+    ) -> SolutionGenerationResult | None:
+        repair = getattr(self.primary, "repair", None)
+        if not self.verification_repair_enabled or not callable(repair):
+            return None
+
+        started = perf_counter()
+        try:
+            result = repair(
+                problem,
+                methods,
+                math_target,
+                previous_candidate,
+                verification,
+                max_output_tokens,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SolutionGenerationResult(
+                candidate=None,
+                trace=SolutionGenerationTrace(
+                    provider=self.primary.name,
+                    model=getattr(self.primary, "model", None),
+                    prompt_version=self.prompt_version,
+                    status=GenerationStatus.ERROR,
+                    correction_attempted=True,
+                    recovery_notes=["model_correction_failed"],
+                    error=f"{exc.__class__.__name__}: {exc}"[:2_000],
+                    duration_ms=self._duration_ms(started),
+                ),
+            )
+        return result.model_copy(
+            update={
+                "trace": result.trace.model_copy(
+                    update={
+                        "correction_attempted": True,
+                        "duration_ms": self._duration_ms(started),
+                    }
+                )
+            }
+        )
+
+    def fallback_after_verification(
+        self,
+        problem: str,
+        methods: list[MethodMatch],
+        math_target: SolveMathTarget,
+        max_output_tokens: int,
+        verification: VerificationReport,
+        *,
+        correction_attempted: bool,
+        correction_error: str | None,
+    ) -> SolutionGenerationResult | None:
+        if not self.verification_fallback_enabled:
+            return None
+
+        started = perf_counter()
+        fallback_result = self.fallback.generate(
+            problem,
+            methods,
+            math_target,
+            max_output_tokens,
+        )
+        errors = [f"verification: {verification.status.value}: {verification.summary}"]
+        if correction_error:
+            errors.append(f"correction: {correction_error}")
+        if fallback_result.trace.error:
+            errors.append(f"fallback: {fallback_result.trace.error}")
+        return fallback_result.model_copy(
+            update={
+                "trace": fallback_result.trace.model_copy(
+                    update={
+                        "provider": self.name,
+                        "model": getattr(self.primary, "model", None),
+                        "prompt_version": self.prompt_version,
+                        "status": (
+                            GenerationStatus.FALLBACK
+                            if fallback_result.candidate is not None
+                            else GenerationStatus.ERROR
+                        ),
+                        "fallback_used": True,
+                        "verification_fallback_used": True,
+                        "correction_attempted": correction_attempted,
+                        "correction_succeeded": False,
+                        "recovery_notes": ["sympy_verification_fallback"],
+                        "error": "; ".join(errors)[:2_000],
+                        "duration_ms": self._duration_ms(started),
+                    }
+                )
+            }
+        )
+
     @staticmethod
     def _duration_ms(started: float) -> int:
         return max(0, round((perf_counter() - started) * 1_000))
@@ -278,7 +382,17 @@ def build_solution_generator_from_env() -> SolutionGeneratorProtocol:
                 45.0,
             ),
         )
-        return FallbackSolutionGenerator(primary)
+        return FallbackSolutionGenerator(
+            primary,
+            verification_repair_enabled=_boolean_env(
+                "MATH_HARNESS_VERIFICATION_REPAIR",
+                True,
+            ),
+            verification_fallback_enabled=_boolean_env(
+                "MATH_HARNESS_VERIFICATION_FALLBACK",
+                True,
+            ),
+        )
     if provider == "mimo":
         from math_harness.providers.mimo import (
             DEFAULT_MIMO_BASE_URL,
@@ -305,7 +419,17 @@ def build_solution_generator_from_env() -> SolutionGeneratorProtocol:
                 60.0,
             ),
         )
-        return FallbackSolutionGenerator(primary)
+        return FallbackSolutionGenerator(
+            primary,
+            verification_repair_enabled=_boolean_env(
+                "MATH_HARNESS_VERIFICATION_REPAIR",
+                True,
+            ),
+            verification_fallback_enabled=_boolean_env(
+                "MATH_HARNESS_VERIFICATION_FALLBACK",
+                True,
+            ),
+        )
     raise ValueError("MATH_HARNESS_SOLVER must be 'sympy', 'openai', or 'mimo'")
 
 
@@ -320,3 +444,15 @@ def _positive_float_env(name: str, default: float) -> float:
     if value <= 0:
         raise ValueError(f"{name} must be a positive number")
     return value
+
+
+def _boolean_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean")

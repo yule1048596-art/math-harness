@@ -1,6 +1,6 @@
 # Math Harness
 
-一个面向数学专家成长的可运行原型。v0.3 已完成第一条可验证解题闭环：
+一个面向数学专家成长的可运行原型。v0.3.2 已完成第一条带自动恢复的可验证解题闭环：
 
 1. 创建彼此隔离的工作区；
 2. 录入题目、解答和可选的结构化数学表达式；
@@ -9,11 +9,13 @@
 5. 只有通过验证的方法才会自动晋级；
 6. 新题到来时只检索当前工作区已晋级的方法；
 7. 由离线 SymPy 或可选的结构化 LLM 生成候选解；
-8. 候选解必须经过独立验证器，不能由生成模型自行判定正确；
-9. 保存每次尝试的输入、检索方法、候选解、生成轨迹和验证报告；
-10. 根据已验证的结果更新实际使用方法的成功/失败计数；
-11. 以新记录保存人工纠正，不覆盖原始错误历史；
-12. 分别评测方法检索和端到端解题门禁，并保持工作区物理隔离。
+8. 先把模型常见数学记法规范化为安全解析器可接受的有限表达式；
+9. 候选解必须经过独立验证器，不能由生成模型自行判定正确；
+10. 验证失败时允许主模型根据确定性反馈纠正一次，再失败则交给 SymPy；
+11. 保存每次尝试的输入、检索方法、恢复路径、候选解、生成轨迹和验证报告；
+12. 根据已验证的结果更新实际使用方法的成功/失败计数；
+13. 以新记录保存人工纠正，不覆盖原始错误历史；
+14. 分别评测方法检索和端到端解题门禁，并保持工作区物理隔离。
 
 ## 快速开始
 
@@ -29,7 +31,7 @@ API 启动后可访问 `http://127.0.0.1:8000/docs`。
 
 ## 小米 MiMo 配置
 
-v0.3.1 原生支持小米 MiMo 的 OpenAI-compatible API。推荐从模板创建本地配置：
+v0.3.1 起原生支持小米 MiMo 的 OpenAI-compatible API。推荐从模板创建本地配置：
 
 ```bash
 cp .env.example .env
@@ -46,6 +48,8 @@ MATH_HARNESS_MIMO_BASE_URL=https://api.xiaomimimo.com/v1
 MATH_HARNESS_MIMO_MODEL=mimo-v2.5-pro
 MATH_HARNESS_MIMO_SOLVER_REASONING_EFFORT=none
 MATH_HARNESS_MIMO_TIMEOUT_SECONDS=60
+MATH_HARNESS_VERIFICATION_REPAIR=true
+MATH_HARNESS_VERIFICATION_FALLBACK=true
 ```
 
 服务启动时会自动加载 `.env`，但不会覆盖已在 Shell 中导出的变量。真实 `.env`
@@ -55,10 +59,16 @@ MATH_HARNESS_MIMO_TIMEOUT_SECONDS=60
 专用 Base URL。旧 MiMo V2 模型已经退役，新配置使用 `mimo-v2.5-pro`。
 
 MiMo 当前支持 Responses API 的 JSON Object 模式，但不保证严格符合业务 Schema。
-Harness 会在本地用 Pydantic 校验，失败时携带校验错误重试一次，再失败则回退到
-SymPy。真实数学烟雾测试中，默认 `none` 模式约 12 秒完成根式渐进展开并通过符号
-验证；困难题可以改为 `high`，同时在请求中设置 `max_output_tokens: 8000`，并将
-超时提高到约 180 秒。
+Harness 会在本地用 Pydantic 校验 JSON，失败时携带 Schema 错误重试一次。v0.3.2
+还会规范化最终数学表达式中的 Big-O、小写 `e`、`ln`、Unicode 运算符和 `^`；
+数学验证仍失败时，默认增加一次携带验证报告的模型纠错请求，再失败才使用 SymPy。
+若不希望产生额外模型费用，可把 `MATH_HARNESS_VERIFICATION_REPAIR` 设为 `false`；
+确定性回退也可独立关闭。
+
+真实 `mimo-v2.5-pro / none` 回归中，上一版原始自动验收为 `1/3` 的三道未见题在
+v0.3.2 达到 `3/3`：两题由 MiMo 首答或规范化直接通过；根式题的模型纠错仍失败，
+最终由明确标记的 SymPy 验证回退通过。困难题可以改为 `high`，同时在请求中设置
+`max_output_tokens: 8000`，并将超时提高到约 180 秒。
 
 官方资料：
 
@@ -76,6 +86,17 @@ SymPy。真实数学烟雾测试中，默认 `none` 模式约 12 秒完成根式
 
 生成器只提交候选答案；现有安全解析器和符号验证器拥有最终验收权。没有
 `math_target` 时，离线生成会明确记为 `generation_failed`，不会编造答案。
+
+启用 OpenAI-compatible 生成器时，默认恢复顺序为：
+
+1. 规范化 `answer_expression`，但不改写自然语言推导；
+2. 执行安全解析和确定性符号验证；
+3. 未通过时把候选解与验证报告交回主模型纠正一次；
+4. 纠正仍未通过时使用 SymPy 重新生成，并再次验证。
+
+生成轨迹会分别记录 `normalization_actions`、`correction_attempted`、
+`correction_succeeded`、`verification_fallback_used` 和恢复说明。人工纠正以及缺少
+`math_target` 的自然语言请求不会被自动恢复流程改写。
 
 ## 可选的 OpenAI 结构化组件
 
@@ -122,6 +143,7 @@ GPT-5.6 Sol/medium。两条路径都使用 OpenAI Responses API 的 Pydantic
 - `Mean Reciprocal Rank`
 - `Zero-result rate`
 - `Verified / needs-review / rejected / generation-failure rate`
+- `Fallback / correction-attempt / correction-success rate`
 
 当前 pilot 的 `top-3` 结果是学习前 Recall@K `0.0`、学习后 `1.0`。该数据集很小，
 且使用了清晰的人工标签。离线求解器可自动验证其中 5/6 个结构化案例；
@@ -162,6 +184,7 @@ GET    /workspaces/{id}/solve-evaluations
 - 表达式经过 AST 白名单解析，不执行任意 Python；
 - 每个工作区使用独立 SQLite 文件，并在每条记录上再次校验 `workspace_id`；
 - LLM 可以提取方法或生成候选解，但不负责给答案判真；验证器是独立信任边界；
+- 模型纠错最多额外产生一次 API 请求，可用环境变量关闭；所有回退都进入审计轨迹；
 - 目前检索器是词项与标签基线，尚未接入向量检索或数学结构检索；
 - 成功/失败计数是可审计的在线反馈，不是底层模型权重微调；
 - 离线求解器只覆盖有限的表达式等价与级数任务，不是通用定理证明器；

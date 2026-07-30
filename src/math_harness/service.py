@@ -39,6 +39,7 @@ from math_harness.models import (
     SolveEvaluationMetrics,
     SolveEvaluationRequest,
     SolveEvaluationRun,
+    SolveMathTarget,
     SolvePlan,
     SolveRequest,
     VerificationReport,
@@ -47,6 +48,7 @@ from math_harness.models import (
     WorkspaceCreate,
     utc_now,
 )
+from math_harness.normalization import CandidateSolutionNormalizer
 from math_harness.retrieval import MethodRetriever
 from math_harness.solving import (
     SolutionGeneratorProtocol,
@@ -64,6 +66,7 @@ class MathHarnessService:
         extractor: MethodExtractorProtocol | None = None,
         retriever: MethodRetriever | None = None,
         generator: SolutionGeneratorProtocol | None = None,
+        normalizer: CandidateSolutionNormalizer | None = None,
     ) -> None:
         load_local_environment()
         self.workspaces = WorkspaceManager(data_root)
@@ -71,6 +74,7 @@ class MathHarnessService:
         self.extractor = extractor or build_method_extractor_from_env()
         self.retriever = retriever or MethodRetriever()
         self.generator = generator or build_solution_generator_from_env()
+        self.normalizer = normalizer or CandidateSolutionNormalizer()
 
     def create_workspace(self, request: WorkspaceCreate) -> Workspace:
         return self.workspaces.create(request)
@@ -238,6 +242,7 @@ class MathHarnessService:
         correction_of: str | None = None,
         generation_result: SolutionGenerationResult | None = None,
     ) -> SolutionAttempt:
+        allow_automatic_recovery = generation_result is None
         matches = self.search_methods(
             workspace_id,
             request.problem,
@@ -246,10 +251,26 @@ class MathHarnessService:
         )
         if generation_result is None:
             generation_result = self._generate_candidate(request, matches)
-        generation_result = self._filter_unretrieved_method_keys(
-            generation_result, matches
-        )
+        if allow_automatic_recovery:
+            generation_result = self._prepare_generation_result(
+                generation_result,
+                matches,
+                request.math_target,
+            )
+        else:
+            generation_result = self._filter_unretrieved_method_keys(
+                generation_result,
+                matches,
+            )
         verification, status = self._verify_candidate(request, generation_result)
+        if allow_automatic_recovery:
+            generation_result, verification, status = self._recover_after_verification(
+                request,
+                matches,
+                generation_result,
+                verification,
+                status,
+            )
         return SolutionAttempt(
             id=str(uuid.uuid4()),
             workspace_id=workspace_id,
@@ -297,6 +318,193 @@ class MathHarnessService:
                     error=f"{exc.__class__.__name__}: {exc}"[:2_000],
                 ),
             )
+
+    def _prepare_generation_result(
+        self,
+        result: SolutionGenerationResult,
+        matches: list[MethodMatch],
+        math_target: SolveMathTarget | None,
+    ) -> SolutionGenerationResult:
+        result = self._filter_unretrieved_method_keys(result, matches)
+        if result.candidate is None:
+            return result
+
+        normalized = self.normalizer.normalize(result.candidate, math_target)
+        if not normalized.actions and normalized.candidate == result.candidate:
+            return result
+        actions = self._unique_strings(
+            [*result.trace.normalization_actions, *normalized.actions]
+        )
+        return result.model_copy(
+            update={
+                "candidate": normalized.candidate,
+                "trace": result.trace.model_copy(
+                    update={"normalization_actions": actions}
+                ),
+            }
+        )
+
+    def _recover_after_verification(
+        self,
+        request: SolveRequest,
+        matches: list[MethodMatch],
+        initial_result: SolutionGenerationResult,
+        initial_verification: VerificationReport,
+        initial_status: SolutionAttemptStatus,
+    ) -> tuple[
+        SolutionGenerationResult,
+        VerificationReport,
+        SolutionAttemptStatus,
+    ]:
+        if (
+            request.math_target is None
+            or initial_status is SolutionAttemptStatus.VERIFIED
+            or initial_result.candidate is None
+            or initial_result.trace.fallback_used
+        ):
+            return initial_result, initial_verification, initial_status
+
+        total_duration = initial_result.trace.duration_ms
+        recovery_notes = [
+            self._verification_note("initial_verification", initial_verification)
+        ]
+        normalization_actions = list(initial_result.trace.normalization_actions)
+        final_result = initial_result
+        final_verification = initial_verification
+        final_status = initial_status
+        correction_attempted = False
+        correction_error: str | None = None
+
+        repair = getattr(self.generator, "repair_after_verification", None)
+        if callable(repair):
+            corrected = repair(
+                request.problem,
+                matches,
+                request.math_target,
+                initial_result.candidate,
+                initial_verification,
+                request.max_output_tokens,
+            )
+            if corrected is not None:
+                correction_attempted = True
+                total_duration += corrected.trace.duration_ms
+                corrected = self._prepare_generation_result(
+                    corrected,
+                    matches,
+                    request.math_target,
+                )
+                normalization_actions.extend(corrected.trace.normalization_actions)
+                recovery_notes.extend(corrected.trace.recovery_notes)
+                correction_error = corrected.trace.error
+                if corrected.candidate is not None:
+                    corrected_verification, corrected_status = self._verify_candidate(
+                        request,
+                        corrected,
+                    )
+                    recovery_notes.append(
+                        self._verification_note(
+                            "correction_verification",
+                            corrected_verification,
+                        )
+                    )
+                    final_result = corrected
+                    final_verification = corrected_verification
+                    final_status = corrected_status
+                    if corrected_status is SolutionAttemptStatus.VERIFIED:
+                        final_result = corrected.model_copy(
+                            update={
+                                "trace": corrected.trace.model_copy(
+                                    update={
+                                        "correction_attempted": True,
+                                        "correction_succeeded": True,
+                                        "normalization_actions": self._unique_strings(
+                                            normalization_actions
+                                        ),
+                                        "recovery_notes": self._unique_strings(
+                                            recovery_notes
+                                        ),
+                                        "duration_ms": total_duration,
+                                    }
+                                )
+                            }
+                        )
+                        return (
+                            final_result,
+                            final_verification,
+                            final_status,
+                        )
+                else:
+                    recovery_notes.append("model_correction_returned_no_candidate")
+
+        fallback = getattr(self.generator, "fallback_after_verification", None)
+        if callable(fallback):
+            fallback_result = fallback(
+                request.problem,
+                matches,
+                request.math_target,
+                request.max_output_tokens,
+                final_verification,
+                correction_attempted=correction_attempted,
+                correction_error=correction_error,
+            )
+            if fallback_result is not None:
+                total_duration += fallback_result.trace.duration_ms
+                fallback_result = self._prepare_generation_result(
+                    fallback_result,
+                    matches,
+                    request.math_target,
+                )
+                normalization_actions.extend(
+                    fallback_result.trace.normalization_actions
+                )
+                recovery_notes.extend(fallback_result.trace.recovery_notes)
+                if fallback_result.candidate is not None:
+                    fallback_verification, fallback_status = self._verify_candidate(
+                        request,
+                        fallback_result,
+                    )
+                    recovery_notes.append(
+                        self._verification_note(
+                            "fallback_verification",
+                            fallback_verification,
+                        )
+                    )
+                    final_result = fallback_result
+                    final_verification = fallback_verification
+                    final_status = fallback_status
+                elif fallback_result.trace.error:
+                    recovery_notes.append(
+                        "verification_fallback_failed: "
+                        + fallback_result.trace.error[:500]
+                    )
+
+        final_result = final_result.model_copy(
+            update={
+                "trace": final_result.trace.model_copy(
+                    update={
+                        "correction_attempted": correction_attempted,
+                        "correction_succeeded": False,
+                        "normalization_actions": self._unique_strings(
+                            normalization_actions
+                        ),
+                        "recovery_notes": self._unique_strings(recovery_notes),
+                        "duration_ms": total_duration,
+                    }
+                )
+            }
+        )
+        return final_result, final_verification, final_status
+
+    @staticmethod
+    def _verification_note(
+        stage: str,
+        verification: VerificationReport,
+    ) -> str:
+        return (f"{stage}={verification.status.value}: {verification.summary}")[:1_000]
+
+    @staticmethod
+    def _unique_strings(values: list[str]) -> list[str]:
+        return list(dict.fromkeys(value for value in values if value))
 
     @staticmethod
     def _filter_unretrieved_method_keys(
@@ -526,6 +734,9 @@ class MathHarnessService:
                         attempt.candidate.used_method_keys if attempt.candidate else []
                     ),
                     generation_provider=attempt.generation.provider,
+                    fallback_used=attempt.generation.fallback_used,
+                    correction_attempted=attempt.generation.correction_attempted,
+                    correction_succeeded=attempt.generation.correction_succeeded,
                 )
             )
 
@@ -552,6 +763,18 @@ class MathHarnessService:
                 generation_failure_rate=self._status_rate(
                     case_results,
                     SolutionAttemptStatus.GENERATION_FAILED,
+                ),
+                fallback_rate=round(
+                    sum(case.fallback_used for case in case_results) / count,
+                    6,
+                ),
+                correction_attempt_rate=round(
+                    sum(case.correction_attempted for case in case_results) / count,
+                    6,
+                ),
+                correction_success_rate=round(
+                    sum(case.correction_succeeded for case in case_results) / count,
+                    6,
                 ),
             ),
             cases=case_results,
