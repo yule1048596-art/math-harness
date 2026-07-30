@@ -18,7 +18,12 @@ from math_harness.models import (
     MethodSearchRequest,
     MethodStatusUpdate,
     ProblemExample,
+    SolutionAttempt,
+    SolutionCorrection,
+    SolveEvaluationRequest,
+    SolveEvaluationRun,
     SolvePlan,
+    SolveRequest,
     Workspace,
     WorkspaceCreate,
 )
@@ -30,7 +35,7 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
     service = MathHarnessService(root)
     app = FastAPI(
         title="Math Harness",
-        version="0.2.1",
+        version="0.3.0",
         description="工作区隔离、可验证、可成长的数学 AI harness 原型。",
     )
     app.state.service = service
@@ -45,7 +50,7 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok", version="0.2.1")
+        return HealthResponse(status="ok", version="0.3.0")
 
     @app.post("/workspaces", response_model=Workspace, status_code=201)
     def create_workspace(request: WorkspaceCreate) -> Workspace:
@@ -133,6 +138,50 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
             top_k=request.top_k,
         )
 
+    @app.post(
+        "/workspaces/{workspace_id}/solve",
+        response_model=SolutionAttempt,
+        status_code=201,
+    )
+    def solve_problem(
+        workspace_id: str,
+        request: SolveRequest,
+    ) -> SolutionAttempt:
+        return service.solve_problem(workspace_id, request)
+
+    @app.get(
+        "/workspaces/{workspace_id}/attempts",
+        response_model=list[SolutionAttempt],
+    )
+    def list_solution_attempts(workspace_id: str) -> list[SolutionAttempt]:
+        return service.list_solution_attempts(workspace_id)
+
+    @app.get(
+        "/workspaces/{workspace_id}/attempts/{attempt_id}",
+        response_model=SolutionAttempt,
+    )
+    def get_solution_attempt(
+        workspace_id: str,
+        attempt_id: str,
+    ) -> SolutionAttempt:
+        return service.get_solution_attempt(workspace_id, attempt_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/attempts/{attempt_id}/corrections",
+        response_model=SolutionAttempt,
+        status_code=201,
+    )
+    def correct_solution_attempt(
+        workspace_id: str,
+        attempt_id: str,
+        request: SolutionCorrection,
+    ) -> SolutionAttempt:
+        return service.correct_solution_attempt(
+            workspace_id,
+            attempt_id,
+            request,
+        )
+
     @app.get(
         "/workspaces/{workspace_id}/learning-events",
         response_model=list[LearningEvent],
@@ -156,6 +205,26 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
     )
     def list_evaluations(workspace_id: str) -> list[EvaluationRun]:
         return service.list_evaluations(workspace_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/solve-evaluations",
+        response_model=SolveEvaluationRun,
+        status_code=201,
+    )
+    def evaluate_solver(
+        workspace_id: str,
+        request: SolveEvaluationRequest,
+    ) -> SolveEvaluationRun:
+        return service.evaluate_solver(workspace_id, request)
+
+    @app.get(
+        "/workspaces/{workspace_id}/solve-evaluations",
+        response_model=list[SolveEvaluationRun],
+    )
+    def list_solve_evaluations(
+        workspace_id: str,
+    ) -> list[SolveEvaluationRun]:
+        return service.list_solve_evaluations(workspace_id)
 
     return app
 

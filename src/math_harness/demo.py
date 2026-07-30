@@ -4,7 +4,13 @@ import argparse
 import json
 from pathlib import Path
 
-from math_harness.models import ExampleCreate, MathPayload, WorkspaceCreate
+from math_harness.models import (
+    ExampleCreate,
+    MathPayload,
+    SolveMathTarget,
+    SolveRequest,
+    WorkspaceCreate,
+)
 from math_harness.service import MathHarnessService
 
 
@@ -54,6 +60,19 @@ def main() -> None:
         "根式相减造成抵消时，怎样求无穷远处的渐进展开？",
         tags=["asymptotic", "radical"],
     )
+    attempt = service.solve_problem(
+        asymptotic.id,
+        SolveRequest(
+            problem="求 sqrt(x^2+x)-x 在 x→∞ 时到 O(x^-2) 的渐进展开",
+            tags=["asymptotic", "radical"],
+            math_target=SolveMathTarget(
+                expression="sqrt(x**2 + x) - x",
+                variable="x",
+                point="oo",
+                remainder_power=2,
+            ),
+        ),
+    )
 
     output = {
         "workspace": asymptotic.model_dump(mode="json"),
@@ -62,6 +81,7 @@ def main() -> None:
             method.model_dump(mode="json") for method in result.learned_methods
         ],
         "solve_plan": plan.model_dump(mode="json"),
+        "solution_attempt": attempt.model_dump(mode="json"),
         "isolation_check": {
             "other_workspace_id": unrelated.id,
             "other_workspace_examples": len(service.list_examples(unrelated.id)),

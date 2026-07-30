@@ -9,7 +9,7 @@ def test_api_vertical_slice(tmp_path):
     client = TestClient(create_app(tmp_path))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["version"] == "0.2.1"
+    assert response.json()["version"] == "0.3.0"
 
     response = client.post(
         "/workspaces",
@@ -50,6 +50,44 @@ def test_api_vertical_slice(tmp_path):
     assert response.json()["recommended_methods"]
 
     response = client.post(
+        f"/workspaces/{workspace_id}/solve",
+        json={
+            "problem": "求 sqrt(x^2+x)-x 在无穷远处的渐进展开",
+            "tags": ["radical", "cancellation"],
+            "top_k": 3,
+            "math_target": {
+                "expression": "sqrt(x**2 + x) - x",
+                "variable": "x",
+                "point": "oo",
+                "remainder_power": 2,
+            },
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["status"] == "verified"
+    attempt_id = response.json()["id"]
+
+    response = client.get(f"/workspaces/{workspace_id}/attempts/{attempt_id}")
+    assert response.status_code == 200
+    assert response.json()["generation"]["provider"] == "sympy"
+
+    response = client.post(
+        f"/workspaces/{workspace_id}/attempts/{attempt_id}/corrections",
+        json={
+            "answer_text": "人工确认答案为 1/2 - 1/(8*x)。",
+            "answer_expression": "1/2 - 1/(8*x)",
+            "reviewer_note": "API correction smoke test",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["status"] == "verified"
+    assert response.json()["correction_of"] == attempt_id
+
+    response = client.get(f"/workspaces/{workspace_id}/attempts")
+    assert response.status_code == 200
+    assert len(response.json()) == 2
+
+    response = client.post(
         f"/workspaces/{workspace_id}/evaluations",
         json={
             "name": "api-smoke",
@@ -70,6 +108,28 @@ def test_api_vertical_slice(tmp_path):
     response = client.get(f"/workspaces/{workspace_id}/evaluations")
     assert response.status_code == 200
     assert len(response.json()) == 1
+
+    response = client.post(
+        f"/workspaces/{workspace_id}/solve-evaluations",
+        json={
+            "name": "solve-api-smoke",
+            "top_k": 2,
+            "cases": [
+                {
+                    "id": "radical-solve",
+                    "problem": "根式相减的渐进展开",
+                    "tags": ["radical"],
+                    "math_target": {
+                        "expression": "sqrt(x**2 + x) - x",
+                        "point": "oo",
+                        "remainder_power": 2,
+                    },
+                }
+            ],
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["metrics"]["verified_rate"] == 1
 
     response = client.get(f"/workspaces/{workspace_id}/methods")
     method_id = next(
