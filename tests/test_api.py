@@ -7,6 +7,10 @@ from math_harness.api import create_app
 
 def test_api_vertical_slice(tmp_path):
     client = TestClient(create_app(tmp_path))
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["version"] == "0.2.1"
+
     response = client.post(
         "/workspaces",
         json={"name": "渐进估计", "description": "测试空间"},

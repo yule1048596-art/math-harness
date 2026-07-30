@@ -30,7 +30,7 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
     service = MathHarnessService(root)
     app = FastAPI(
         title="Math Harness",
-        version="0.2.0",
+        version="0.2.1",
         description="工作区隔离、可验证、可成长的数学 AI harness 原型。",
     )
     app.state.service = service
@@ -45,7 +45,7 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok", version="0.2.0")
+        return HealthResponse(status="ok", version="0.2.1")
 
     @app.post("/workspaces", response_model=Workspace, status_code=201)
     def create_workspace(request: WorkspaceCreate) -> Workspace:

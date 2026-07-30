@@ -127,3 +127,8 @@ GET    /workspaces/{id}/evaluations
 GitHub Actions 会在干净环境中重新测试和构建，并创建带 wheel、source
 distribution 和标准源码归档的 GitHub Release。完整步骤见
 [`RELEASING.md`](RELEASING.md)。
+
+## License
+
+本项目采用 [MIT License](LICENSE)，允许在保留版权和许可声明的前提下使用、
+复制、修改、合并、发布、分发、再许可和销售本软件。
