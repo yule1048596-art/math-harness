@@ -4,6 +4,8 @@ import json
 from time import perf_counter
 from typing import Any
 
+from pydantic import ValidationError
+
 from math_harness.models import (
     CandidateSolution,
     GenerationStatus,
@@ -49,6 +51,11 @@ class OpenAISolutionGenerator:
         model: str = "gpt-5.6-sol",
         reasoning_effort: str = "medium",
         timeout_seconds: float = 45.0,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        provider_name: str = "openai",
+        structured_output_mode: str = "json_schema",
+        json_object_retries: int = 0,
         client: Any | None = None,
     ) -> None:
         allowed_efforts = {"none", "low", "medium", "high", "xhigh"}
@@ -58,9 +65,20 @@ class OpenAISolutionGenerator:
             )
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if structured_output_mode not in {"json_schema", "json_object"}:
+            raise ValueError(
+                "structured_output_mode must be 'json_schema' or 'json_object'"
+            )
+        if not 0 <= json_object_retries <= 2:
+            raise ValueError("json_object_retries must be between 0 and 2")
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.timeout_seconds = timeout_seconds
+        self.api_key = api_key
+        self.base_url = base_url
+        self.name = provider_name
+        self.structured_output_mode = structured_output_mode
+        self.json_object_retries = json_object_retries
         self._client = client
 
     def _client_or_create(self) -> Any:
@@ -71,7 +89,12 @@ class OpenAISolutionGenerator:
                 raise RuntimeError(
                     "OpenAI solving requires the optional 'llm' dependency"
                 ) from exc
-            self._client = OpenAI(timeout=self.timeout_seconds)
+            options: dict[str, Any] = {"timeout": self.timeout_seconds}
+            if self.api_key:
+                options["api_key"] = self.api_key
+            if self.base_url:
+                options["base_url"] = self.base_url
+            self._client = OpenAI(**options)
         return self._client
 
     def generate(
@@ -104,25 +127,63 @@ class OpenAISolutionGenerator:
             },
             ensure_ascii=False,
         )
-        response = self._client_or_create().responses.parse(
-            model=self.model,
-            input=[
+        user_content = "Solve the mathematical source JSON:\n" + source
+        client = self._client_or_create()
+        common_options = {
+            "model": self.model,
+            "input": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": "Solve the mathematical source JSON:\n" + source,
-                },
+                {"role": "user", "content": user_content},
             ],
-            text_format=CandidateSolution,
-            reasoning={"effort": self.reasoning_effort},
-            max_output_tokens=max_output_tokens,
-            store=False,
-        )
-        parsed = getattr(response, "output_parsed", None)
-        if parsed is None:
-            raise RuntimeError("OpenAI response did not contain parsed output")
-        if not isinstance(parsed, CandidateSolution):
-            parsed = CandidateSolution.model_validate(parsed)
+            "reasoning": {"effort": self.reasoning_effort},
+            "max_output_tokens": max_output_tokens,
+            "store": False,
+        }
+        if self.structured_output_mode == "json_schema":
+            response = client.responses.parse(
+                **common_options,
+                text_format=CandidateSolution,
+            )
+            parsed = getattr(response, "output_parsed", None)
+            if parsed is None:
+                raise RuntimeError("OpenAI response did not contain parsed output")
+            if not isinstance(parsed, CandidateSolution):
+                parsed = CandidateSolution.model_validate(parsed)
+        else:
+            base_content = common_options["input"][1]["content"] + (
+                "\nReturn only one JSON object matching this JSON Schema:\n"
+                + json.dumps(
+                    CandidateSolution.model_json_schema(),
+                    ensure_ascii=False,
+                )
+            )
+            common_options["input"][1]["content"] = base_content
+            for attempt in range(self.json_object_retries + 1):
+                response = client.responses.create(
+                    **common_options,
+                    text={"format": {"type": "json_object"}},
+                )
+                output_text = getattr(response, "output_text", None)
+                if not output_text:
+                    raise RuntimeError(
+                        "compatible response did not contain output text"
+                    )
+                try:
+                    parsed = CandidateSolution.model_validate_json(output_text)
+                    break
+                except ValidationError as exc:
+                    if attempt >= self.json_object_retries:
+                        raise
+                    common_options["input"][1]["content"] = (
+                        base_content
+                        + "\nThe previous JSON failed local schema validation. "
+                        "Correct these errors and return the complete object:\n"
+                        + json.dumps(
+                            exc.errors(include_input=False, include_url=False),
+                            ensure_ascii=False,
+                            default=str,
+                        )
+                    )
 
         raw_output = getattr(response, "output_text", None)
         if not raw_output:

@@ -27,6 +27,45 @@ uv run --no-editable uvicorn math_harness.api:app --reload
 
 API 启动后可访问 `http://127.0.0.1:8000/docs`。
 
+## 小米 MiMo 配置
+
+v0.3.1 原生支持小米 MiMo 的 OpenAI-compatible API。推荐从模板创建本地配置：
+
+```bash
+cp .env.example .env
+uv sync --no-editable --extra dev --extra llm
+```
+
+然后在 `.env` 中填写：
+
+```dotenv
+MATH_HARNESS_METHOD_EXTRACTOR=rules
+MATH_HARNESS_SOLVER=mimo
+MIMO_API_KEY=your-mimo-key
+MATH_HARNESS_MIMO_BASE_URL=https://api.xiaomimimo.com/v1
+MATH_HARNESS_MIMO_MODEL=mimo-v2.5-pro
+MATH_HARNESS_MIMO_SOLVER_REASONING_EFFORT=none
+MATH_HARNESS_MIMO_TIMEOUT_SECONDS=60
+```
+
+服务启动时会自动加载 `.env`，但不会覆盖已在 Shell 中导出的变量。真实 `.env`
+已被 Git 忽略；不要把密钥写进 `.env.example`、源码、测试或提交记录。
+
+`sk-` 密钥使用上面的按量 Base URL；`tp-` Token Plan 密钥应使用订阅页面提供的
+专用 Base URL。旧 MiMo V2 模型已经退役，新配置使用 `mimo-v2.5-pro`。
+
+MiMo 当前支持 Responses API 的 JSON Object 模式，但不保证严格符合业务 Schema。
+Harness 会在本地用 Pydantic 校验，失败时携带校验错误重试一次，再失败则回退到
+SymPy。真实数学烟雾测试中，默认 `none` 模式约 12 秒完成根式渐进展开并通过符号
+验证；困难题可以改为 `high`，同时在请求中设置 `max_output_tokens: 8000`，并将
+超时提高到约 180 秒。
+
+官方资料：
+
+- [MiMo Responses API](https://mimo.mi.com/docs/en-US/api/chat/responses)
+- [MiMo 模型选择](https://mimo.mi.com/docs/quick-start/summary/model)
+- [MiMo 工具与 Base URL 配置](https://mimo.mi.com/docs/integration/tools-overview)
+
 ## 候选解生成器
 
 默认生成器是完全离线的 SymPy 实现，不需要密钥。它接受 `math_target`，支持：
@@ -71,7 +110,7 @@ GPT-5.6 Sol/medium。两条路径都使用 OpenAI Responses API 的 Pydantic
 - [Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
 - [GPT-5.6 model guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.6)
 
-密钥只从环境读取，不要写入仓库。
+密钥只从环境或本地 `.env` 读取，不要写入仓库。
 
 ## 成长评测
 

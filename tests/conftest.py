@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from math_harness.models import ExampleCreate, MathPayload
+
+# Local developer .env files may select a billable provider. Tests always start
+# from deterministic offline defaults; individual tests opt into providers with
+# monkeypatch.
+os.environ["MATH_HARNESS_METHOD_EXTRACTOR"] = "rules"
+os.environ["MATH_HARNESS_SOLVER"] = "sympy"
 
 
 @pytest.fixture

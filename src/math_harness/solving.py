@@ -279,7 +279,34 @@ def build_solution_generator_from_env() -> SolutionGeneratorProtocol:
             ),
         )
         return FallbackSolutionGenerator(primary)
-    raise ValueError("MATH_HARNESS_SOLVER must be either 'sympy' or 'openai'")
+    if provider == "mimo":
+        from math_harness.providers.mimo import (
+            DEFAULT_MIMO_BASE_URL,
+            DEFAULT_MIMO_MODEL,
+            MiMoSolutionGenerator,
+        )
+
+        primary = MiMoSolutionGenerator(
+            api_key=os.getenv("MIMO_API_KEY"),
+            base_url=os.getenv(
+                "MATH_HARNESS_MIMO_BASE_URL",
+                DEFAULT_MIMO_BASE_URL,
+            ),
+            model=os.getenv(
+                "MATH_HARNESS_MIMO_MODEL",
+                DEFAULT_MIMO_MODEL,
+            ),
+            reasoning_effort=os.getenv(
+                "MATH_HARNESS_MIMO_SOLVER_REASONING_EFFORT",
+                "none",
+            ),
+            timeout_seconds=_positive_float_env(
+                "MATH_HARNESS_MIMO_TIMEOUT_SECONDS",
+                60.0,
+            ),
+        )
+        return FallbackSolutionGenerator(primary)
+    raise ValueError("MATH_HARNESS_SOLVER must be 'sympy', 'openai', or 'mimo'")
 
 
 def _positive_float_env(name: str, default: float) -> float:
