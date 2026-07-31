@@ -21,6 +21,7 @@ def test_growth_evaluation_improves_on_pilot_holdout(tmp_path):
         train_path=PROJECT_ROOT / "data/pilot/asymptotic_train.jsonl",
         holdout_path=PROJECT_ROOT / "data/pilot/asymptotic_holdout.jsonl",
         top_k=3,
+        solve_holdout_path=(PROJECT_ROOT / "data/pilot/asymptotic_solve_holdout.jsonl"),
     )
 
     assert report["learning"]["verified_examples"] == 6
@@ -29,8 +30,10 @@ def test_growth_evaluation_improves_on_pilot_holdout(tmp_path):
     assert report["after"]["mean_reciprocal_rank"] > 0
     assert report["after"]["zero_result_rate"] == 0
     assert report["solve_gate"]["case_count"] == 6
-    assert report["solve_gate"]["verified_rate"] == 0.833333
-    assert report["solve_gate"]["generation_failure_rate"] == 0.166667
+    assert report["dataset"]["solve_holdout_cases"] == 6
+    assert report["solve_gate"]["verified_rate"] == 0.666667
+    assert report["solve_gate"]["needs_review_rate"] == 0.333333
+    assert report["solve_gate"]["generation_failure_rate"] == 0
 
 
 def test_evaluations_and_manual_status_changes_are_audited(

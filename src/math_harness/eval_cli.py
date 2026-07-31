@@ -12,7 +12,6 @@ from math_harness.models import (
     ExampleCreate,
     SolveEvaluationCase,
     SolveEvaluationRequest,
-    SolveMathTarget,
     WorkspaceCreate,
 )
 from math_harness.service import MathHarnessService
@@ -39,6 +38,7 @@ def run_growth_evaluation(
     train_path: Path,
     holdout_path: Path,
     top_k: int,
+    solve_holdout_path: Path | None = None,
 ) -> dict[str, object]:
     service = MathHarnessService(data_root)
     workspace = service.create_workspace(
@@ -49,6 +49,11 @@ def run_growth_evaluation(
     )
     cases = _load_jsonl(holdout_path, EvaluationCase)
     training_examples = _load_jsonl(train_path, ExampleCreate)
+    solve_cases = (
+        _load_jsonl(solve_holdout_path, SolveEvaluationCase)
+        if solve_holdout_path is not None
+        else []
+    )
 
     baseline = service.evaluate_workspace(
         workspace.id,
@@ -61,23 +66,11 @@ def run_growth_evaluation(
         workspace.id,
         EvaluationRequest(name="after_learning", cases=cases, top_k=top_k),
     )
-    solve_cases = [
-        SolveEvaluationCase(
-            id=f"training-solve-{index}",
-            problem=example.problem,
-            tags=example.tags,
-            math_target=SolveMathTarget.model_validate(
-                example.math_payload.model_dump(exclude={"expected"})
-            ),
-        )
-        for index, example in enumerate(training_examples, start=1)
-        if example.math_payload is not None
-    ]
     solve_gate = (
         service.evaluate_solver(
             workspace.id,
             SolveEvaluationRequest(
-                name="offline_solution_gate",
+                name="heldout_solution_gate",
                 cases=solve_cases,
                 top_k=top_k,
             ),
@@ -103,6 +96,10 @@ def run_growth_evaluation(
             "holdout_path": str(holdout_path.resolve()),
             "training_examples": len(training_examples),
             "holdout_cases": len(cases),
+            "solve_holdout_path": (
+                str(solve_holdout_path.resolve()) if solve_holdout_path else None
+            ),
+            "solve_holdout_cases": len(solve_cases),
         },
         "learning": {
             "verified_examples": verified_count,
@@ -151,6 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/pilot/asymptotic_holdout.jsonl"),
     )
+    parser.add_argument(
+        "--solve-holdout",
+        type=Path,
+        default=Path("data/pilot/asymptotic_solve_holdout.jsonl"),
+    )
     parser.add_argument("--top-k", type=int, default=3, choices=range(1, 21))
     return parser
 
@@ -162,6 +164,7 @@ def main() -> None:
         train_path=args.train,
         holdout_path=args.holdout,
         top_k=args.top_k,
+        solve_holdout_path=args.solve_holdout,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

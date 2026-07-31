@@ -6,18 +6,28 @@ from typing import Protocol
 
 import sympy as sp
 
-from math_harness.math_parser import SafeMathParser
+from math_harness.math_parser import SafeMathParser, build_symbol_table
 from math_harness.models import (
+    AnswerKind,
     CandidateSolution,
     CandidateStep,
+    GenerationStageKind,
     GenerationStatus,
     MethodMatch,
     SolutionGenerationResult,
+    SolutionGenerationStage,
     SolutionGenerationTrace,
     SolveMathTarget,
     VerificationMode,
     VerificationReport,
 )
+
+
+class _NonExpressionOutcome(Exception):
+    def __init__(self, answer_kind: AnswerKind, message: str) -> None:
+        super().__init__(message)
+        self.answer_kind = answer_kind
+        self.message = message
 
 
 class SolutionGeneratorProtocol(Protocol):
@@ -57,24 +67,61 @@ class OfflineSympySolutionGenerator:
             )
 
         try:
-            symbol_names = {math_target.variable, *math_target.parameters}
-            expression = self.parser.parse(math_target.expression, symbol_names)
-            variable = sp.Symbol(math_target.variable)
-            point = self._parse_point(math_target.point, symbol_names)
+            symbols = build_symbol_table(
+                math_target.variable,
+                math_target.parameters,
+                math_target.assumptions,
+            )
+            expression = self.parser.parse(math_target.expression, symbols)
+            variable = symbols[math_target.variable]
+            point = self._parse_point(math_target.point, symbols)
             answer = self._solve(expression, variable, point, math_target)
             answer_expression = sp.sstr(answer)
+            self.parser.parse(answer_expression, symbols)
+        except _NonExpressionOutcome as outcome:
+            candidate = CandidateSolution(
+                answer_kind=outcome.answer_kind,
+                answer_text=outcome.message,
+                answer_expression=None,
+                steps=[
+                    CandidateStep(
+                        explanation=(
+                            "符号后端没有产生可由当前安全表达式语言验收的单一结果。"
+                        ),
+                        expression=None,
+                    )
+                ],
+                used_method_keys=[],
+                assumptions=[
+                    f"{math_target.variable} → {math_target.point}",
+                    *(
+                        ["参数：" + ", ".join(math_target.parameters)]
+                        if math_target.parameters
+                        else []
+                    ),
+                ],
+                confidence=0.4,
+            )
+            return SolutionGenerationResult(
+                candidate=candidate,
+                trace=SolutionGenerationTrace(
+                    provider=self.name,
+                    prompt_version=self.prompt_version,
+                    status=GenerationStatus.SUCCESS,
+                    method_feedback_eligible=False,
+                    raw_output=candidate.model_dump_json()[:8_000],
+                    duration_ms=self._duration_ms(started),
+                ),
+            )
         except Exception as exc:  # noqa: BLE001
             return self._failure(
                 f"{exc.__class__.__name__}: {exc}",
                 started,
             )
 
-        used_method_keys = [match.method.key for match in methods[:3]]
-        method_step = (
-            "参考已检索的方法卡：" + "、".join(used_method_keys) + "。"
-            if used_method_keys
-            else "当前工作区没有可用的方法卡，使用安全符号计算生成候选式。"
-        )
+        del methods
+        used_method_keys: list[str] = []
+        method_step = "使用安全符号计算生成兜底候选式；该步骤不参与方法卡成败反馈。"
         candidate = CandidateSolution(
             answer_text=f"候选答案：{answer_expression}",
             answer_expression=answer_expression,
@@ -107,6 +154,7 @@ class OfflineSympySolutionGenerator:
                 provider=self.name,
                 prompt_version=self.prompt_version,
                 status=GenerationStatus.SUCCESS,
+                method_feedback_eligible=False,
                 raw_output=candidate.model_dump_json()[:8_000],
                 duration_ms=self._duration_ms(started),
             ),
@@ -120,9 +168,48 @@ class OfflineSympySolutionGenerator:
         target: SolveMathTarget,
     ) -> sp.Expr:
         if target.mode is VerificationMode.EXACT_EQUIVALENCE:
-            return sp.simplify(expression)
+            simplified = sp.simplify(expression)
+            try:
+                original_domain = sp.calculus.util.continuous_domain(
+                    expression,
+                    variable,
+                    sp.S.Reals,
+                )
+                simplified_domain = sp.calculus.util.continuous_domain(
+                    simplified,
+                    variable,
+                    sp.S.Reals,
+                )
+            except (NotImplementedError, ValueError) as exc:
+                raise _NonExpressionOutcome(
+                    AnswerKind.CONDITIONAL,
+                    "精确化简的定义域无法自动判定，需要人工复核。",
+                ) from exc
+            if original_domain != simplified_domain:
+                raise _NonExpressionOutcome(
+                    AnswerKind.CONDITIONAL,
+                    (
+                        "化简会改变原表达式的定义域，不能把化简式作为全域上的"
+                        "完全相同结果。"
+                    ),
+                )
+            return simplified
+        if target.mode is VerificationMode.LIMIT:
+            value = self._limit(expression, variable, point, target)
+            if value.has(sp.AccumBounds) or isinstance(value, sp.Limit):
+                raise _NonExpressionOutcome(
+                    AnswerKind.NO_LIMIT,
+                    "符号后端没有得到单一极限值，需要人工复核。",
+                )
+            return value
         if target.mode is VerificationMode.ASYMPTOTIC_EQUIVALENCE:
-            return sp.simplify(self._leading_term(expression, variable, point))
+            leading = sp.simplify(self._leading_term(expression, variable, point))
+            if leading.has(sp.AccumBounds):
+                raise _NonExpressionOutcome(
+                    AnswerKind.NO_EQUIVALENT,
+                    "符号后端检测到持续振荡，未得到单一的非零渐进等价式。",
+                )
+            return leading
         if target.remainder_power is None:
             raise ValueError("渐进展开需要 remainder_power")
         return sp.simplify(
@@ -133,6 +220,25 @@ class OfflineSympySolutionGenerator:
                 target.remainder_power,
             ).removeO()
         )
+
+    @staticmethod
+    def _limit(
+        expression: sp.Expr,
+        variable: sp.Symbol,
+        point: sp.Expr,
+        target: SolveMathTarget,
+    ) -> sp.Expr:
+        if point == sp.oo:
+            direction = "-"
+        elif point == -sp.oo:
+            direction = "+"
+        else:
+            direction = {
+                "two_sided": "+-",
+                "left": "-",
+                "right": "+",
+            }[target.direction.value]
+        return sp.limit(expression, variable, point, dir=direction)
 
     def _leading_term(
         self,
@@ -153,13 +259,17 @@ class OfflineSympySolutionGenerator:
         leading = transformed.as_leading_term(local)
         return leading.subs(local, variable - point)
 
-    def _parse_point(self, text: str, symbol_names: set[str]) -> sp.Expr:
+    def _parse_point(
+        self,
+        text: str,
+        symbols: dict[str, sp.Symbol],
+    ) -> sp.Expr:
         normalized = text.strip()
         if normalized in {"oo", "+oo", "infinity", "+infinity"}:
             return sp.oo
         if normalized in {"-oo", "-infinity"}:
             return -sp.oo
-        return self.parser.parse(normalized, symbol_names)
+        return self.parser.parse(normalized, symbols)
 
     def _failure(self, error: str, started: float) -> SolutionGenerationResult:
         return SolutionGenerationResult(
@@ -218,6 +328,16 @@ class FallbackSolutionGenerator:
             )
         except Exception as exc:  # noqa: BLE001
             primary_error = f"{exc.__class__.__name__}: {exc}"
+            primary_result = SolutionGenerationResult(
+                candidate=None,
+                trace=SolutionGenerationTrace(
+                    provider=self.primary.name,
+                    model=getattr(self.primary, "model", None),
+                    prompt_version=self.prompt_version,
+                    status=GenerationStatus.ERROR,
+                    error=primary_error[:2_000],
+                ),
+            )
 
         fallback_result = self.fallback.generate(
             problem,
@@ -225,6 +345,16 @@ class FallbackSolutionGenerator:
             math_target,
             max_output_tokens,
         )
+        stages = [
+            *(
+                primary_result.trace.stages
+                or [self._stage(GenerationStageKind.INITIAL, primary_result)]
+            ),
+            *(
+                fallback_result.trace.stages
+                or [self._stage(GenerationStageKind.FALLBACK, fallback_result)]
+            ),
+        ]
         if fallback_result.candidate is None:
             return fallback_result.model_copy(
                 update={
@@ -233,6 +363,8 @@ class FallbackSolutionGenerator:
                             "provider": self.name,
                             "model": getattr(self.primary, "model", None),
                             "fallback_used": True,
+                            "method_feedback_eligible": False,
+                            "stages": stages,
                             "error": (
                                 f"primary: {primary_error}; "
                                 f"fallback: {fallback_result.trace.error}"
@@ -251,6 +383,8 @@ class FallbackSolutionGenerator:
                         "prompt_version": self.prompt_version,
                         "status": GenerationStatus.FALLBACK,
                         "fallback_used": True,
+                        "method_feedback_eligible": False,
+                        "stages": stages,
                         "error": primary_error[:2_000],
                         "duration_ms": self._duration_ms(started),
                     }
@@ -348,6 +482,7 @@ class FallbackSolutionGenerator:
                         "verification_fallback_used": True,
                         "correction_attempted": correction_attempted,
                         "correction_succeeded": False,
+                        "method_feedback_eligible": False,
                         "recovery_notes": ["sympy_verification_fallback"],
                         "error": "; ".join(errors)[:2_000],
                         "duration_ms": self._duration_ms(started),
@@ -359,6 +494,25 @@ class FallbackSolutionGenerator:
     @staticmethod
     def _duration_ms(started: float) -> int:
         return max(0, round((perf_counter() - started) * 1_000))
+
+    @staticmethod
+    def _stage(
+        stage: GenerationStageKind,
+        result: SolutionGenerationResult,
+    ) -> SolutionGenerationStage:
+        trace = result.trace
+        return SolutionGenerationStage(
+            stage=stage,
+            provider=trace.provider,
+            model=trace.model,
+            response_id=trace.response_id,
+            prompt_version=trace.prompt_version,
+            status=trace.status,
+            candidate=result.candidate,
+            raw_output=trace.raw_output,
+            error=trace.error,
+            duration_ms=trace.duration_ms,
+        )
 
 
 def build_solution_generator_from_env() -> SolutionGeneratorProtocol:

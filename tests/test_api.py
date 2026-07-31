@@ -9,7 +9,7 @@ def test_api_vertical_slice(tmp_path):
     client = TestClient(create_app(tmp_path))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["version"] == "0.3.2"
+    assert response.json()["version"] == "0.3.3"
 
     response = client.post(
         "/workspaces",
@@ -24,6 +24,7 @@ def test_api_vertical_slice(tmp_path):
             "problem": "求 x→∞ 时 sqrt(x^2+x)-x 的渐进展开到 O(x^-2)",
             "solution": "先有理化，再令 t=1/x，并做泰勒展开。",
             "tags": ["渐进估计", "根式"],
+            "reviewed": True,
             "math_payload": {
                 "expression": "sqrt(x**2 + x) - x",
                 "expected": "1/2 - 1/(8*x)",

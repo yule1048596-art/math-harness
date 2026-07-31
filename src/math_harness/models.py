@@ -48,6 +48,30 @@ class VerificationMode(StrEnum):
     ASYMPTOTIC_EXPANSION = "asymptotic_expansion"
     ASYMPTOTIC_EQUIVALENCE = "asymptotic_equivalence"
     EXACT_EQUIVALENCE = "exact_equivalence"
+    LIMIT = "limit"
+
+
+class ApproachDirection(StrEnum):
+    TWO_SIDED = "two_sided"
+    LEFT = "left"
+    RIGHT = "right"
+
+
+class SymbolProperty(StrEnum):
+    REAL = "real"
+    POSITIVE = "positive"
+    NEGATIVE = "negative"
+    NONZERO = "nonzero"
+    INTEGER = "integer"
+    NONNEGATIVE = "nonnegative"
+    NONPOSITIVE = "nonpositive"
+
+
+class AnswerKind(StrEnum):
+    EXPRESSION = "expression"
+    NO_EQUIVALENT = "no_equivalent"
+    NO_LIMIT = "no_limit"
+    CONDITIONAL = "conditional"
 
 
 class ExtractionStatus(StrEnum):
@@ -99,7 +123,12 @@ class SolveMathTarget(BaseModel):
     expression: str = Field(min_length=1, max_length=1000)
     variable: str = "x"
     parameters: list[str] = Field(default_factory=list, max_length=12)
+    assumptions: dict[str, list[SymbolProperty]] = Field(
+        default_factory=dict,
+        max_length=13,
+    )
     point: str = "oo"
+    direction: ApproachDirection = ApproachDirection.TWO_SIDED
     mode: VerificationMode = VerificationMode.ASYMPTOTIC_EXPANSION
     remainder_power: int | None = Field(default=None, ge=1, le=50)
 
@@ -119,6 +148,32 @@ class SolveMathTarget(BaseModel):
             raise ValueError("parameters must be simple ASCII symbol names")
         return values
 
+    @model_validator(mode="after")
+    def validate_assumptions(self) -> SolveMathTarget:
+        if self.variable in self.parameters:
+            raise ValueError("variable cannot also be listed as a parameter")
+        allowed_symbols = {self.variable, *self.parameters}
+        unknown_symbols = set(self.assumptions) - allowed_symbols
+        if unknown_symbols:
+            raise ValueError(
+                "assumptions contain undeclared symbols: "
+                + ", ".join(sorted(unknown_symbols))
+            )
+
+        contradictory_pairs = (
+            {SymbolProperty.POSITIVE, SymbolProperty.NEGATIVE},
+            {SymbolProperty.POSITIVE, SymbolProperty.NONPOSITIVE},
+            {SymbolProperty.NEGATIVE, SymbolProperty.NONNEGATIVE},
+            {SymbolProperty.NONNEGATIVE, SymbolProperty.NONPOSITIVE},
+        )
+        for symbol, values in self.assumptions.items():
+            if len(values) != len(set(values)):
+                raise ValueError(f"assumptions for {symbol} must be unique")
+            value_set = set(values)
+            if any(pair <= value_set for pair in contradictory_pairs):
+                raise ValueError(f"assumptions for {symbol} are contradictory")
+        return self
+
 
 class MathPayload(SolveMathTarget):
     """Deterministic verification input.
@@ -136,6 +191,7 @@ class ExampleCreate(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=30)
     method_hint: str | None = Field(default=None, max_length=200)
     math_payload: MathPayload | None = None
+    reviewed: bool = False
 
     @field_validator("tags")
     @classmethod
@@ -179,6 +235,7 @@ class ProblemExample(BaseModel):
     solution: str
     tags: list[str]
     method_hint: str | None = None
+    reviewed: bool = False
     problem_kind: ProblemKind
     math_payload: MathPayload | None = None
     verification: VerificationReport
@@ -296,6 +353,7 @@ class CandidateStep(BaseModel):
 class CandidateSolution(BaseModel):
     """Public, concise derivation returned by a solution generator."""
 
+    answer_kind: AnswerKind = AnswerKind.EXPRESSION
     answer_text: str = Field(min_length=1, max_length=40_000)
     answer_expression: str | None = Field(max_length=1_000)
     steps: list[CandidateStep] = Field(max_length=30)
@@ -315,6 +373,38 @@ class CandidateSolution(BaseModel):
                 seen.add(key)
         return normalized
 
+    @model_validator(mode="after")
+    def validate_answer_kind(self) -> CandidateSolution:
+        if (
+            self.answer_kind is not AnswerKind.EXPRESSION
+            and self.answer_expression is not None
+        ):
+            raise ValueError(
+                "non-expression answer kinds cannot contain answer_expression"
+            )
+        return self
+
+
+class GenerationStageKind(StrEnum):
+    INITIAL = "initial"
+    CORRECTION = "correction"
+    FALLBACK = "fallback"
+    HUMAN = "human"
+
+
+class SolutionGenerationStage(BaseModel):
+    stage: GenerationStageKind
+    provider: str = Field(min_length=1, max_length=120)
+    model: str | None = Field(default=None, max_length=120)
+    response_id: str | None = Field(default=None, max_length=200)
+    prompt_version: str = Field(min_length=1, max_length=80)
+    status: GenerationStatus
+    candidate: CandidateSolution | None = None
+    verification: VerificationReport | None = None
+    raw_output: str | None = Field(default=None, max_length=8_000)
+    error: str | None = Field(default=None, max_length=2_000)
+    duration_ms: int = Field(default=0, ge=0)
+
 
 class SolutionGenerationTrace(BaseModel):
     provider: str = Field(min_length=1, max_length=120)
@@ -326,8 +416,10 @@ class SolutionGenerationTrace(BaseModel):
     verification_fallback_used: bool = False
     correction_attempted: bool = False
     correction_succeeded: bool = False
+    method_feedback_eligible: bool = True
     normalization_actions: list[str] = Field(default_factory=list, max_length=20)
     recovery_notes: list[str] = Field(default_factory=list, max_length=20)
+    stages: list[SolutionGenerationStage] = Field(default_factory=list, max_length=10)
     raw_output: str | None = Field(default=None, max_length=8_000)
     error: str | None = Field(default=None, max_length=2_000)
     duration_ms: int = Field(default=0, ge=0)
@@ -350,6 +442,7 @@ class SolutionAttempt(BaseModel):
     generation: SolutionGenerationTrace
     verification: VerificationReport
     status: SolutionAttemptStatus
+    feedback_method_keys: list[str] = Field(default_factory=list, max_length=20)
     correction_of: str | None = None
     created_at: datetime
 
@@ -377,10 +470,19 @@ class SolutionAttempt(BaseModel):
         allowed_keys = {match.method.key for match in self.recommended_methods}
         if self.candidate and not set(self.candidate.used_method_keys) <= allowed_keys:
             raise ValueError("used methods must come from this attempt's retrieval")
+        if self.candidate is None and self.feedback_method_keys:
+            raise ValueError("attempt without a candidate cannot credit methods")
+        if self.candidate and not set(self.feedback_method_keys) <= set(
+            self.candidate.used_method_keys
+        ):
+            raise ValueError("feedback methods must be used by the final candidate")
+        if not self.generation.method_feedback_eligible and self.feedback_method_keys:
+            raise ValueError("ineligible generation cannot credit methods")
         return self
 
 
 class SolutionCorrection(BaseModel):
+    answer_kind: AnswerKind = AnswerKind.EXPRESSION
     answer_text: str = Field(min_length=1, max_length=40_000)
     answer_expression: str | None = Field(default=None, max_length=1_000)
     steps: list[CandidateStep] = Field(default_factory=list, max_length=30)
@@ -403,6 +505,17 @@ class SolutionCorrection(BaseModel):
                 normalized.append(key)
                 seen.add(key)
         return normalized
+
+    @model_validator(mode="after")
+    def validate_answer_kind(self) -> SolutionCorrection:
+        if (
+            self.answer_kind is not AnswerKind.EXPRESSION
+            and self.answer_expression is not None
+        ):
+            raise ValueError(
+                "non-expression answer kinds cannot contain answer_expression"
+            )
+        return self
 
 
 class MethodStatusUpdate(BaseModel):
@@ -497,6 +610,7 @@ class SolveEvaluationCaseResult(BaseModel):
     verification_status: VerificationStatus
     retrieved_method_keys: list[str]
     used_method_keys: list[str]
+    feedback_method_keys: list[str] = Field(default_factory=list)
     generation_provider: str
     fallback_used: bool = False
     correction_attempted: bool = False

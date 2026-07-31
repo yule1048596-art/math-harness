@@ -154,6 +154,7 @@ class WorkspaceStore:
                     solution TEXT NOT NULL,
                     tags_json TEXT NOT NULL,
                     method_hint TEXT,
+                    reviewed INTEGER NOT NULL DEFAULT 0,
                     problem_kind TEXT NOT NULL,
                     math_payload_json TEXT,
                     verification_json TEXT NOT NULL,
@@ -254,6 +255,12 @@ class WorkspaceStore:
                 """
             )
             self._ensure_column(connection, "examples", "extraction_json", "TEXT")
+            self._ensure_column(
+                connection,
+                "examples",
+                "reviewed",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
 
     @staticmethod
     def _ensure_column(
@@ -275,9 +282,9 @@ class WorkspaceStore:
                 """
                 INSERT INTO examples (
                     id, workspace_id, problem, solution, tags_json, method_hint,
-                    problem_kind, math_payload_json, verification_json, extraction_json,
-                    status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    reviewed, problem_kind, math_payload_json, verification_json,
+                    extraction_json, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     example.id,
@@ -286,6 +293,7 @@ class WorkspaceStore:
                     example.solution,
                     _dump(example.tags),
                     example.method_hint,
+                    1 if example.reviewed else 0,
                     example.problem_kind.value,
                     (
                         _dump(example.math_payload.model_dump(mode="json"))
@@ -306,7 +314,10 @@ class WorkspaceStore:
                 connection,
                 "example_captured",
                 example.id,
-                {"status": example.status.value},
+                {
+                    "status": example.status.value,
+                    "reviewed": example.reviewed,
+                },
             )
         return example
 
@@ -563,6 +574,7 @@ class WorkspaceStore:
         used_keys = (
             set(attempt.candidate.used_method_keys) if attempt.candidate else set()
         )
+        feedback_keys = set(attempt.feedback_method_keys)
         feedback_delta = 0
         if attempt.status is SolutionAttemptStatus.VERIFIED:
             feedback_delta = 1
@@ -634,7 +646,7 @@ class WorkspaceStore:
                     ),
                 )
                 if (
-                    used
+                    match.method.key in feedback_keys
                     and feedback_delta
                     and match.method.id not in credited_method_ids
                 ):
@@ -677,6 +689,7 @@ class WorkspaceStore:
                     "verification_status": attempt.verification.status.value,
                     "generation_provider": attempt.generation.provider,
                     "used_method_keys": sorted(used_keys),
+                    "feedback_method_keys": sorted(feedback_keys),
                     "credited_method_count": len(credited_method_ids),
                     "correction_of": attempt.correction_of,
                 },
@@ -796,6 +809,7 @@ class WorkspaceStore:
                 "solution": row["solution"],
                 "tags": json.loads(row["tags_json"]),
                 "method_hint": row["method_hint"],
+                "reviewed": bool(row["reviewed"]),
                 "problem_kind": row["problem_kind"],
                 "math_payload": payload,
                 "verification": json.loads(row["verification_json"]),

@@ -21,6 +21,7 @@ def verified_asymptotic_example() -> ExampleCreate:
             "先乘共轭式有理化，再令 t=1/x，并使用泰勒展开，得到 1/2-1/(8x)+O(x^-2)。"
         ),
         tags=["渐进估计", "根式", "无穷远"],
+        reviewed=True,
         math_payload=MathPayload(
             expression="sqrt(x**2 + x) - x",
             expected="1/2 - 1/(8*x)",

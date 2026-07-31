@@ -11,6 +11,7 @@ from math_harness.extraction import (
     build_method_extractor_from_env,
 )
 from math_harness.models import (
+    AnswerKind,
     CandidateSolution,
     CandidateStep,
     EvaluationCaseResult,
@@ -19,6 +20,7 @@ from math_harness.models import (
     EvaluationRun,
     ExampleCreate,
     ExtractionStatus,
+    GenerationStageKind,
     GenerationStatus,
     IngestionResult,
     KnowledgeStatus,
@@ -34,6 +36,7 @@ from math_harness.models import (
     SolutionAttemptStatus,
     SolutionCorrection,
     SolutionGenerationResult,
+    SolutionGenerationStage,
     SolutionGenerationTrace,
     SolveEvaluationCaseResult,
     SolveEvaluationMetrics,
@@ -42,6 +45,7 @@ from math_harness.models import (
     SolveMathTarget,
     SolvePlan,
     SolveRequest,
+    VerificationMode,
     VerificationReport,
     VerificationStatus,
     Workspace,
@@ -90,7 +94,10 @@ class MathHarnessService:
     ) -> IngestionResult:
         store = self.workspaces.store(workspace_id)
         verification = self.verifier.verify(request.math_payload)
-        if verification.status is VerificationStatus.VERIFIED:
+        promotion_approved = (
+            verification.status is VerificationStatus.VERIFIED and request.reviewed
+        )
+        if promotion_approved:
             status = KnowledgeStatus.PROMOTED
         elif verification.status is VerificationStatus.REJECTED:
             status = KnowledgeStatus.REJECTED
@@ -105,6 +112,7 @@ class MathHarnessService:
             solution=request.solution,
             tags=request.tags,
             method_hint=request.method_hint,
+            reviewed=request.reviewed,
             problem_kind=classify_problem(request.problem),
             math_payload=request.math_payload,
             verification=verification,
@@ -118,7 +126,7 @@ class MathHarnessService:
         if verification.status is not VerificationStatus.REJECTED:
             method_status = (
                 KnowledgeStatus.PROMOTED
-                if verification.status is VerificationStatus.VERIFIED
+                if promotion_approved
                 else KnowledgeStatus.PENDING_REVIEW
             )
             for draft in extraction_result.methods:
@@ -127,7 +135,7 @@ class MathHarnessService:
                         draft=draft,
                         example_id=example.id,
                         status=method_status,
-                        verified=verification.status is VerificationStatus.VERIFIED,
+                        verified=promotion_approved,
                     )
                 )
 
@@ -263,6 +271,16 @@ class MathHarnessService:
                 matches,
             )
         verification, status = self._verify_candidate(request, generation_result)
+        initial_stage = (
+            GenerationStageKind.INITIAL
+            if allow_automatic_recovery
+            else GenerationStageKind.HUMAN
+        )
+        generation_result = self._record_initial_verification(
+            generation_result,
+            initial_stage,
+            verification,
+        )
         if allow_automatic_recovery:
             generation_result, verification, status = self._recover_after_verification(
                 request,
@@ -271,6 +289,16 @@ class MathHarnessService:
                 verification,
                 status,
             )
+        generation_result = self._canonicalize_verified_answer(
+            generation_result,
+            status,
+        )
+        feedback_method_keys = (
+            generation_result.candidate.used_method_keys
+            if generation_result.candidate is not None
+            and generation_result.trace.method_feedback_eligible
+            else []
+        )
         return SolutionAttempt(
             id=str(uuid.uuid4()),
             workspace_id=workspace_id,
@@ -283,6 +311,7 @@ class MathHarnessService:
             generation=generation_result.trace,
             verification=verification,
             status=status,
+            feedback_method_keys=feedback_method_keys,
             correction_of=correction_of,
             created_at=utc_now(),
         )
@@ -344,6 +373,75 @@ class MathHarnessService:
             }
         )
 
+    @staticmethod
+    def _stage_from_result(
+        stage: GenerationStageKind,
+        result: SolutionGenerationResult,
+        verification: VerificationReport,
+    ) -> SolutionGenerationStage:
+        trace = result.trace
+        return SolutionGenerationStage(
+            stage=stage,
+            provider=trace.provider,
+            model=trace.model,
+            response_id=trace.response_id,
+            prompt_version=trace.prompt_version,
+            status=trace.status,
+            candidate=result.candidate,
+            verification=verification,
+            raw_output=trace.raw_output,
+            error=trace.error,
+            duration_ms=trace.duration_ms,
+        )
+
+    def _record_initial_verification(
+        self,
+        result: SolutionGenerationResult,
+        stage: GenerationStageKind,
+        verification: VerificationReport,
+    ) -> SolutionGenerationResult:
+        stages = list(result.trace.stages)
+        if stages:
+            stages[-1] = stages[-1].model_copy(update={"verification": verification})
+        else:
+            stages.append(self._stage_from_result(stage, result, verification))
+        return result.model_copy(
+            update={
+                "trace": result.trace.model_copy(
+                    update={"stages": stages},
+                )
+            }
+        )
+
+    @staticmethod
+    def _canonicalize_verified_answer(
+        result: SolutionGenerationResult,
+        status: SolutionAttemptStatus,
+    ) -> SolutionGenerationResult:
+        candidate = result.candidate
+        if (
+            status is not SolutionAttemptStatus.VERIFIED
+            or candidate is None
+            or candidate.answer_expression is None
+        ):
+            return result
+        canonical_text = f"已验证答案：{candidate.answer_expression}"
+        if candidate.answer_text == canonical_text:
+            return result
+        notes = MathHarnessService._unique_strings(
+            [*result.trace.recovery_notes, "canonicalized_verified_answer_text"]
+        )
+        return result.model_copy(
+            update={
+                "candidate": candidate.model_copy(
+                    update={"answer_text": canonical_text},
+                ),
+                "trace": result.trace.model_copy(
+                    update={"recovery_notes": notes},
+                ),
+            }
+        )
+
     def _recover_after_verification(
         self,
         request: SolveRequest,
@@ -360,11 +458,13 @@ class MathHarnessService:
             request.math_target is None
             or initial_status is SolutionAttemptStatus.VERIFIED
             or initial_result.candidate is None
+            or initial_result.candidate.answer_kind is not AnswerKind.EXPRESSION
             or initial_result.trace.fallback_used
         ):
             return initial_result, initial_verification, initial_status
 
         total_duration = initial_result.trace.duration_ms
+        stages = list(initial_result.trace.stages)
         recovery_notes = [
             self._verification_note("initial_verification", initial_verification)
         ]
@@ -401,6 +501,13 @@ class MathHarnessService:
                         request,
                         corrected,
                     )
+                    stages.append(
+                        self._stage_from_result(
+                            GenerationStageKind.CORRECTION,
+                            corrected,
+                            corrected_verification,
+                        )
+                    )
                     recovery_notes.append(
                         self._verification_note(
                             "correction_verification",
@@ -410,6 +517,33 @@ class MathHarnessService:
                     final_result = corrected
                     final_verification = corrected_verification
                     final_status = corrected_status
+                    if corrected.candidate.answer_kind is not AnswerKind.EXPRESSION:
+                        recovery_notes.append(
+                            "model_correction_returned_non_expression_claim"
+                        )
+                        final_result = corrected.model_copy(
+                            update={
+                                "trace": corrected.trace.model_copy(
+                                    update={
+                                        "correction_attempted": True,
+                                        "correction_succeeded": False,
+                                        "normalization_actions": self._unique_strings(
+                                            normalization_actions
+                                        ),
+                                        "recovery_notes": self._unique_strings(
+                                            recovery_notes
+                                        ),
+                                        "stages": stages,
+                                        "duration_ms": total_duration,
+                                    }
+                                )
+                            }
+                        )
+                        return (
+                            final_result,
+                            final_verification,
+                            final_status,
+                        )
                     if corrected_status is SolutionAttemptStatus.VERIFIED:
                         final_result = corrected.model_copy(
                             update={
@@ -423,6 +557,7 @@ class MathHarnessService:
                                         "recovery_notes": self._unique_strings(
                                             recovery_notes
                                         ),
+                                        "stages": stages,
                                         "duration_ms": total_duration,
                                     }
                                 )
@@ -434,6 +569,17 @@ class MathHarnessService:
                             final_status,
                         )
                 else:
+                    corrected_verification, _ = self._verify_candidate(
+                        request,
+                        corrected,
+                    )
+                    stages.append(
+                        self._stage_from_result(
+                            GenerationStageKind.CORRECTION,
+                            corrected,
+                            corrected_verification,
+                        )
+                    )
                     recovery_notes.append("model_correction_returned_no_candidate")
 
         fallback = getattr(self.generator, "fallback_after_verification", None)
@@ -463,6 +609,13 @@ class MathHarnessService:
                         request,
                         fallback_result,
                     )
+                    stages.append(
+                        self._stage_from_result(
+                            GenerationStageKind.FALLBACK,
+                            fallback_result,
+                            fallback_verification,
+                        )
+                    )
                     recovery_notes.append(
                         self._verification_note(
                             "fallback_verification",
@@ -473,6 +626,17 @@ class MathHarnessService:
                     final_verification = fallback_verification
                     final_status = fallback_status
                 elif fallback_result.trace.error:
+                    fallback_verification, _ = self._verify_candidate(
+                        request,
+                        fallback_result,
+                    )
+                    stages.append(
+                        self._stage_from_result(
+                            GenerationStageKind.FALLBACK,
+                            fallback_result,
+                            fallback_verification,
+                        )
+                    )
                     recovery_notes.append(
                         "verification_fallback_failed: "
                         + fallback_result.trace.error[:500]
@@ -488,6 +652,7 @@ class MathHarnessService:
                             normalization_actions
                         ),
                         "recovery_notes": self._unique_strings(recovery_notes),
+                        "stages": stages,
                         "duration_ms": total_duration,
                     }
                 )
@@ -543,7 +708,20 @@ class MathHarnessService:
                 ),
                 SolutionAttemptStatus.GENERATION_FAILED,
             )
-        if request.math_target is None:
+        if candidate.answer_kind is not AnswerKind.EXPRESSION:
+            verification = VerificationReport(
+                status=VerificationStatus.NEEDS_REVIEW,
+                summary=(
+                    "候选解声明的是不存在、无极限或条件性结论；"
+                    "当前版本保留该结论并交由复核，不自动改写。"
+                ),
+                checks=[
+                    "candidate_generated",
+                    f"answer_kind:{candidate.answer_kind.value}",
+                    "non_expression_claim_requires_review",
+                ],
+            )
+        elif request.math_target is None:
             verification = VerificationReport(
                 status=VerificationStatus.NEEDS_REVIEW,
                 summary="候选解已保存；缺少 math_target，无法自动验收。",
@@ -562,6 +740,12 @@ class MathHarnessService:
                     expected=candidate.answer_expression,
                 )
             )
+            if verification.status is VerificationStatus.VERIFIED:
+                verification = self._verify_final_step_consistency(
+                    request.math_target,
+                    candidate,
+                    verification,
+                )
 
         status_map = {
             VerificationStatus.VERIFIED: SolutionAttemptStatus.VERIFIED,
@@ -569,6 +753,103 @@ class MathHarnessService:
             VerificationStatus.REJECTED: SolutionAttemptStatus.REJECTED,
         }
         return verification, status_map[verification.status]
+
+    def _verify_final_step_consistency(
+        self,
+        math_target: SolveMathTarget,
+        candidate: CandidateSolution,
+        mathematical_verification: VerificationReport,
+    ) -> VerificationReport:
+        final_step_expression = next(
+            (
+                step.expression
+                for step in reversed(candidate.steps)
+                if step.expression is not None
+            ),
+            None,
+        )
+        if final_step_expression is None or candidate.answer_expression is None:
+            return VerificationReport(
+                status=VerificationStatus.NEEDS_REVIEW,
+                summary=(
+                    "答案表达式通过数学验证，但最终步骤没有可检查表达式，需要复核。"
+                ),
+                checks=[
+                    *mathematical_verification.checks,
+                    "candidate_final_step_missing",
+                ],
+                computed=mathematical_verification.computed,
+            )
+
+        step_candidate = candidate.model_copy(
+            update={
+                "answer_kind": AnswerKind.EXPRESSION,
+                "answer_expression": final_step_expression,
+            }
+        )
+        normalized_step = self.normalizer.normalize(
+            step_candidate,
+            math_target,
+        ).candidate.answer_expression
+        if normalized_step is None:
+            return VerificationReport(
+                status=VerificationStatus.NEEDS_REVIEW,
+                summary="最终步骤表达式无法规范化，需要复核。",
+                checks=[
+                    *mathematical_verification.checks,
+                    "candidate_final_step_missing",
+                ],
+                computed=mathematical_verification.computed,
+            )
+
+        payload = math_target.model_dump()
+        payload.update(
+            {
+                "expression": candidate.answer_expression,
+                "expected": normalized_step,
+                "mode": VerificationMode.EXACT_EQUIVALENCE,
+                "remainder_power": None,
+            }
+        )
+        consistency = self.verifier.verify(MathPayload(**payload))
+        if consistency.status is VerificationStatus.VERIFIED:
+            return mathematical_verification.model_copy(
+                update={
+                    "summary": (
+                        mathematical_verification.summary + " 候选答案与最终步骤一致。"
+                    ),
+                    "checks": self._unique_strings(
+                        [
+                            *mathematical_verification.checks,
+                            "candidate_final_step_consistency",
+                        ]
+                    ),
+                }
+            )
+
+        return VerificationReport(
+            status=consistency.status,
+            summary=(
+                "数学答案表达式本身可通过验证，但与候选解的最终步骤不一致。"
+                if consistency.status is VerificationStatus.REJECTED
+                else "数学答案表达式本身可通过验证，但最终步骤一致性无法判定。"
+            ),
+            checks=self._unique_strings(
+                [
+                    *mathematical_verification.checks,
+                    "candidate_final_step_consistency",
+                    *consistency.checks,
+                ]
+            ),
+            computed={
+                **mathematical_verification.computed,
+                **{
+                    f"final_step_{key}": value
+                    for key, value in consistency.computed.items()
+                },
+            },
+            error=consistency.error,
+        )
 
     def get_solution_attempt(
         self,
@@ -590,10 +871,8 @@ class MathHarnessService:
         request: SolutionCorrection,
     ) -> SolutionAttempt:
         original = self.get_solution_attempt(workspace_id, attempt_id)
-        inherited_keys = (
-            original.candidate.used_method_keys if original.candidate else []
-        )
         candidate = CandidateSolution(
+            answer_kind=request.answer_kind,
             answer_text=request.answer_text,
             answer_expression=request.answer_expression,
             steps=request.steps
@@ -604,9 +883,7 @@ class MathHarnessService:
                 )
             ],
             used_method_keys=(
-                request.used_method_keys
-                if request.used_method_keys is not None
-                else inherited_keys
+                request.used_method_keys if request.used_method_keys is not None else []
             ),
             assumptions=request.assumptions,
             confidence=1,
@@ -617,6 +894,7 @@ class MathHarnessService:
                 provider="human",
                 prompt_version="human-correction-v1",
                 status=GenerationStatus.SUCCESS,
+                method_feedback_eligible=bool(request.used_method_keys),
                 raw_output=json.dumps(
                     {
                         "candidate": candidate.model_dump(mode="json"),
@@ -733,6 +1011,7 @@ class MathHarnessService:
                     used_method_keys=(
                         attempt.candidate.used_method_keys if attempt.candidate else []
                     ),
+                    feedback_method_keys=attempt.feedback_method_keys,
                     generation_provider=attempt.generation.provider,
                     fallback_used=attempt.generation.fallback_used,
                     correction_attempted=attempt.generation.correction_attempted,

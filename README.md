@@ -1,21 +1,26 @@
 # Math Harness
 
-一个面向数学专家成长的可运行原型。v0.3.2 已完成第一条带自动恢复的可验证解题闭环：
+一个面向数学专家成长的可运行原型。v0.3.3 把数学验证和成长反馈之间的信任边界
+收紧为默认安全：
 
 1. 创建彼此隔离的工作区；
 2. 录入题目、解答和可选的结构化数学表达式；
 3. 使用受限解析器和 SymPy 验证答案；
 4. 使用规则或结构化 LLM 从解答中提取候选方法卡；
-5. 只有通过验证的方法才会自动晋级；
+5. 新录入知识默认进入待审区，只有数学验证通过且明确标记 `reviewed=true`
+   的精选案例才会自动晋级；
 6. 新题到来时只检索当前工作区已晋级的方法；
 7. 由离线 SymPy 或可选的结构化 LLM 生成候选解；
 8. 先把模型常见数学记法规范化为安全解析器可接受的有限表达式；
-9. 候选解必须经过独立验证器，不能由生成模型自行判定正确；
-10. 验证失败时允许主模型根据确定性反馈纠正一次，再失败则交给 SymPy；
-11. 保存每次尝试的输入、检索方法、恢复路径、候选解、生成轨迹和验证报告；
-12. 根据已验证的结果更新实际使用方法的成功/失败计数；
-13. 以新记录保存人工纠正，不覆盖原始错误历史；
-14. 分别评测方法检索和端到端解题门禁，并保持工作区物理隔离。
+9. 候选答案、最终步骤、定义域、方向和参数假设必须经过独立验证器；
+10. “无等价式、无极限、条件成立”等非表达式结论安全进入复核，不会被强制
+    改写成伪表达式；
+11. 验证失败时允许主模型根据确定性反馈纠正一次，再失败才交给 SymPy；
+12. 分阶段保存首答、纠错和兜底的候选解、响应 ID、原始输出与验证报告；
+13. 只根据 `feedback_method_keys` 更新真正具备归因资格的方法；SymPy 兜底和
+    未显式指定方法的人工纠正不参与计分；
+14. 以新记录保存人工纠正，不覆盖原始错误历史；
+15. 分别使用独立留出集评测方法检索和端到端解题门禁。
 
 ## 快速开始
 
@@ -59,16 +64,19 @@ MATH_HARNESS_VERIFICATION_FALLBACK=true
 专用 Base URL。旧 MiMo V2 模型已经退役，新配置使用 `mimo-v2.5-pro`。
 
 MiMo 当前支持 Responses API 的 JSON Object 模式，但不保证严格符合业务 Schema。
-Harness 会在本地用 Pydantic 校验 JSON，失败时携带 Schema 错误重试一次。v0.3.2
-还会规范化最终数学表达式中的 Big-O、小写 `e`、`ln`、Unicode 运算符和 `^`；
-数学验证仍失败时，默认增加一次携带验证报告的模型纠错请求，再失败才使用 SymPy。
+Harness 会在本地用 Pydantic 校验 JSON，失败时携带 Schema 错误重试一次。它还会
+规范化最终数学表达式中的 Big-O、小写 `e`、`ln`、Unicode 运算符和 `^`；数学验证
+仍失败时，默认进入一次模型纠错阶段，再失败才使用 SymPy。SDK 传输层重试显式设为
+`0`，避免隐式放大请求次数；一次 JSON 纠错阶段仍可能因本地 Schema 失败调用模型
+两次。
 若不希望产生额外模型费用，可把 `MATH_HARNESS_VERIFICATION_REPAIR` 设为 `false`；
 确定性回退也可独立关闭。
 
-真实 `mimo-v2.5-pro / none` 回归中，上一版原始自动验收为 `1/3` 的三道未见题在
-v0.3.2 达到 `3/3`：两题由 MiMo 首答或规范化直接通过；根式题的模型纠错仍失败，
-最终由明确标记的 SymPy 验证回退通过。困难题可以改为 `high`，同时在请求中设置
-`max_output_tokens: 8000`，并将超时提高到约 180 秒。
+真实 `mimo-v2.5-pro / none` 的 v0.3.3 信任边界回归包含普通根式、定义域空洞、
+正参数和振荡无等价四题：普通根式经可审计 SymPy 兜底通过，`a>0` 参数题由 MiMo
+直接通过；定义域和振荡题安全停在 `needs_review`，不再被错误标绿，也不修改方法
+反馈。困难题可以改为 `high`，同时在请求中设置 `max_output_tokens: 8000`，并将
+超时提高到约 180 秒。
 
 官方资料：
 
@@ -81,6 +89,7 @@ v0.3.2 达到 `3/3`：两题由 MiMo 首答或规范化直接通过；根式题�
 默认生成器是完全离线的 SymPy 实现，不需要密钥。它接受 `math_target`，支持：
 
 - `exact_equivalence`
+- `limit`
 - `asymptotic_equivalence`
 - `asymptotic_expansion`
 
@@ -89,14 +98,16 @@ v0.3.2 达到 `3/3`：两题由 MiMo 首答或规范化直接通过；根式题�
 
 启用 OpenAI-compatible 生成器时，默认恢复顺序为：
 
-1. 规范化 `answer_expression`，但不改写自然语言推导；
-2. 执行安全解析和确定性符号验证；
+1. 规范化 `answer_expression`；
+2. 执行安全解析、定义域/极限验证，并检查最终步骤与答案表达式一致；
 3. 未通过时把候选解与验证报告交回主模型纠正一次；
 4. 纠正仍未通过时使用 SymPy 重新生成，并再次验证。
 
-生成轨迹会分别记录 `normalization_actions`、`correction_attempted`、
-`correction_succeeded`、`verification_fallback_used` 和恢复说明。人工纠正以及缺少
-`math_target` 的自然语言请求不会被自动恢复流程改写。
+验证通过后，公开的 `answer_text` 由服务端规范为已验表达式，模型原始文本保留在
+`generation.stages` 中。轨迹还记录 `normalization_actions`、
+`correction_attempted`、`correction_succeeded`、`verification_fallback_used`
+和恢复说明。人工纠正、非表达式结论以及缺少 `math_target` 的自然语言请求不会被
+自动恢复流程改写。
 
 ## 可选的 OpenAI 结构化组件
 
@@ -135,8 +146,9 @@ GPT-5.6 Sol/medium。两条路径都使用 OpenAI Responses API 的 Pydantic
 
 ## 成长评测
 
-`data/pilot/` 包含 6 个渐进估计训练题和 6 个独立留出查询。评测命令会创建一个
-新工作区，先测空知识库，再摄取训练集并复测，同时运行离线解题门禁。输出：
+`data/pilot/` 包含 6 个经人工复核的训练题、6 个方法检索留出查询和 6 个独立求解
+留出题。评测命令会创建一个新工作区，先测空知识库，再摄取训练集并复测，最后只在
+未见求解集上运行离线解题门禁。输出：
 
 - `Hit@1`
 - `Recall@K`
@@ -145,10 +157,9 @@ GPT-5.6 Sol/medium。两条路径都使用 OpenAI Responses API 的 Pydantic
 - `Verified / needs-review / rejected / generation-failure rate`
 - `Fallback / correction-attempt / correction-success rate`
 
-当前 pilot 的 `top-3` 结果是学习前 Recall@K `0.0`、学习后 `1.0`。该数据集很小，
-且使用了清晰的人工标签。离线求解器可自动验证其中 5/6 个结构化案例；
-Gamma/Stirling 案例会诚实地报告生成失败。它们只用于验证工程闭环，不能当作
-真实数学能力基准。
+当前 pilot 的 `top-3` 结果是学习前 Recall@K `0.0`、学习后 `1.0`。独立求解集
+中 4/6 自动验证通过，定义域空洞和振荡无等价两题安全进入复核。该数据集很小且
+使用了清晰的人工标签，只用于验证工程闭环，不能当作真实数学能力基准。
 
 ## 主要 API
 
@@ -180,11 +191,17 @@ GET    /workspaces/{id}/solve-evaluations
 - pilot 仍主要针对文本形式的渐进估计案例；
 - 摄取时只有提供 `math_payload` 才进行确定性数学验证；求解时对应字段是
   `math_target`，它不包含答案；
+- `reviewed=false` 是默认值；未经可信人工或精选数据流水线复核的解答和方法只能
+  进入 `pending_review`；
+- `math_target.assumptions` 支持 `real`、`positive`、`negative`、`nonzero`、
+  `integer`、`nonnegative` 和 `nonpositive`；`direction` 支持 `two_sided`、
+  `left` 和 `right`；
 - 结构化表达式使用 Python/SymPy 风格，如 `sqrt(x**2 + x) - x`；
 - 表达式经过 AST 白名单解析，不执行任意 Python；
 - 每个工作区使用独立 SQLite 文件，并在每条记录上再次校验 `workspace_id`；
 - LLM 可以提取方法或生成候选解，但不负责给答案判真；验证器是独立信任边界；
-- 模型纠错最多额外产生一次 API 请求，可用环境变量关闭；所有回退都进入审计轨迹；
+- 模型纠错只有一个阶段，但 JSON Schema 本地重试可能让该阶段产生两次模型调用；
+  SDK 传输重试为 `0`，模型纠错可用环境变量关闭；
 - 目前检索器是词项与标签基线，尚未接入向量检索或数学结构检索；
 - 成功/失败计数是可审计的在线反馈，不是底层模型权重微调；
 - 离线求解器只覆盖有限的表达式等价与级数任务，不是通用定理证明器；
@@ -198,11 +215,14 @@ GET    /workspaces/{id}/solve-evaluations
   "problem": "求 x→∞ 时 sqrt(x^2+x)-x 的渐进展开到 O(x^-2)",
   "solution": "先乘共轭式有理化，再令 t=1/x，并使用泰勒展开，得到 1/2-1/(8x)+O(x^-2)。",
   "tags": ["渐进估计", "根式", "无穷远"],
+  "reviewed": true,
   "math_payload": {
     "expression": "sqrt(x**2 + x) - x",
     "expected": "1/2 - 1/(8*x)",
     "variable": "x",
+    "assumptions": {},
     "point": "oo",
+    "direction": "two_sided",
     "remainder_power": 2
   }
 }
@@ -227,7 +247,8 @@ GET    /workspaces/{id}/solve-evaluations
 
 提交到 `POST /workspaces/{id}/solve`。返回的 `SolutionAttempt.status` 可能是
 `verified`、`needs_review`、`rejected` 或 `generation_failed`。只有 `verified`
-和 `rejected` 会分别给实际使用且来自本次检索的方法记一次成功或失败。
+和 `rejected` 才可能产生反馈，并且只更新返回结果中的 `feedback_method_keys`；
+SymPy 兜底默认返回空列表。
 
 ## 数据目录
 

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Query
 
+from math_harness import __version__
 from math_harness.errors import RecordNotFound, WorkspaceNotFound
 from math_harness.models import (
     EvaluationRequest,
@@ -35,7 +36,7 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
     service = MathHarnessService(root)
     app = FastAPI(
         title="Math Harness",
-        version="0.3.2",
+        version=__version__,
         description="工作区隔离、可验证、可成长的数学 AI harness 原型。",
     )
     app.state.service = service
@@ -50,7 +51,7 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok", version="0.3.2")
+        return HealthResponse(status="ok", version=__version__)
 
     @app.post("/workspaces", response_model=Workspace, status_code=201)
     def create_workspace(request: WorkspaceCreate) -> Workspace:

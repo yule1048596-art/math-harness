@@ -27,6 +27,11 @@ verification target, and workspace method cards.
 
 Success criteria:
 - Give a direct final answer and a short pedagogical derivation.
+- Set answer_kind to expression for ordinary answers. Use no_equivalent only for
+  an asymptotic-equivalence question with no suitable nonzero equivalent, no_limit
+  only when a requested limit does not exist, or conditional when an exact
+  simplification needs exclusions or unresolved conditions. For these three
+  non-expression kinds, set answer_expression to null.
 - Put only the finite, parser-friendly expression in answer_expression when the
   supplied verification target makes that possible.
 - Use ** for powers; use E and pi for constants; use only sqrt, exp, log, sin,
@@ -63,6 +68,7 @@ class OpenAISolutionGenerator:
         provider_name: str = "openai",
         structured_output_mode: str = "json_schema",
         json_object_retries: int = 0,
+        max_retries: int = 0,
         client: Any | None = None,
     ) -> None:
         allowed_efforts = {"none", "low", "medium", "high", "xhigh"}
@@ -78,6 +84,8 @@ class OpenAISolutionGenerator:
             )
         if not 0 <= json_object_retries <= 2:
             raise ValueError("json_object_retries must be between 0 and 2")
+        if not 0 <= max_retries <= 5:
+            raise ValueError("max_retries must be between 0 and 5")
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.timeout_seconds = timeout_seconds
@@ -86,6 +94,7 @@ class OpenAISolutionGenerator:
         self.name = provider_name
         self.structured_output_mode = structured_output_mode
         self.json_object_retries = json_object_retries
+        self.max_retries = max_retries
         self._client = client
 
     def _client_or_create(self) -> Any:
@@ -96,7 +105,10 @@ class OpenAISolutionGenerator:
                 raise RuntimeError(
                     "OpenAI solving requires the optional 'llm' dependency"
                 ) from exc
-            options: dict[str, Any] = {"timeout": self.timeout_seconds}
+            options: dict[str, Any] = {
+                "timeout": self.timeout_seconds,
+                "max_retries": self.max_retries,
+            }
             if self.api_key:
                 options["api_key"] = self.api_key
             if self.base_url:
