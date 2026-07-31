@@ -7,6 +7,32 @@ from collections.abc import Mapping
 import sympy as sp
 
 from math_harness.errors import UnsafeExpression
+from math_harness.models import SymbolProperty
+
+
+def build_symbol_table(
+    variable: str,
+    parameters: list[str],
+    assumptions: dict[str, list[SymbolProperty]],
+) -> dict[str, sp.Symbol]:
+    """Create one consistent, real-valued symbol table for a verification target."""
+
+    property_names = {
+        SymbolProperty.REAL: "real",
+        SymbolProperty.POSITIVE: "positive",
+        SymbolProperty.NEGATIVE: "negative",
+        SymbolProperty.NONZERO: "nonzero",
+        SymbolProperty.INTEGER: "integer",
+        SymbolProperty.NONNEGATIVE: "nonnegative",
+        SymbolProperty.NONPOSITIVE: "nonpositive",
+    }
+    result: dict[str, sp.Symbol] = {}
+    for name in (variable, *parameters):
+        properties: dict[str, bool] = {"real": True}
+        for value in assumptions.get(name, []):
+            properties[property_names[value]] = True
+        result[name] = sp.Symbol(name, **properties)
+    return result
 
 
 class SafeMathParser:
@@ -51,7 +77,11 @@ class SafeMathParser:
 
     _SYMBOL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
-    def parse(self, text: str, symbol_names: set[str] | None = None) -> sp.Expr:
+    def parse(
+        self,
+        text: str,
+        symbol_names: set[str] | Mapping[str, sp.Symbol] | None = None,
+    ) -> sp.Expr:
         if len(text) > self.MAX_TEXT_LENGTH:
             raise UnsafeExpression("expression is too long")
 
@@ -64,13 +94,23 @@ class SafeMathParser:
         if len(nodes) > self.MAX_AST_NODES:
             raise UnsafeExpression("expression is too complex")
 
-        allowed_symbols = symbol_names or set()
+        if isinstance(symbol_names, Mapping):
+            allowed_symbols = dict(symbol_names)
+        else:
+            allowed_symbols = {
+                name: sp.Symbol(name, real=True) for name in (symbol_names or set())
+            }
         if any(not self._SYMBOL_PATTERN.fullmatch(name) for name in allowed_symbols):
             raise UnsafeExpression("invalid symbol name")
+        if any(
+            not isinstance(symbol, sp.Symbol) or symbol.name != name
+            for name, symbol in allowed_symbols.items()
+        ):
+            raise UnsafeExpression("invalid symbol mapping")
 
         return self._convert(tree.body, allowed_symbols)
 
-    def _convert(self, node: ast.AST, symbols: set[str]) -> sp.Expr:
+    def _convert(self, node: ast.AST, symbols: Mapping[str, sp.Symbol]) -> sp.Expr:
         if isinstance(node, ast.Constant):
             if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
                 raise UnsafeExpression("only numeric constants are allowed")
@@ -84,7 +124,7 @@ class SafeMathParser:
             if node.id in self.CONSTANTS:
                 return self.CONSTANTS[node.id]  # type: ignore[return-value]
             if node.id in symbols:
-                return sp.Symbol(node.id)
+                return symbols[node.id]
             raise UnsafeExpression(f"unknown symbol: {node.id}")
 
         if isinstance(node, ast.UnaryOp):
@@ -105,7 +145,13 @@ class SafeMathParser:
             if isinstance(node.op, ast.Mult):
                 return left * right
             if isinstance(node.op, ast.Div):
-                return left / right
+                # Keep the original denominator unevaluated so exact-equivalence
+                # verification can detect removable holes such as x/x at x=0.
+                return sp.Mul(
+                    left,
+                    sp.Pow(right, -1, evaluate=False),
+                    evaluate=False,
+                )
             if isinstance(node.op, ast.Pow):
                 if (
                     isinstance(node.right, ast.Constant)

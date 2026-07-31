@@ -3,8 +3,9 @@ from __future__ import annotations
 import sympy as sp
 
 from math_harness.errors import UnsafeExpression
-from math_harness.math_parser import SafeMathParser
+from math_harness.math_parser import SafeMathParser, build_symbol_table
 from math_harness.models import (
+    ApproachDirection,
     MathPayload,
     VerificationMode,
     VerificationReport,
@@ -24,18 +25,34 @@ class SolutionVerifier:
                 checks=["source_captured"],
             )
 
-        symbol_names = {payload.variable, *payload.parameters}
+        symbols = build_symbol_table(
+            payload.variable,
+            payload.parameters,
+            payload.assumptions,
+        )
         try:
-            expression = self.parser.parse(payload.expression, symbol_names)
-            expected = self.parser.parse(payload.expected, symbol_names)
-            variable = sp.Symbol(payload.variable)
-            point = self._parse_point(payload.point, symbol_names)
+            expression = self.parser.parse(payload.expression, symbols)
+            expected = self.parser.parse(payload.expected, symbols)
+            variable = symbols[payload.variable]
+            point = self._parse_point(payload.point, symbols)
 
             if payload.mode is VerificationMode.EXACT_EQUIVALENCE:
-                return self._verify_exact(expression, expected)
+                return self._verify_exact(expression, expected, variable)
+            if payload.mode is VerificationMode.LIMIT:
+                return self._verify_limit(
+                    expression,
+                    expected,
+                    variable,
+                    point,
+                    payload.direction,
+                )
             if payload.mode is VerificationMode.ASYMPTOTIC_EQUIVALENCE:
                 return self._verify_asymptotic_equivalence(
-                    expression, expected, variable, point
+                    expression,
+                    expected,
+                    variable,
+                    point,
+                    payload.direction,
                 )
             return self._verify_asymptotic_expansion(
                 expression,
@@ -43,6 +60,7 @@ class SolutionVerifier:
                 variable,
                 point,
                 payload.remainder_power,
+                payload.direction,
             )
         except UnsafeExpression as exc:
             return VerificationReport(
@@ -62,32 +80,123 @@ class SolutionVerifier:
                 error=f"{exc.__class__.__name__}: {exc}",
             )
 
-    def _parse_point(self, text: str, symbol_names: set[str]) -> sp.Expr:
+    def _parse_point(
+        self,
+        text: str,
+        symbols: dict[str, sp.Symbol],
+    ) -> sp.Expr:
         normalized = text.strip()
         if normalized in {"oo", "+oo", "infinity", "+infinity"}:
             return sp.oo
         if normalized in {"-oo", "-infinity"}:
             return -sp.oo
-        return self.parser.parse(normalized, symbol_names)
+        return self.parser.parse(normalized, symbols)
 
     @staticmethod
-    def _verify_exact(expression: sp.Expr, expected: sp.Expr) -> VerificationReport:
+    def _verify_exact(
+        expression: sp.Expr,
+        expected: sp.Expr,
+        variable: sp.Symbol,
+    ) -> VerificationReport:
         difference = sp.simplify(expression - expected)
         equivalent = difference.equals(0)
-        if equivalent is True:
+        computed = {"simplified_difference": sp.sstr(difference)}
+
+        if equivalent is False:
+            return VerificationReport(
+                status=VerificationStatus.REJECTED,
+                summary="表达式与期望答案不等价。",
+                checks=["safe_parse", "symbolic_difference"],
+                computed=computed,
+            )
+        if equivalent is None:
+            return VerificationReport(
+                status=VerificationStatus.NEEDS_REVIEW,
+                summary="符号后端无法判定两个表达式是否等价，需要复核。",
+                checks=["safe_parse", "symbolic_difference"],
+                computed=computed,
+            )
+
+        try:
+            base_domain = SolutionVerifier._base_real_domain(variable)
+            expression_domain = sp.calculus.util.continuous_domain(
+                expression,
+                variable,
+                sp.S.Reals,
+            ).intersect(base_domain)
+            expected_domain = sp.calculus.util.continuous_domain(
+                expected,
+                variable,
+                sp.S.Reals,
+            ).intersect(base_domain)
+        except (NotImplementedError, ValueError) as exc:
+            return VerificationReport(
+                status=VerificationStatus.NEEDS_REVIEW,
+                summary="表达式值相同，但自动验证无法可靠比较定义域，需要复核。",
+                checks=[
+                    "safe_parse",
+                    "symbolic_difference",
+                    "domain_check_inconclusive",
+                ],
+                computed=computed,
+                error=f"{exc.__class__.__name__}: {exc}",
+            )
+
+        computed.update(
+            {
+                "expression_domain": sp.sstr(expression_domain),
+                "expected_domain": sp.sstr(expected_domain),
+            }
+        )
+        if expression_domain == expected_domain:
             status = VerificationStatus.VERIFIED
-            summary = "符号等价验证通过。"
-        elif equivalent is False:
-            status = VerificationStatus.REJECTED
-            summary = "表达式与期望答案不等价。"
+            summary = "符号值与定义域均等价，验证通过。"
         else:
-            status = VerificationStatus.NEEDS_REVIEW
-            summary = "符号后端无法判定两个表达式是否等价，需要复核。"
+            status = VerificationStatus.REJECTED
+            summary = "表达式化简后的值相同，但定义域不一致。"
         return VerificationReport(
             status=status,
             summary=summary,
-            checks=["safe_parse", "symbolic_difference"],
-            computed={"simplified_difference": sp.sstr(difference)},
+            checks=["safe_parse", "symbolic_difference", "real_domain_equivalence"],
+            computed=computed,
+        )
+
+    @staticmethod
+    def _verify_limit(
+        expression: sp.Expr,
+        expected: sp.Expr,
+        variable: sp.Symbol,
+        point: sp.Expr,
+        direction: ApproachDirection,
+    ) -> VerificationReport:
+        value = SolutionVerifier._limit(
+            expression,
+            variable,
+            point,
+            direction,
+        )
+        equivalent = (
+            True if value == expected else sp.simplify(value - expected).equals(0)
+        )
+        computed = {
+            "limit(expression)": sp.sstr(value),
+            "expected": sp.sstr(expected),
+            "direction": direction.value,
+        }
+        if equivalent is True:
+            status = VerificationStatus.VERIFIED
+            summary = "极限验证通过。"
+        elif equivalent is False:
+            status = VerificationStatus.REJECTED
+            summary = "候选答案与计算得到的极限不一致。"
+        else:
+            status = VerificationStatus.NEEDS_REVIEW
+            summary = "符号后端无法判定候选答案是否等于该极限，需要复核。"
+        return VerificationReport(
+            status=status,
+            summary=summary,
+            checks=["safe_parse", "limit_value"],
+            computed=computed,
         )
 
     @staticmethod
@@ -96,15 +205,26 @@ class SolutionVerifier:
         expected: sp.Expr,
         variable: sp.Symbol,
         point: sp.Expr,
+        direction: ApproachDirection,
     ) -> VerificationReport:
         if expected == 0:
-            value = sp.limit(expression, variable, point)
-            equivalent = value.equals(0)
-            computed = {"limit(expression)": sp.sstr(value)}
-        else:
-            value = sp.limit(expression / expected, variable, point)
-            equivalent = value.equals(1)
-            computed = {"limit(expression/expected)": sp.sstr(value)}
+            return VerificationReport(
+                status=VerificationStatus.REJECTED,
+                summary=("零不能作为渐进等价式；如需验证趋于零，请使用极限模式。"),
+                checks=["safe_parse", "invalid_zero_equivalent"],
+            )
+
+        value = SolutionVerifier._limit(
+            expression / expected,
+            variable,
+            point,
+            direction,
+        )
+        equivalent = value.equals(1)
+        computed = {
+            "limit(expression/expected)": sp.sstr(value),
+            "direction": direction.value,
+        }
 
         if equivalent is True:
             status = VerificationStatus.VERIFIED
@@ -129,6 +249,7 @@ class SolutionVerifier:
         variable: sp.Symbol,
         point: sp.Expr,
         remainder_power: int | None,
+        direction: ApproachDirection,
     ) -> VerificationReport:
         if remainder_power is None:
             return VerificationReport(
@@ -149,7 +270,12 @@ class SolutionVerifier:
                 f"limit((expression-expected)/({variable}-{point})^{remainder_power})"
             )
 
-        value = sp.limit(scaled_difference, variable, point)
+        value = SolutionVerifier._limit(
+            scaled_difference,
+            variable,
+            point,
+            direction,
+        )
         if value.is_finite is True:
             status = VerificationStatus.VERIFIED
             summary = f"展开余项为指定阶或更高阶，验证通过（缩放余项极限为 {sp.sstr(value)}）。"
@@ -166,5 +292,49 @@ class SolutionVerifier:
             computed={
                 "difference": sp.sstr(difference),
                 check_name: sp.sstr(value),
+                "direction": direction.value,
             },
         )
+
+    @staticmethod
+    def _limit(
+        expression: sp.Expr,
+        variable: sp.Symbol,
+        point: sp.Expr,
+        direction: ApproachDirection,
+    ) -> sp.Expr:
+        if point == sp.oo:
+            sympy_direction = "-"
+        elif point == -sp.oo:
+            sympy_direction = "+"
+        else:
+            sympy_direction = {
+                ApproachDirection.TWO_SIDED: "+-",
+                ApproachDirection.LEFT: "-",
+                ApproachDirection.RIGHT: "+",
+            }[direction]
+        return sp.limit(
+            expression,
+            variable,
+            point,
+            dir=sympy_direction,
+        )
+
+    @staticmethod
+    def _base_real_domain(variable: sp.Symbol) -> sp.Set:
+        assumptions = variable.assumptions0
+        if assumptions.get("positive"):
+            domain: sp.Set = sp.Interval.open(0, sp.oo)
+        elif assumptions.get("negative"):
+            domain = sp.Interval.open(-sp.oo, 0)
+        elif assumptions.get("nonnegative"):
+            domain = sp.Interval(0, sp.oo)
+        elif assumptions.get("nonpositive"):
+            domain = sp.Interval(-sp.oo, 0)
+        else:
+            domain = sp.S.Reals
+        if assumptions.get("nonzero"):
+            domain = domain - sp.FiniteSet(0)
+        if assumptions.get("integer"):
+            domain = domain.intersect(sp.S.Integers)
+        return domain

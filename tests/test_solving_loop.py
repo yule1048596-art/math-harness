@@ -316,9 +316,11 @@ def test_legacy_generation_trace_gets_safe_recovery_defaults():
     assert trace.correction_attempted is False
     assert trace.correction_succeeded is False
     assert trace.verification_fallback_used is False
+    assert trace.method_feedback_eligible is True
+    assert trace.stages == []
 
 
-def test_verified_solution_is_persisted_and_credits_used_methods(
+def test_verified_offline_solution_is_persisted_without_method_credit(
     tmp_path, verified_asymptotic_example
 ):
     service = MathHarnessService(tmp_path)
@@ -343,9 +345,9 @@ def test_verified_solution_is_persisted_and_credits_used_methods(
         method.key: method.success_count
         for method in service.list_methods(workspace.id)
     }
-    assert attempt.candidate.used_method_keys
-    for method_key in attempt.candidate.used_method_keys:
-        assert after[method_key] == before[method_key] + 1
+    assert attempt.candidate.used_method_keys == []
+    assert attempt.feedback_method_keys == []
+    assert after == before
 
     events = service.list_learning_events(workspace.id)
     assert any(
@@ -353,11 +355,14 @@ def test_verified_solution_is_persisted_and_credits_used_methods(
         and event.target_id == attempt.id
         for event in events
     )
-    assert sum(
-        event.event_type == "method_outcome_recorded"
-        and event.payload["attempt_id"] == attempt.id
-        for event in events
-    ) == len(attempt.candidate.used_method_keys)
+    assert (
+        sum(
+            event.event_type == "method_outcome_recorded"
+            and event.payload["attempt_id"] == attempt.id
+            for event in events
+        )
+        == 0
+    )
 
 
 def test_rejected_candidate_is_stored_and_debits_only_known_used_method(
@@ -547,9 +552,10 @@ def test_existing_workspace_gets_v030_tables_on_first_open(
 ):
     service = MathHarnessService(tmp_path)
     workspace = service.create_workspace(WorkspaceCreate(name="旧工作区"))
-    service.ingest_example(workspace.id, verified_asymptotic_example)
+    ingestion = service.ingest_example(workspace.id, verified_asymptotic_example)
     database_path = service.workspaces.database_path(workspace.id)
     with sqlite3.connect(database_path) as connection:
+        connection.execute("ALTER TABLE examples DROP COLUMN reviewed")
         connection.execute("DROP TABLE attempt_methods")
         connection.execute("DROP TABLE solution_attempts")
         connection.execute("DROP TABLE solve_evaluation_runs")
@@ -558,4 +564,5 @@ def test_existing_workspace_gets_v030_tables_on_first_open(
     attempt = reopened.solve_problem(workspace.id, _solve_request())
 
     assert attempt.status is SolutionAttemptStatus.VERIFIED
+    assert reopened.get_example(workspace.id, ingestion.example.id).reviewed is False
     assert reopened.list_solution_attempts(workspace.id) == [attempt]

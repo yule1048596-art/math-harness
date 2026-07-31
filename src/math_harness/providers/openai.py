@@ -74,6 +74,7 @@ class OpenAIStructuredMethodExtractor:
         provider_name: str = "openai",
         structured_output_mode: str = "json_schema",
         json_object_retries: int = 0,
+        max_retries: int = 0,
         client: Any | None = None,
     ) -> None:
         allowed_efforts = {"none", "low", "medium", "high", "xhigh"}
@@ -89,6 +90,8 @@ class OpenAIStructuredMethodExtractor:
             )
         if not 0 <= json_object_retries <= 2:
             raise ValueError("json_object_retries must be between 0 and 2")
+        if not 0 <= max_retries <= 5:
+            raise ValueError("max_retries must be between 0 and 5")
         self.model = model
         self.reasoning_effort = reasoning_effort
         self.max_output_tokens = max_output_tokens
@@ -97,6 +100,7 @@ class OpenAIStructuredMethodExtractor:
         self.name = provider_name
         self.structured_output_mode = structured_output_mode
         self.json_object_retries = json_object_retries
+        self.max_retries = max_retries
         self._client = client
 
     def _client_or_create(self) -> Any:
@@ -107,7 +111,7 @@ class OpenAIStructuredMethodExtractor:
                 raise RuntimeError(
                     "OpenAI extraction requires the optional 'llm' dependency"
                 ) from exc
-            options: dict[str, Any] = {}
+            options: dict[str, Any] = {"max_retries": self.max_retries}
             if self.api_key:
                 options["api_key"] = self.api_key
             if self.base_url:

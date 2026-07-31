@@ -152,6 +152,7 @@ def test_mimo_client_receives_secret_and_base_url_without_global_openai_key(
     assert captured["api_key"] == "test-mimo-secret"
     assert captured["base_url"] == DEFAULT_MIMO_BASE_URL
     assert captured["timeout"] == 60
+    assert captured["max_retries"] == 0
 
 
 def test_mimo_retries_once_after_local_schema_validation_failure():
