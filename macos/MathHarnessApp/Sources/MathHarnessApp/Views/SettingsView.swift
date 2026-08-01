@@ -25,7 +25,7 @@ struct SettingsView: View {
           TextField("Base URL", text: $baseURL)
           TextField("模型", text: $modelName)
           Toggle("求解后使用 MiMo 提炼方法", isOn: $mimoMethodExtraction)
-          Text("开启后每次可记忆的答案会增加一次模型请求；关闭后使用内置规则模板。")
+          Text("自动整理数学目标会使用一次模型请求；方法提炼开启后，可记忆答案还会再使用一次。")
             .font(.caption)
             .foregroundStyle(.secondary)
           Text("密钥只保存在 macOS 钥匙串中，不会写入工作区数据库或项目文件。")

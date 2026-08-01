@@ -37,6 +37,7 @@ env \
     MATH_HARNESS_LOCAL_TOKEN="integration-token" \
     MATH_HARNESS_SOLVER="mimo" \
     MATH_HARNESS_METHOD_EXTRACTOR="rules" \
+    MATH_HARNESS_TARGET_DRAFTER="mimo" \
     MIMO_API_KEY="bundle-test-placeholder" \
     MATH_HARNESS_MIMO_BASE_URL="http://127.0.0.1:9/v1" \
     MATH_HARNESS_MIMO_TIMEOUT_SECONDS="0.5" \
@@ -71,6 +72,14 @@ WORKSPACE="$(curl -fsS \
     --data-binary '{"name":"macOS E2E","description":"packaged backend"}' \
     "$BASE_URL/workspaces")"
 WORKSPACE_ID="$(jq -r .id <<<"$WORKSPACE")"
+TARGET_DRAFT="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"problem":"求 x→∞ 时 sqrt(x^2+x)-x 的渐进展开到 O(x^-2)"}' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/math-target-drafts")"
+[[ "$(jq -r .requires_confirmation <<<"$TARGET_DRAFT")" == "true" ]]
+[[ "$(jq -r .target.expression <<<"$TARGET_DRAFT")" == "sqrt(x**2+x)-x" ]]
+[[ "$(jq -r .status <<<"$TARGET_DRAFT")" == "fallback" ]]
 SOLUTION="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     -H 'Content-Type: application/json' \
@@ -89,10 +98,41 @@ CAPTURED="$(jq -c --arg attempt "$ATTEMPT_ID" \
 [[ "$(jq -r .verification.status <<<"$CAPTURED")" == "verified" ]]
 [[ "$(jq -r '.method_drafts | length > 0' <<<"$CAPTURED")" == "true" ]]
 EXAMPLE_ID="$(jq -r .id <<<"$CAPTURED")"
+EDIT_PAYLOAD="$(jq -nc \
+    --arg problem "$(jq -r .problem <<<"$CAPTURED")" \
+    --arg solution "$(jq -r .solution <<<"$CAPTURED")\n人工确认余项阶数。" \
+    --arg hint "$(jq -r '.method_hint // ""' <<<"$CAPTURED")" \
+    '{
+        expected_revision: 1,
+        problem: $problem,
+        solution: $solution,
+        tags: ["radical"],
+        method_hint: (if $hint == "" then null else $hint end),
+        math_payload: {
+            expression: "sqrt(x**2+x)-x",
+            expected: "1/2 - 1/(8*x)",
+            variable: "x",
+            point: "oo",
+            mode: "asymptotic_expansion",
+            remainder_power: 2
+        }
+    }')"
+EDITED="$(curl -fsS \
+    -X PATCH \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/json' \
+    --data-binary "$EDIT_PAYLOAD" \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/examples/$EXAMPLE_ID")"
+[[ "$(jq -r .example.revision <<<"$EDITED")" == "2" ]]
+[[ "$(jq -r .example.verification.status <<<"$EDITED")" == "verified" ]]
+VERSIONS="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/examples/$EXAMPLE_ID/versions")"
+[[ "$(jq -r 'length' <<<"$VERSIONS")" == "1" ]]
 REVIEW="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     -H 'Content-Type: application/json' \
-    --data-binary '{"decision":"approve","reviewer_note":"packaged E2E"}' \
+    --data-binary '{"decision":"approve","expected_revision":2,"reviewer_note":"packaged E2E"}' \
     "$BASE_URL/workspaces/$WORKSPACE_ID/examples/$EXAMPLE_ID/review")"
 [[ "$(jq -r .example.status <<<"$REVIEW")" == "promoted" ]]
 [[ "$(jq -r '.learned_methods | length > 0' <<<"$REVIEW")" == "true" ]]
@@ -103,5 +143,7 @@ print "workspace=$(jq -r .name <<<"$WORKSPACE")"
 print "solve_status=$(jq -r .status <<<"$SOLUTION")"
 print "answer=$(jq -r .candidate.answer_expression <<<"$SOLUTION")"
 print "model_fallback=$(jq -r .generation.fallback_used <<<"$SOLUTION")"
+print "target_draft=$(jq -r '.provider + " → confirm=" + (.requires_confirmation | tostring)' <<<"$TARGET_DRAFT")"
 print "knowledge_capture=$(jq -r '.origin + " → " + .status' <<<"$CAPTURED")"
+print "knowledge_revision=$(jq -r .example.revision <<<"$EDITED")"
 print "knowledge_review=$(jq -r .example.status <<<"$REVIEW")"

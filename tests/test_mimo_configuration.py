@@ -11,20 +11,32 @@ from math_harness.extraction import (
     FallbackMethodExtractor,
     build_method_extractor_from_env,
 )
-from math_harness.models import CandidateSolution, CandidateStep, GenerationStatus
+from math_harness.models import (
+    CandidateSolution,
+    CandidateStep,
+    GenerationStatus,
+    SolveMathTarget,
+    VerificationMode,
+)
 from math_harness.providers.mimo import (
     DEFAULT_MIMO_BASE_URL,
     DEFAULT_MIMO_MODEL,
     MiMoSolutionGenerator,
     MiMoStructuredMethodExtractor,
+    MiMoStructuredTargetDrafter,
 )
 from math_harness.providers.openai import (
     LLMMethodCandidate,
     LLMMethodExtractionOutput,
 )
+from math_harness.providers.openai_target import LLMTargetDraftOutput
 from math_harness.solving import (
     FallbackSolutionGenerator,
     build_solution_generator_from_env,
+)
+from math_harness.target_drafting import (
+    FallbackTargetDrafter,
+    build_target_drafter_from_env,
 )
 
 
@@ -115,6 +127,33 @@ class FakeExtractionClient:
         self.responses = FakeExtractionResponses()
 
 
+class FakeTargetResponses:
+    def __init__(self) -> None:
+        self.kwargs = None
+
+    def create(self, **kwargs):
+        self.kwargs = kwargs
+        parsed = LLMTargetDraftOutput(
+            target=SolveMathTarget(
+                expression="sin(x)/x",
+                point="0",
+                mode=VerificationMode.LIMIT,
+            ),
+            confidence=0.91,
+            summary="识别为极限。",
+        )
+        return SimpleNamespace(
+            output_text=parsed.model_dump_json(),
+            id="resp_mimo_target",
+            model=DEFAULT_MIMO_MODEL,
+        )
+
+
+class FakeTargetClient:
+    def __init__(self) -> None:
+        self.responses = FakeTargetResponses()
+
+
 def test_mimo_solver_uses_responses_contract():
     client = FakeClient()
     generator = MiMoSolutionGenerator(
@@ -188,13 +227,29 @@ def test_mimo_method_extractor_uses_json_object_and_local_validation():
     assert client.responses.kwargs["text"] == {"format": {"type": "json_object"}}
 
 
+def test_mimo_target_drafter_uses_json_object_and_requires_confirmation():
+    client = FakeTargetClient()
+    drafter = MiMoStructuredTargetDrafter(api_key="test-key", client=client)
+
+    result = drafter.draft("求 sin(x)/x 在 x→0 时的极限")
+
+    assert result.target is not None
+    assert result.requires_confirmation is True
+    assert result.provider == "xiaomi_mimo"
+    assert client.responses.kwargs["reasoning"] == {"effort": "none"}
+    assert client.responses.kwargs["text"] == {"format": {"type": "json_object"}}
+
+
 def test_environment_builders_select_mimo_with_offline_fallback(monkeypatch):
     monkeypatch.setenv("MATH_HARNESS_SOLVER", "mimo")
     monkeypatch.setenv("MATH_HARNESS_METHOD_EXTRACTOR", "mimo")
+    monkeypatch.setenv("MATH_HARNESS_TARGET_DRAFTER", "mimo")
     monkeypatch.setenv("MIMO_API_KEY", "test-key")
+    monkeypatch.setenv("MATH_HARNESS_MIMO_TIMEOUT_SECONDS", "12.5")
 
     generator = build_solution_generator_from_env()
     extractor = build_method_extractor_from_env()
+    target_drafter = build_target_drafter_from_env()
 
     assert isinstance(generator, FallbackSolutionGenerator)
     assert isinstance(generator.primary, MiMoSolutionGenerator)
@@ -205,6 +260,10 @@ def test_environment_builders_select_mimo_with_offline_fallback(monkeypatch):
     assert isinstance(extractor, FallbackMethodExtractor)
     assert isinstance(extractor.primary, MiMoStructuredMethodExtractor)
     assert extractor.primary.reasoning_effort == "none"
+    assert isinstance(target_drafter, FallbackTargetDrafter)
+    assert isinstance(target_drafter.primary, MiMoStructuredTargetDrafter)
+    assert target_drafter.primary.reasoning_effort == "none"
+    assert target_drafter.primary.timeout_seconds == 12.5
 
 
 def test_explicit_env_file_loads_without_overriding_exported_values(

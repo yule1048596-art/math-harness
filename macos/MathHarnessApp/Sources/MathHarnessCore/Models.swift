@@ -61,13 +61,14 @@ public struct SolveMathTargetRequest: Codable, Equatable, Sendable {
   public let expression: String
   public let variable: String
   public let parameters: [String]
+  public let assumptions: [String: [String]]
   public let point: String
   public let direction: String
   public let mode: VerificationMode
   public let remainderPower: Int?
 
   enum CodingKeys: String, CodingKey {
-    case expression, variable, parameters, point, direction, mode
+    case expression, variable, parameters, assumptions, point, direction, mode
     case remainderPower = "remainder_power"
   }
 
@@ -75,6 +76,7 @@ public struct SolveMathTargetRequest: Codable, Equatable, Sendable {
     expression: String,
     variable: String = "x",
     parameters: [String] = [],
+    assumptions: [String: [String]] = [:],
     point: String = "oo",
     direction: String = "two_sided",
     mode: VerificationMode = .asymptoticExpansion,
@@ -83,10 +85,77 @@ public struct SolveMathTargetRequest: Codable, Equatable, Sendable {
     self.expression = expression
     self.variable = variable
     self.parameters = parameters
+    self.assumptions = assumptions
     self.point = point
     self.direction = direction
     self.mode = mode
     self.remainderPower = remainderPower
+  }
+}
+
+public struct MathPayloadRequest: Codable, Equatable, Sendable {
+  public let expression: String
+  public let expected: String
+  public let variable: String
+  public let parameters: [String]
+  public let assumptions: [String: [String]]
+  public let point: String
+  public let direction: String
+  public let mode: VerificationMode
+  public let remainderPower: Int?
+
+  enum CodingKeys: String, CodingKey {
+    case expression, expected, variable, parameters, assumptions, point, direction, mode
+    case remainderPower = "remainder_power"
+  }
+
+  public init(
+    expression: String,
+    expected: String,
+    variable: String = "x",
+    parameters: [String] = [],
+    assumptions: [String: [String]] = [:],
+    point: String = "oo",
+    direction: String = "two_sided",
+    mode: VerificationMode = .asymptoticExpansion,
+    remainderPower: Int? = nil
+  ) {
+    self.expression = expression
+    self.expected = expected
+    self.variable = variable
+    self.parameters = parameters
+    self.assumptions = assumptions
+    self.point = point
+    self.direction = direction
+    self.mode = mode
+    self.remainderPower = remainderPower
+  }
+}
+
+public struct MathTargetDraftRequest: Codable, Equatable, Sendable {
+  public let problem: String
+
+  public init(problem: String) {
+    self.problem = problem
+  }
+}
+
+public struct MathTargetDraftResult: Codable, Equatable, Sendable {
+  public let target: SolveMathTargetRequest?
+  public let status: String
+  public let provider: String
+  public let model: String?
+  public let confidence: Double
+  public let summary: String
+  public let warnings: [String]
+  public let fallbackUsed: Bool
+  public let error: String?
+  public let requiresConfirmation: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case target, status, provider, model, confidence, summary, warnings, error
+    case fallbackUsed = "fallback_used"
+    case requiresConfirmation = "requires_confirmation"
   }
 }
 
@@ -187,6 +256,7 @@ public struct ProblemExample: Codable, Identifiable, Equatable, Sendable {
   public let methodHint: String?
   public let reviewed: Bool
   public let problemKind: String
+  public let mathPayload: MathPayloadRequest?
   public let verification: VerificationReport
   public let extraction: MethodExtractionSummary?
   public let methodDrafts: [MethodDraftPreview]
@@ -195,18 +265,23 @@ public struct ProblemExample: Codable, Identifiable, Equatable, Sendable {
   public let sourceAttemptID: String?
   public let reviewedAt: String?
   public let reviewerNote: String
+  public let revision: Int
   public let createdAt: String
+  public let updatedAt: String
 
   enum CodingKeys: String, CodingKey {
     case id, problem, solution, tags, reviewed, verification, extraction, status, origin
+    case revision
     case workspaceID = "workspace_id"
     case methodHint = "method_hint"
     case problemKind = "problem_kind"
+    case mathPayload = "math_payload"
     case methodDrafts = "method_drafts"
     case sourceAttemptID = "source_attempt_id"
     case reviewedAt = "reviewed_at"
     case reviewerNote = "reviewer_note"
     case createdAt = "created_at"
+    case updatedAt = "updated_at"
   }
 }
 
@@ -302,20 +377,69 @@ public enum ExampleReviewDecision: String, Codable, Sendable {
 
 public struct ExampleReviewRequest: Codable, Equatable, Sendable {
   public let decision: ExampleReviewDecision
+  public let expectedRevision: Int
   public let reviewerNote: String
 
   enum CodingKeys: String, CodingKey {
     case decision
+    case expectedRevision = "expected_revision"
     case reviewerNote = "reviewer_note"
   }
 
-  public init(decision: ExampleReviewDecision, reviewerNote: String = "") {
+  public init(
+    decision: ExampleReviewDecision,
+    expectedRevision: Int,
+    reviewerNote: String = ""
+  ) {
     self.decision = decision
+    self.expectedRevision = expectedRevision
     self.reviewerNote = reviewerNote
   }
 }
 
 public struct ExampleReviewResult: Codable, Equatable, Sendable {
+  public let example: ProblemExample
+  public let learnedMethods: [MethodCard]
+
+  enum CodingKeys: String, CodingKey {
+    case example
+    case learnedMethods = "learned_methods"
+  }
+}
+
+public struct ExampleDraftUpdateRequest: Codable, Equatable, Sendable {
+  public let expectedRevision: Int
+  public let problem: String
+  public let solution: String
+  public let tags: [String]
+  public let methodHint: String?
+  public let mathPayload: MathPayloadRequest?
+
+  enum CodingKeys: String, CodingKey {
+    case problem, solution, tags
+    case expectedRevision = "expected_revision"
+    case methodHint = "method_hint"
+    case mathPayload = "math_payload"
+  }
+
+  public init(
+    expectedRevision: Int,
+    problem: String,
+    solution: String,
+    tags: [String],
+    methodHint: String?,
+    mathPayload: MathPayloadRequest?
+  ) {
+    self.expectedRevision = expectedRevision
+    self.problem = problem
+    self.solution = solution
+    self.tags = tags
+    self.methodHint = methodHint
+    self.mathPayload = mathPayload
+  }
+}
+
+public struct ExampleDraftUpdateResult: Codable, Equatable, Sendable {
   public let example: ProblemExample
   public let learnedMethods: [MethodCard]
 

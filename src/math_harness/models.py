@@ -185,6 +185,28 @@ class SolveMathTarget(BaseModel):
         return self
 
 
+class MathTargetDraftRequest(BaseModel):
+    problem: str = Field(min_length=1, max_length=20_000)
+
+
+class MathTargetDraftResult(BaseModel):
+    """Untrusted target suggestion that must be confirmed before solving."""
+
+    target: SolveMathTarget | None = None
+    status: ExtractionStatus
+    provider: str = Field(min_length=1, max_length=120)
+    model: str | None = Field(default=None, max_length=120)
+    response_id: str | None = Field(default=None, max_length=200)
+    prompt_version: str = Field(min_length=1, max_length=80)
+    confidence: float = Field(default=0, ge=0, le=1)
+    summary: str = Field(default="", max_length=2_000)
+    warnings: list[str] = Field(default_factory=list, max_length=20)
+    fallback_used: bool = False
+    raw_output: str | None = Field(default=None, max_length=8_000)
+    error: str | None = Field(default=None, max_length=2_000)
+    requires_confirmation: bool = True
+
+
 class MathPayload(SolveMathTarget):
     """Deterministic verification input.
 
@@ -266,12 +288,55 @@ class ProblemExample(BaseModel):
     source_attempt_id: str | None = None
     reviewed_at: datetime | None = None
     reviewer_note: str = ""
+    revision: int = Field(default=1, ge=1)
     created_at: datetime
+    updated_at: datetime
 
 
 class ExampleReviewRequest(BaseModel):
     decision: ExampleReviewDecision
+    expected_revision: int = Field(ge=1)
     reviewer_note: str = Field(default="", max_length=4_000)
+
+
+class ExampleDraftUpdate(BaseModel):
+    """Complete replacement content for one unreviewed knowledge draft."""
+
+    expected_revision: int = Field(ge=1)
+    problem: str = Field(min_length=1, max_length=20_000)
+    solution: str = Field(min_length=1, max_length=40_000)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    method_hint: str | None = Field(default=None, max_length=200)
+    math_payload: MathPayload | None = None
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, values: list[str]) -> list[str]:
+        normalized = []
+        seen = set()
+        for value in values:
+            tag = " ".join(value.strip().lower().split())
+            if tag and tag not in seen:
+                normalized.append(tag)
+                seen.add(tag)
+        return normalized
+
+
+class ExampleVersion(BaseModel):
+    example_id: str
+    workspace_id: str
+    revision: int = Field(ge=1)
+    problem: str
+    solution: str
+    tags: list[str]
+    method_hint: str | None = None
+    problem_kind: ProblemKind
+    math_payload: MathPayload | None = None
+    verification: VerificationReport
+    extraction: MethodExtractionTrace | None = None
+    method_drafts: list[MethodDraftPreview] = Field(default_factory=list, max_length=50)
+    status: KnowledgeStatus
+    created_at: datetime
 
 
 _METHOD_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,79}$")
@@ -313,6 +378,11 @@ class MethodCard(BaseModel):
 
 
 class ExampleReviewResult(BaseModel):
+    example: ProblemExample
+    learned_methods: list[MethodCard]
+
+
+class ExampleDraftUpdateResult(BaseModel):
     example: ProblemExample
     learned_methods: list[MethodCard]
 

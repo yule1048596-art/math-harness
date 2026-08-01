@@ -18,11 +18,16 @@ from math_harness.models import (
     EvaluationRequest,
     EvaluationRun,
     ExampleCreate,
+    ExampleDraftUpdate,
+    ExampleDraftUpdateResult,
     ExampleReviewRequest,
     ExampleReviewResult,
+    ExampleVersion,
     HealthResponse,
     IngestionResult,
     LearningEvent,
+    MathTargetDraftRequest,
+    MathTargetDraftResult,
     MergeProposalStatus,
     MergeScanRequest,
     MethodCard,
@@ -101,6 +106,16 @@ def create_app(
         return service.get_workspace(workspace_id)
 
     @app.post(
+        "/workspaces/{workspace_id}/math-target-drafts",
+        response_model=MathTargetDraftResult,
+    )
+    def draft_math_target(
+        workspace_id: str,
+        request: MathTargetDraftRequest,
+    ) -> MathTargetDraftResult:
+        return service.draft_math_target(workspace_id, request)
+
+    @app.post(
         "/workspaces/{workspace_id}/examples",
         response_model=IngestionResult,
         status_code=201,
@@ -121,6 +136,27 @@ def create_app(
     )
     def get_example(workspace_id: str, example_id: str) -> ProblemExample:
         return service.get_example(workspace_id, example_id)
+
+    @app.patch(
+        "/workspaces/{workspace_id}/examples/{example_id}",
+        response_model=ExampleDraftUpdateResult,
+    )
+    def update_example_draft(
+        workspace_id: str,
+        example_id: str,
+        request: ExampleDraftUpdate,
+    ) -> ExampleDraftUpdateResult:
+        return service.update_example_draft(workspace_id, example_id, request)
+
+    @app.get(
+        "/workspaces/{workspace_id}/examples/{example_id}/versions",
+        response_model=list[ExampleVersion],
+    )
+    def list_example_versions(
+        workspace_id: str,
+        example_id: str,
+    ) -> list[ExampleVersion]:
+        return service.list_example_versions(workspace_id, example_id)
 
     @app.post(
         "/workspaces/{workspace_id}/examples/{example_id}/review",

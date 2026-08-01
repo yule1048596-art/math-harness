@@ -1,8 +1,9 @@
 # Math Harness
 
-一个面向数学专家成长的本地优先 Harness。v0.7.0 接通了第一条安全的对话成长闭环：
-每次成功求解会自动形成带来源的知识草稿，macOS App 提供例题与方法草稿复核队列；
-只有独立数学验证通过且经人工确认的内容才能晋级正式方法库。
+一个面向数学专家成长的本地优先 Harness。v0.8.0 把对话成长闭环推进到可修正状态：
+自然语言题目可以先整理成由用户确认的可验证目标；自动生成的知识草稿允许编辑，并在
+保存后重新执行数学验证与方法提炼。旧内容按修订版本留档，只有新版本独立验证通过且经
+人工确认后，才会晋级正式方法库。
 
 v0.5.1 收紧了成长系统最关键的三条边界：未经复核的数据不能改写已晋级知识，重叠方法
 合并不能重复应用，训练与全部留出集必须在评测开始前通过全局隔离检查。
@@ -37,6 +38,31 @@ v0.3.3 之前，方法卡一旦创建内容就永久冻结，后续例子只能�
     未显式指定方法的人工纠正不参与计分；
 14. 以新记录保存人工纠正，不覆盖原始错误历史；
 15. 分别使用独立留出集评测方法检索和端到端解题门禁。
+
+## v0.8.0 新增：目标确认与可修订知识
+
+- 输入自然语言极限、渐进展开或等价问题后，macOS App 会先调用本地规则或 MiMo 生成
+  `SolveMathTarget` 建议稿，填入表达式、变量、参数、趋近点、方向、验证模式、余项阶数
+  与假设。建议稿必须先通过受限数学解析器，并由用户检查、编辑和再次确认；它不会静默
+  进入求解或验证。
+- 如果无法可靠整理目标，App 会解释原因；用户可以手动填写，也可以明确继续非结构化
+  对话。模型不可用时自动退回本地规则，不会把网络失败伪装成已确认目标。
+- 待复核例题现在可以编辑题目、解答、标签、方法提示及完整 `math_payload`。保存后旧验证
+  结论和旧方法草稿全部失效，服务重新验证、重新提炼，并把修订号递增。
+- 每次编辑前的完整内容写入 `example_versions`；API 使用 `expected_revision` 防止过期页面
+  覆盖新内容。验证失败但尚未人工驳回的自动草稿仍显示在待办区，可以继续修复。
+- 修订会解除旧的待审方法证据；失去来源的方法进入不可检索暂存态，重新出现时可恢复为
+  待审，正式方法不会被未复核编辑改写。
+- SQLite 首次打开旧工作区时自动增加 `revision`、`updated_at` 和例题版本表；无需手工
+  数据迁移。
+
+新增 API：
+
+```text
+POST  /workspaces/{id}/math-target-drafts
+PATCH /workspaces/{id}/examples/{example_id}
+GET   /workspaces/{id}/examples/{example_id}/versions
+```
 
 ## v0.7.0 新增：对话成长闭环
 
@@ -220,6 +246,7 @@ uv sync --no-editable --extra dev --extra llm
 ```dotenv
 MATH_HARNESS_METHOD_EXTRACTOR=rules
 MATH_HARNESS_SOLVER=mimo
+MATH_HARNESS_TARGET_DRAFTER=mimo
 MIMO_API_KEY=your-mimo-key
 MATH_HARNESS_MIMO_BASE_URL=https://api.xiaomimimo.com/v1
 MATH_HARNESS_MIMO_MODEL=mimo-v2.5-pro
@@ -241,6 +268,9 @@ Harness 会在本地用 Pydantic 校验 JSON，失败时携带 Schema 错误重�
 仍失败时，默认进入一次模型纠错阶段，再失败才使用 SymPy。SDK 传输层重试显式设为
 `0`，避免隐式放大请求次数；一次 JSON 纠错阶段仍可能因本地 Schema 失败调用模型
 两次。
+`MATH_HARNESS_TARGET_DRAFTER` 未显式设置时会跟随联网求解器；每次点击“自动整理”最多
+增加一次目标建议请求。无论来源是 MiMo、OpenAI 还是本地规则，建议稿都必须经过安全
+解析并由用户确认。
 若不希望产生额外模型费用，可把 `MATH_HARNESS_VERIFICATION_REPAIR` 设为 `false`；
 确定性回退也可独立关闭。
 
