@@ -4,6 +4,7 @@ enum AppSettingsKey {
   static let solverProvider = "solverProvider"
   static let mimoBaseURL = "mimoBaseURL"
   static let mimoModel = "mimoModel"
+  static let mimoMethodExtraction = "mimoMethodExtraction"
   static let maxOutputTokens = "maxOutputTokens"
 }
 
@@ -35,6 +36,13 @@ enum AppSettings {
   static var mimoModel: String {
     UserDefaults.standard.string(forKey: AppSettingsKey.mimoModel)
       ?? "mimo-v2.5-pro"
+  }
+
+  static var mimoMethodExtraction: Bool {
+    if UserDefaults.standard.object(forKey: AppSettingsKey.mimoMethodExtraction) == nil {
+      return true
+    }
+    return UserDefaults.standard.bool(forKey: AppSettingsKey.mimoMethodExtraction)
   }
 
   static var maxOutputTokens: Int {

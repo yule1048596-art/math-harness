@@ -20,6 +20,16 @@ class KnowledgeStatus(StrEnum):
     DEPRECATED = "deprecated"
 
 
+class ExampleOrigin(StrEnum):
+    MANUAL = "manual"
+    CONVERSATION = "conversation"
+
+
+class ExampleReviewDecision(StrEnum):
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
 class VerificationStatus(StrEnum):
     VERIFIED = "verified"
     NEEDS_REVIEW = "needs_review"
@@ -228,6 +238,16 @@ class MethodExtractionTrace(BaseModel):
     confidence_by_method: dict[str, float] = Field(default_factory=dict)
 
 
+class MethodDraftPreview(BaseModel):
+    key: str
+    name: str
+    goal: str
+    applicable_when: list[str]
+    procedure: list[str]
+    failure_modes: list[str]
+    tags: list[str]
+
+
 class ProblemExample(BaseModel):
     id: str
     workspace_id: str
@@ -240,8 +260,18 @@ class ProblemExample(BaseModel):
     math_payload: MathPayload | None = None
     verification: VerificationReport
     extraction: MethodExtractionTrace | None = None
+    method_drafts: list[MethodDraftPreview] = Field(default_factory=list, max_length=50)
     status: KnowledgeStatus
+    origin: ExampleOrigin = ExampleOrigin.MANUAL
+    source_attempt_id: str | None = None
+    reviewed_at: datetime | None = None
+    reviewer_note: str = ""
     created_at: datetime
+
+
+class ExampleReviewRequest(BaseModel):
+    decision: ExampleReviewDecision
+    reviewer_note: str = Field(default="", max_length=4_000)
 
 
 _METHOD_KEY_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,79}$")
@@ -280,6 +310,17 @@ class MethodCard(BaseModel):
     @classmethod
     def validate_key(cls, value: str | MethodKind) -> str:
         return _normalize_method_key(value)
+
+
+class ExampleReviewResult(BaseModel):
+    example: ProblemExample
+    learned_methods: list[MethodCard]
+
+
+class ConversationCaptureResult(BaseModel):
+    example: ProblemExample
+    learned_methods: list[MethodCard]
+    created: bool
 
 
 class MethodVersion(BaseModel):

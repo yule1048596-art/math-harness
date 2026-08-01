@@ -1,8 +1,7 @@
 # Math Harness for macOS
 
-v0.6.0 引入第一个原生 macOS 客户端。SwiftUI 负责工作区、对话、验证状态和方法卡审阅；
-现有 Python/SymPy 服务作为独立子进程运行，因此数学内核无需重写，计算异常也不会直接
-卡住界面。
+v0.7.0 在原生 macOS 客户端中接通对话成长闭环。SwiftUI 负责工作区、数学对话、验证
+状态、知识草稿复核和方法卡审阅；现有 Python/SymPy 服务继续作为独立子进程运行。
 
 ## 开发运行
 
@@ -36,7 +35,7 @@ swift run --package-path macos/MathHarnessApp MathHarnessCoreChecks
 
 ```bash
 ./scripts/build_macos_app.sh
-ditto -x -k "dist/Math-Harness-0.6.0-macOS-arm64.zip" /tmp/math-harness-alpha
+ditto -x -k "dist/Math-Harness-0.7.0-macOS-arm64.zip" /tmp/math-harness-alpha
 open "/tmp/math-harness-alpha/Math Harness.app"
 ```
 
@@ -70,13 +69,18 @@ export MATH_HARNESS_NOTARY_PROFILE="math-harness-notary"
 分发构建不会启用它。沙箱版还需要给嵌入的 Python helper 配置继承权限并完成商店审核，
 不能只给主 App 打开沙箱开关。
 
-## v0.6.0 Alpha 边界
+## v0.7.0 Alpha 边界
 
-- 目前支持工作区创建/切换、历史求解、结构化验证目标、方法卡查看与人工晋级/废弃。
+- 支持工作区创建/切换、历史求解、结构化验证目标、对话自动记忆、例题与方法草稿复核，
+  以及方法卡查看/废弃。只有独立验证通过的草稿可以由人工确认晋级。
+- 选择 MiMo 后默认同时使用 MiMo 提炼新方法；可在设置中关闭“求解后使用 MiMo 提炼
+  方法”，以避免额外请求并退回内置规则模板。
 - 现有 CLI `.math_harness/` 数据不会自动迁移；App 使用 Application Support 中的新数据
   根目录。正式迁移工具将在稳定版前补齐。
 - 数学表达式暂以可选择的等宽文本展示；离线 LaTeX 排版留到后续版本。
 - 打包脚本当前构建本机架构。首个公开 macOS 构建以 Apple Silicon 为目标，Universal 2
   和自动更新在后续版本处理。
-- 这一版尚未把一次成功对话自动转成待审知识案例，成长闭环仍需显式摄取接口；这将是
-  v0.7.0 的核心工作。
+- 自动记忆当前是同步摄取：启用 MiMo 方法提炼时会增加一次请求和相应等待时间；失败
+  会自动退回规则提取且不会影响已经完成的求解，捕获 API 也可幂等重试。
+- 对话记忆会让 App 新建的数据自然进入复核队列；旧 CLI `.math_harness/` 数据仍不会
+  自动搬入 Application Support。

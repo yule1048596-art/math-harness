@@ -5,6 +5,7 @@ struct SettingsView: View {
   @AppStorage(AppSettingsKey.solverProvider) private var provider = SolverProvider.sympy.rawValue
   @AppStorage(AppSettingsKey.mimoBaseURL) private var baseURL = "https://api.xiaomimimo.com/v1"
   @AppStorage(AppSettingsKey.mimoModel) private var modelName = "mimo-v2.5-pro"
+  @AppStorage(AppSettingsKey.mimoMethodExtraction) private var mimoMethodExtraction = true
   @AppStorage(AppSettingsKey.maxOutputTokens) private var maxOutputTokens = 3_000
   @State private var apiKey = ""
   @State private var keychainError: String?
@@ -23,6 +24,10 @@ struct SettingsView: View {
           SecureField("MiMo API Key", text: $apiKey)
           TextField("Base URL", text: $baseURL)
           TextField("模型", text: $modelName)
+          Toggle("求解后使用 MiMo 提炼方法", isOn: $mimoMethodExtraction)
+          Text("开启后每次可记忆的答案会增加一次模型请求；关闭后使用内置规则模板。")
+            .font(.caption)
+            .foregroundStyle(.secondary)
           Text("密钥只保存在 macOS 钥匙串中，不会写入工作区数据库或项目文件。")
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -55,7 +60,7 @@ struct SettingsView: View {
     }
     .formStyle(.grouped)
     .padding(10)
-    .frame(width: 520, height: 390)
+    .frame(width: 520, height: 460)
     .onAppear(perform: loadAPIKey)
     .alert(
       "无法保存设置",

@@ -74,13 +74,34 @@ WORKSPACE_ID="$(jq -r .id <<<"$WORKSPACE")"
 SOLUTION="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     -H 'Content-Type: application/json' \
-    --data-binary '{"problem":"求 sqrt(x^2+x)-x 的渐进展开","tags":["radical"],"math_target":{"expression":"sqrt(x**2+x)-x","variable":"x","point":"oo","mode":"asymptotic_expansion","remainder_power":2}}' \
+    --data-binary '{"problem":"使用共轭有理化和泰勒展开求 sqrt(x^2+x)-x 的渐进展开","tags":["radical"],"math_target":{"expression":"sqrt(x**2+x)-x","variable":"x","point":"oo","mode":"asymptotic_expansion","remainder_power":2}}' \
     "$BASE_URL/workspaces/$WORKSPACE_ID/solve")"
 [[ "$(jq -r .status <<<"$SOLUTION")" == "verified" ]]
 [[ "$(jq -r .generation.fallback_used <<<"$SOLUTION")" == "true" ]]
+ATTEMPT_ID="$(jq -r .id <<<"$SOLUTION")"
+EXAMPLES="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/examples")"
+CAPTURED="$(jq -c --arg attempt "$ATTEMPT_ID" \
+    '.[] | select(.source_attempt_id == $attempt)' <<<"$EXAMPLES")"
+[[ "$(jq -r .origin <<<"$CAPTURED")" == "conversation" ]]
+[[ "$(jq -r .status <<<"$CAPTURED")" == "pending_review" ]]
+[[ "$(jq -r .verification.status <<<"$CAPTURED")" == "verified" ]]
+[[ "$(jq -r '.method_drafts | length > 0' <<<"$CAPTURED")" == "true" ]]
+EXAMPLE_ID="$(jq -r .id <<<"$CAPTURED")"
+REVIEW="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"decision":"approve","reviewer_note":"packaged E2E"}' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/examples/$EXAMPLE_ID/review")"
+[[ "$(jq -r .example.status <<<"$REVIEW")" == "promoted" ]]
+[[ "$(jq -r '.learned_methods | length > 0' <<<"$REVIEW")" == "true" ]]
+[[ "$(jq -r '[.learned_methods[].status] | all(. == "promoted")' <<<"$REVIEW")" == "true" ]]
 
 print "health=$(jq -r '.status + " v" + .version' <<<"$HEALTH")"
 print "workspace=$(jq -r .name <<<"$WORKSPACE")"
 print "solve_status=$(jq -r .status <<<"$SOLUTION")"
 print "answer=$(jq -r .candidate.answer_expression <<<"$SOLUTION")"
 print "model_fallback=$(jq -r .generation.fallback_used <<<"$SOLUTION")"
+print "knowledge_capture=$(jq -r '.origin + " → " + .status' <<<"$CAPTURED")"
+print "knowledge_review=$(jq -r .example.status <<<"$REVIEW")"

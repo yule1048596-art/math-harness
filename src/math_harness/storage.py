@@ -18,6 +18,7 @@ from math_harness.models import (
     MergeProposalStatus,
     MethodCard,
     MethodDraft,
+    MethodExtractionTrace,
     MethodMergeProposal,
     MethodVersion,
     ProblemExample,
@@ -165,7 +166,12 @@ class WorkspaceStore:
                     math_payload_json TEXT,
                     verification_json TEXT NOT NULL,
                     extraction_json TEXT,
+                    method_drafts_json TEXT NOT NULL DEFAULT '[]',
                     status TEXT NOT NULL,
+                    origin TEXT NOT NULL DEFAULT 'manual',
+                    source_attempt_id TEXT,
+                    reviewed_at TEXT,
+                    reviewer_note TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     CHECK (workspace_id <> '')
                 );
@@ -299,8 +305,35 @@ class WorkspaceStore:
             self._ensure_column(
                 connection,
                 "examples",
+                "method_drafts_json",
+                "TEXT NOT NULL DEFAULT '[]'",
+            )
+            self._ensure_column(
+                connection,
+                "examples",
                 "reviewed",
                 "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                connection,
+                "examples",
+                "origin",
+                "TEXT NOT NULL DEFAULT 'manual'",
+            )
+            self._ensure_column(connection, "examples", "source_attempt_id", "TEXT")
+            self._ensure_column(connection, "examples", "reviewed_at", "TEXT")
+            self._ensure_column(
+                connection,
+                "examples",
+                "reviewer_note",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            connection.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_examples_source_attempt
+                ON examples(workspace_id, source_attempt_id)
+                WHERE source_attempt_id IS NOT NULL
+                """
             )
             self._ensure_column(
                 connection,
@@ -322,7 +355,11 @@ class WorkspaceStore:
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
-    def add_example(self, example: ProblemExample) -> ProblemExample:
+    def add_example(
+        self,
+        example: ProblemExample,
+        method_drafts: list[MethodDraft] | None = None,
+    ) -> ProblemExample:
         self._assert_workspace(example.workspace_id)
         with self.connection() as connection:
             connection.execute(
@@ -330,8 +367,9 @@ class WorkspaceStore:
                 INSERT INTO examples (
                     id, workspace_id, problem, solution, tags_json, method_hint,
                     reviewed, problem_kind, math_payload_json, verification_json,
-                    extraction_json, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    extraction_json, method_drafts_json, status, origin,
+                    source_attempt_id, reviewed_at, reviewer_note, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     example.id,
@@ -353,7 +391,14 @@ class WorkspaceStore:
                         if example.extraction
                         else None
                     ),
+                    _dump(
+                        [draft.model_dump(mode="json") for draft in method_drafts or []]
+                    ),
                     example.status.value,
+                    example.origin.value,
+                    example.source_attempt_id,
+                    example.reviewed_at.isoformat() if example.reviewed_at else None,
+                    example.reviewer_note,
                     example.created_at.isoformat(),
                 ),
             )
@@ -364,6 +409,8 @@ class WorkspaceStore:
                 {
                     "status": example.status.value,
                     "reviewed": example.reviewed,
+                    "origin": example.origin.value,
+                    "source_attempt_id": example.source_attempt_id,
                 },
             )
         return example
@@ -386,6 +433,207 @@ class WorkspaceStore:
             ).fetchall()
         return [self._row_to_example(row) for row in rows]
 
+    def get_example_by_source_attempt(self, attempt_id: str) -> ProblemExample | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM examples
+                WHERE workspace_id = ? AND source_attempt_id = ?
+                """,
+                (self.workspace_id, attempt_id),
+            ).fetchone()
+        return self._row_to_example(row) if row is not None else None
+
+    def get_example_method_drafts(self, example_id: str) -> list[MethodDraft]:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT method_drafts_json FROM examples
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (example_id, self.workspace_id),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"example not found in workspace: {example_id}")
+        return [
+            MethodDraft.model_validate(item)
+            for item in json.loads(row["method_drafts_json"] or "[]")
+        ]
+
+    def list_methods_for_example(self, example_id: str) -> list[MethodCard]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT methods.* FROM methods
+                JOIN method_examples
+                  ON method_examples.method_id = methods.id
+                 AND method_examples.workspace_id = methods.workspace_id
+                WHERE method_examples.workspace_id = ?
+                  AND method_examples.example_id = ?
+                ORDER BY methods.created_at, methods.id
+                """,
+                (self.workspace_id, example_id),
+            ).fetchall()
+        return [self.get_method(row["id"]) for row in rows]
+
+    def complete_example_review(
+        self,
+        example_id: str,
+        reviewer_note: str,
+        *,
+        extraction: MethodExtractionTrace | None = None,
+        method_drafts: list[MethodDraft] | None = None,
+    ) -> ProblemExample:
+        now = utc_now()
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT status FROM examples
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (example_id, self.workspace_id),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound(f"example not found in workspace: {example_id}")
+            fields = [
+                "reviewed = 1",
+                "status = ?",
+                "reviewed_at = ?",
+                "reviewer_note = ?",
+            ]
+            values: list[object] = [
+                KnowledgeStatus.PROMOTED.value,
+                now.isoformat(),
+                reviewer_note,
+            ]
+            if extraction is not None:
+                fields.append("extraction_json = ?")
+                values.append(_dump(extraction.model_dump(mode="json")))
+            if method_drafts is not None:
+                fields.append("method_drafts_json = ?")
+                values.append(
+                    _dump([draft.model_dump(mode="json") for draft in method_drafts])
+                )
+            values.extend([example_id, self.workspace_id])
+            connection.execute(
+                f"""
+                UPDATE examples SET {", ".join(fields)}
+                WHERE id = ? AND workspace_id = ?
+                """,
+                values,
+            )
+            self._record_event(
+                connection,
+                "example_review_approved",
+                example_id,
+                {
+                    "from": row["status"],
+                    "to": KnowledgeStatus.PROMOTED.value,
+                    "reviewer_note": reviewer_note,
+                },
+            )
+        return self.get_example(example_id)
+
+    def reject_example(self, example_id: str, reviewer_note: str) -> ProblemExample:
+        """Reject a draft and retire pending methods that have no evidence left."""
+
+        now = utc_now()
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT status FROM examples
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (example_id, self.workspace_id),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound(f"example not found in workspace: {example_id}")
+            linked_rows = connection.execute(
+                """
+                SELECT method_id FROM method_examples
+                WHERE workspace_id = ? AND example_id = ?
+                """,
+                (self.workspace_id, example_id),
+            ).fetchall()
+            connection.execute(
+                """
+                DELETE FROM method_examples
+                WHERE workspace_id = ? AND example_id = ?
+                """,
+                (self.workspace_id, example_id),
+            )
+            retired_method_ids: list[str] = []
+            for linked in linked_rows:
+                method_id = linked["method_id"]
+                remaining = connection.execute(
+                    """
+                    SELECT 1 FROM method_examples
+                    WHERE workspace_id = ? AND method_id = ? LIMIT 1
+                    """,
+                    (self.workspace_id, method_id),
+                ).fetchone()
+                if remaining is not None:
+                    continue
+                updated = connection.execute(
+                    """
+                    UPDATE methods
+                    SET status = ?, version = version + 1, updated_at = ?
+                    WHERE id = ? AND workspace_id = ?
+                      AND status IN (?, ?)
+                    """,
+                    (
+                        KnowledgeStatus.REJECTED.value,
+                        now.isoformat(),
+                        method_id,
+                        self.workspace_id,
+                        KnowledgeStatus.PENDING_REVIEW.value,
+                        KnowledgeStatus.CAPTURED.value,
+                    ),
+                )
+                if updated.rowcount:
+                    retired_method_ids.append(method_id)
+                    self._record_event(
+                        connection,
+                        "orphan_pending_method_rejected",
+                        method_id,
+                        {"rejected_example_id": example_id},
+                    )
+            connection.execute(
+                """
+                UPDATE examples
+                SET reviewed = 0, status = ?, reviewed_at = ?, reviewer_note = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    KnowledgeStatus.REJECTED.value,
+                    now.isoformat(),
+                    reviewer_note,
+                    example_id,
+                    self.workspace_id,
+                ),
+            )
+            self._record_event(
+                connection,
+                "example_review_rejected",
+                example_id,
+                {
+                    "from": row["status"],
+                    "to": KnowledgeStatus.REJECTED.value,
+                    "reviewer_note": reviewer_note,
+                    "retired_method_ids": retired_method_ids,
+                },
+            )
+        return self.get_example(example_id)
+
+    def record_learning_event(
+        self,
+        event_type: str,
+        target_id: str,
+        payload: dict[str, object],
+    ) -> None:
+        with self.connection() as connection:
+            self._record_event(connection, event_type, target_id, payload)
+
     def upsert_method(
         self,
         draft: MethodDraft,
@@ -393,6 +641,8 @@ class WorkspaceStore:
         status: KnowledgeStatus,
         verified: bool,
         features: StructuralFeatures | None = None,
+        *,
+        idempotent_evidence: bool = False,
     ) -> MethodCard:
         """Create or evolve a method without letting unreviewed data cross trust levels.
 
@@ -457,6 +707,16 @@ class WorkspaceStore:
                 method_id = existing["id"]
                 current = self._row_to_method(existing, [])
                 current_status = KnowledgeStatus(existing["status"])
+                already_linked = (
+                    connection.execute(
+                        """
+                        SELECT 1 FROM method_examples
+                        WHERE workspace_id = ? AND method_id = ? AND example_id = ?
+                        """,
+                        (self.workspace_id, method_id, example_id),
+                    ).fetchone()
+                    is not None
+                )
                 protected = {
                     KnowledgeStatus.PROMOTED,
                     KnowledgeStatus.REJECTED,
@@ -467,7 +727,20 @@ class WorkspaceStore:
                     KnowledgeStatus.DEPRECATED,
                 }
 
-                if (not verified and current_status in protected) or (
+                if (
+                    idempotent_evidence
+                    and verified
+                    and already_linked
+                    and current_status is KnowledgeStatus.PROMOTED
+                ):
+                    ignored = True
+                    self._record_event(
+                        connection,
+                        "duplicate_verified_evidence_ignored",
+                        method_id,
+                        {"example_id": example_id},
+                    )
+                elif (not verified and current_status in protected) or (
                     verified and current_status in retired
                 ):
                     ignored = True
@@ -1517,7 +1790,12 @@ class WorkspaceStore:
                     if row["extraction_json"]
                     else None
                 ),
+                "method_drafts": json.loads(row["method_drafts_json"] or "[]"),
                 "status": row["status"],
+                "origin": row["origin"],
+                "source_attempt_id": row["source_attempt_id"],
+                "reviewed_at": row["reviewed_at"],
+                "reviewer_note": row["reviewer_note"],
                 "created_at": row["created_at"],
             }
         )

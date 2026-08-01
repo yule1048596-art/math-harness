@@ -7,6 +7,7 @@ from pathlib import Path
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
 from math_harness.dedup import find_merge_candidates
+from math_harness.errors import InvalidKnowledgeState
 from math_harness.extraction import (
     MethodExtractorProtocol,
     build_method_extractor_from_env,
@@ -15,11 +16,16 @@ from math_harness.models import (
     AnswerKind,
     CandidateSolution,
     CandidateStep,
+    ConversationCaptureResult,
     EvaluationCaseResult,
     EvaluationMetrics,
     EvaluationRequest,
     EvaluationRun,
     ExampleCreate,
+    ExampleOrigin,
+    ExampleReviewDecision,
+    ExampleReviewRequest,
+    ExampleReviewResult,
     ExtractionStatus,
     GenerationStageKind,
     GenerationStatus,
@@ -97,8 +103,25 @@ class MathHarnessService:
     def ingest_example(
         self, workspace_id: str, request: ExampleCreate
     ) -> IngestionResult:
+        return self._ingest_example(
+            workspace_id,
+            request,
+            origin=ExampleOrigin.MANUAL,
+        )
+
+    def _ingest_example(
+        self,
+        workspace_id: str,
+        request: ExampleCreate,
+        *,
+        origin: ExampleOrigin,
+        source_attempt_id: str | None = None,
+        verification_override: VerificationReport | None = None,
+    ) -> IngestionResult:
         store = self.workspaces.store(workspace_id)
-        verification = self.verifier.verify(request.math_payload)
+        verification = verification_override or self.verifier.verify(
+            request.math_payload
+        )
         promotion_approved = (
             verification.status is VerificationStatus.VERIFIED and request.reviewed
         )
@@ -110,6 +133,42 @@ class MathHarnessService:
             status = KnowledgeStatus.PENDING_REVIEW
 
         extraction_result = self._extract_methods(request, verification.status)
+        if origin is ExampleOrigin.CONVERSATION:
+            # A generic fallback is useful for explicit corpus ingestion, but on
+            # every chat turn it would create a low-signal method card. Keep the
+            # problem/solution draft while waiting for actual method evidence.
+            kept_methods = [
+                draft
+                for draft in extraction_result.methods
+                if draft.key != "generic_example"
+            ]
+            kept_keys = {draft.key for draft in kept_methods}
+            if len(kept_methods) != len(extraction_result.methods):
+                extraction_result = extraction_result.model_copy(
+                    update={
+                        "methods": kept_methods,
+                        "trace": extraction_result.trace.model_copy(
+                            update={
+                                "extracted_method_keys": [
+                                    key
+                                    for key in extraction_result.trace.extracted_method_keys
+                                    if key in kept_keys
+                                ],
+                                "evidence_by_method": {
+                                    key: evidence
+                                    for key, evidence in extraction_result.trace.evidence_by_method.items()
+                                    if key in kept_keys
+                                },
+                                "confidence_by_method": {
+                                    key: confidence
+                                    for key, confidence in extraction_result.trace.confidence_by_method.items()
+                                    if key in kept_keys
+                                },
+                            }
+                        ),
+                    }
+                )
+        now = utc_now()
         example = ProblemExample(
             id=str(uuid.uuid4()),
             workspace_id=workspace_id,
@@ -122,10 +181,16 @@ class MathHarnessService:
             math_payload=request.math_payload,
             verification=verification,
             extraction=extraction_result.trace,
+            method_drafts=[
+                draft.model_dump(mode="json") for draft in extraction_result.methods
+            ],
             status=status,
-            created_at=utc_now(),
+            origin=origin,
+            source_attempt_id=source_attempt_id,
+            reviewed_at=now if request.reviewed else None,
+            created_at=now,
         )
-        store.add_example(example)
+        store.add_example(example, extraction_result.methods)
 
         learned_methods: list[MethodCard] = []
         if verification.status is not VerificationStatus.REJECTED:
@@ -190,6 +255,166 @@ class MathHarnessService:
     def list_examples(self, workspace_id: str) -> list[ProblemExample]:
         return self.workspaces.store(workspace_id).list_examples()
 
+    def capture_solution_attempt(
+        self,
+        workspace_id: str,
+        attempt_id: str,
+    ) -> ConversationCaptureResult:
+        """Turn one persisted conversation into one idempotent knowledge draft."""
+
+        store = self.workspaces.store(workspace_id)
+        existing = store.get_example_by_source_attempt(attempt_id)
+        if existing is not None:
+            return ConversationCaptureResult(
+                example=existing,
+                learned_methods=store.list_methods_for_example(existing.id),
+                created=False,
+            )
+
+        attempt = store.get_solution_attempt(attempt_id)
+        candidate = attempt.candidate
+        if candidate is None:
+            raise InvalidKnowledgeState(
+                "生成失败的求解记录没有候选解，不能转为知识草稿。"
+            )
+
+        math_payload: MathPayload | None = None
+        if (
+            attempt.math_target is not None
+            and candidate.answer_kind is AnswerKind.EXPRESSION
+            and candidate.answer_expression
+        ):
+            math_payload = MathPayload(
+                **attempt.math_target.model_dump(),
+                expected=candidate.answer_expression,
+            )
+        method_hint = ", ".join(candidate.used_method_keys) or None
+        if method_hint is not None:
+            method_hint = method_hint[:200]
+        result = self._ingest_example(
+            workspace_id,
+            ExampleCreate(
+                problem=attempt.problem,
+                solution=self._candidate_solution_text(candidate),
+                tags=attempt.tags,
+                method_hint=method_hint,
+                math_payload=math_payload,
+                reviewed=False,
+            ),
+            origin=ExampleOrigin.CONVERSATION,
+            source_attempt_id=attempt.id,
+            verification_override=attempt.verification,
+        )
+        return ConversationCaptureResult(
+            example=result.example,
+            learned_methods=result.learned_methods,
+            created=True,
+        )
+
+    def review_example(
+        self,
+        workspace_id: str,
+        example_id: str,
+        request: ExampleReviewRequest,
+    ) -> ExampleReviewResult:
+        store = self.workspaces.store(workspace_id)
+        example = store.get_example(example_id)
+
+        if request.decision is ExampleReviewDecision.REJECT:
+            if example.status is KnowledgeStatus.PROMOTED:
+                raise InvalidKnowledgeState(
+                    "已晋级例题不能直接驳回；请单独废弃受影响的方法卡。"
+                )
+            if example.status is KnowledgeStatus.REJECTED:
+                return ExampleReviewResult(example=example, learned_methods=[])
+            rejected = store.reject_example(example.id, request.reviewer_note)
+            return ExampleReviewResult(example=rejected, learned_methods=[])
+
+        if example.status is KnowledgeStatus.PROMOTED and example.reviewed:
+            return ExampleReviewResult(
+                example=example,
+                learned_methods=store.list_methods_for_example(example.id),
+            )
+        if example.status in {
+            KnowledgeStatus.REJECTED,
+            KnowledgeStatus.DEPRECATED,
+        }:
+            raise InvalidKnowledgeState("已拒绝或废弃的例题不能晋级。")
+        if example.source_attempt_id is not None:
+            source_attempt = store.get_solution_attempt(example.source_attempt_id)
+            if source_attempt.status is not SolutionAttemptStatus.VERIFIED:
+                raise InvalidKnowledgeState(
+                    "来源求解记录未完整通过独立数学验证，不能晋级这条例题。"
+                )
+
+        fresh_verification = self.verifier.verify(example.math_payload)
+        if fresh_verification.status is not VerificationStatus.VERIFIED:
+            raise InvalidKnowledgeState(
+                "只有独立数学验证通过的例题才能晋级；请先补充可验证数学目标。"
+            )
+
+        drafts = store.get_example_method_drafts(example.id)
+        replacement_extraction: MethodExtractionTrace | None = None
+        if (
+            not drafts
+            and example.extraction is not None
+            and example.extraction.extracted_method_keys
+        ):
+            extraction_result = self._extract_methods(
+                ExampleCreate(
+                    problem=example.problem,
+                    solution=example.solution,
+                    tags=example.tags,
+                    method_hint=example.method_hint,
+                    math_payload=example.math_payload,
+                    reviewed=True,
+                ),
+                fresh_verification.status,
+            )
+            drafts = extraction_result.methods
+            replacement_extraction = extraction_result.trace
+
+        features = extract_features(example.math_payload)
+        learned_methods = [
+            store.upsert_method(
+                draft=draft,
+                example_id=example.id,
+                status=KnowledgeStatus.PROMOTED,
+                verified=True,
+                features=features,
+                idempotent_evidence=True,
+            )
+            for draft in drafts
+        ]
+        reviewed = store.complete_example_review(
+            example.id,
+            request.reviewer_note,
+            extraction=replacement_extraction,
+            method_drafts=drafts if replacement_extraction is not None else None,
+        )
+        return ExampleReviewResult(
+            example=reviewed,
+            learned_methods=learned_methods,
+        )
+
+    @staticmethod
+    def _candidate_solution_text(candidate: CandidateSolution) -> str:
+        parts = [candidate.answer_text.strip()]
+        if candidate.steps:
+            rendered_steps = []
+            for index, step in enumerate(candidate.steps, start=1):
+                line = f"{index}. {step.explanation.strip()}"
+                if step.expression:
+                    line += f"\n   {step.expression.strip()}"
+                rendered_steps.append(line)
+            parts.append("解题步骤：\n" + "\n".join(rendered_steps))
+        if (
+            candidate.answer_expression
+            and candidate.answer_expression not in candidate.answer_text
+        ):
+            parts.append(f"最终表达式：{candidate.answer_expression}")
+        return "\n\n".join(part for part in parts if part).strip()[:40_000]
+
     def list_methods(
         self,
         workspace_id: str,
@@ -241,6 +466,8 @@ class MathHarnessService:
         method_id: str,
         request: MethodStatusUpdate,
     ) -> MethodCard:
+        if request.status is KnowledgeStatus.PROMOTED:
+            raise InvalidKnowledgeState("方法卡只能通过已验证例题的人工复核晋级。")
         return self.workspaces.store(workspace_id).update_method_status(
             method_id, request.status
         )
@@ -299,7 +526,42 @@ class MathHarnessService:
         request: SolveRequest,
     ) -> SolutionAttempt:
         attempt = self._build_solution_attempt(workspace_id, request)
-        return self.workspaces.store(workspace_id).add_solution_attempt(attempt)
+        return self._persist_attempt_and_capture(workspace_id, attempt)
+
+    def _persist_attempt_and_capture(
+        self,
+        workspace_id: str,
+        attempt: SolutionAttempt,
+    ) -> SolutionAttempt:
+        store = self.workspaces.store(workspace_id)
+        saved = store.add_solution_attempt(attempt)
+        if saved.candidate is None:
+            store.record_learning_event(
+                "conversation_capture_skipped",
+                saved.id,
+                {"reason": "generation_failed"},
+            )
+            return saved
+        try:
+            capture = self.capture_solution_attempt(workspace_id, saved.id)
+            store.record_learning_event(
+                "conversation_capture_completed",
+                saved.id,
+                {
+                    "example_id": capture.example.id,
+                    "created": capture.created,
+                    "status": capture.example.status.value,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            # A knowledge-extraction failure must not make a completed solve look
+            # lost. The explicit /capture endpoint can safely retry this attempt.
+            store.record_learning_event(
+                "conversation_capture_failed",
+                saved.id,
+                {"error": f"{exc.__class__.__name__}: {exc}"[:2_000]},
+            )
+        return saved
 
     def _build_solution_attempt(
         self,
@@ -976,7 +1238,7 @@ class MathHarnessService:
             correction_of=original.id,
             generation_result=generation_result,
         )
-        return self.workspaces.store(workspace_id).add_solution_attempt(corrected)
+        return self._persist_attempt_and_capture(workspace_id, corrected)
 
     def evaluate_workspace(
         self, workspace_id: str, request: EvaluationRequest

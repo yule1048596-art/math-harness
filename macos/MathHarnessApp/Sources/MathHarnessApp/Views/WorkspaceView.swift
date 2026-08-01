@@ -30,6 +30,11 @@ struct WorkspaceView: View {
         }
       }
       Spacer()
+      if !model.pendingExamples.isEmpty {
+        Label("\(model.pendingExamples.count) 待复核", systemImage: "tray.full")
+          .font(.caption)
+          .foregroundStyle(.orange)
+      }
       Label("\(model.methods.count) 张方法卡", systemImage: "books.vertical")
         .font(.caption)
         .foregroundStyle(.secondary)
@@ -77,6 +82,7 @@ private struct AttemptTimeline: View {
 }
 
 private struct AttemptConversation: View {
+  @EnvironmentObject private var model: AppModel
   let attempt: SolutionAttempt
 
   var body: some View {
@@ -146,6 +152,11 @@ private struct AttemptConversation: View {
             VStack(alignment: .leading, spacing: 3) {
               Text(attempt.verification.summary)
                 .font(.caption)
+              if model.isAttemptCaptured(attempt.id) {
+                Label("已自动记入知识草稿", systemImage: "tray.and.arrow.down.fill")
+                  .font(.caption2)
+                  .foregroundStyle(.secondary)
+              }
               if !attempt.recommendedMethods.isEmpty {
                 Text(
                   "检索方法："

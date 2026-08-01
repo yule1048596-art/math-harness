@@ -8,11 +8,18 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from math_harness import __version__
-from math_harness.errors import RecordNotFound, WorkspaceNotFound
+from math_harness.errors import (
+    InvalidKnowledgeState,
+    RecordNotFound,
+    WorkspaceNotFound,
+)
 from math_harness.models import (
+    ConversationCaptureResult,
     EvaluationRequest,
     EvaluationRun,
     ExampleCreate,
+    ExampleReviewRequest,
+    ExampleReviewResult,
     HealthResponse,
     IngestionResult,
     LearningEvent,
@@ -73,6 +80,10 @@ def create_app(
     async def record_not_found_handler(_, exc: RecordNotFound):
         return _not_found(exc)
 
+    @app.exception_handler(InvalidKnowledgeState)
+    async def invalid_knowledge_state_handler(_, exc: InvalidKnowledgeState):
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(status="ok", version=__version__)
@@ -110,6 +121,17 @@ def create_app(
     )
     def get_example(workspace_id: str, example_id: str) -> ProblemExample:
         return service.get_example(workspace_id, example_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/examples/{example_id}/review",
+        response_model=ExampleReviewResult,
+    )
+    def review_example(
+        workspace_id: str,
+        example_id: str,
+        request: ExampleReviewRequest,
+    ) -> ExampleReviewResult:
+        return service.review_example(workspace_id, example_id, request)
 
     @app.get(
         "/workspaces/{workspace_id}/methods",
@@ -237,6 +259,16 @@ def create_app(
         attempt_id: str,
     ) -> SolutionAttempt:
         return service.get_solution_attempt(workspace_id, attempt_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/attempts/{attempt_id}/capture",
+        response_model=ConversationCaptureResult,
+    )
+    def capture_solution_attempt(
+        workspace_id: str,
+        attempt_id: str,
+    ) -> ConversationCaptureResult:
+        return service.capture_solution_attempt(workspace_id, attempt_id)
 
     @app.post(
         "/workspaces/{workspace_id}/attempts/{attempt_id}/corrections",
