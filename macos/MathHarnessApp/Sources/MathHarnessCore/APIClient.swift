@@ -57,6 +57,29 @@ public actor APIClient {
     )
   }
 
+  public func listExamples(workspaceID: String) async throws -> [ProblemExample] {
+    try await send(
+      path: "workspaces/\(workspaceID)/examples",
+      method: "GET"
+    )
+  }
+
+  public func reviewExample(
+    workspaceID: String,
+    exampleID: String,
+    decision: ExampleReviewDecision,
+    reviewerNote: String = ""
+  ) async throws -> ExampleReviewResult {
+    try await send(
+      path: "workspaces/\(workspaceID)/examples/\(exampleID)/review",
+      method: "POST",
+      body: ExampleReviewRequest(
+        decision: decision,
+        reviewerNote: reviewerNote
+      )
+    )
+  }
+
   public func solve(workspaceID: String, request: SolveRequest) async throws -> SolutionAttempt {
     try await send(
       path: "workspaces/\(workspaceID)/solve",

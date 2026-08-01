@@ -150,6 +150,66 @@ public struct VerificationReport: Codable, Equatable, Sendable {
   public let error: String?
 }
 
+public struct MethodExtractionSummary: Codable, Equatable, Sendable {
+  public let provider: String
+  public let model: String?
+  public let status: String
+  public let extractedMethodKeys: [String]
+
+  enum CodingKeys: String, CodingKey {
+    case provider, model, status
+    case extractedMethodKeys = "extracted_method_keys"
+  }
+}
+
+public struct MethodDraftPreview: Codable, Equatable, Sendable {
+  public let key: String
+  public let name: String
+  public let goal: String
+  public let applicableWhen: [String]
+  public let procedure: [String]
+  public let failureModes: [String]
+  public let tags: [String]
+
+  enum CodingKeys: String, CodingKey {
+    case key, name, goal, procedure, tags
+    case applicableWhen = "applicable_when"
+    case failureModes = "failure_modes"
+  }
+}
+
+public struct ProblemExample: Codable, Identifiable, Equatable, Sendable {
+  public let id: String
+  public let workspaceID: String
+  public let problem: String
+  public let solution: String
+  public let tags: [String]
+  public let methodHint: String?
+  public let reviewed: Bool
+  public let problemKind: String
+  public let verification: VerificationReport
+  public let extraction: MethodExtractionSummary?
+  public let methodDrafts: [MethodDraftPreview]
+  public let status: String
+  public let origin: String
+  public let sourceAttemptID: String?
+  public let reviewedAt: String?
+  public let reviewerNote: String
+  public let createdAt: String
+
+  enum CodingKeys: String, CodingKey {
+    case id, problem, solution, tags, reviewed, verification, extraction, status, origin
+    case workspaceID = "workspace_id"
+    case methodHint = "method_hint"
+    case problemKind = "problem_kind"
+    case methodDrafts = "method_drafts"
+    case sourceAttemptID = "source_attempt_id"
+    case reviewedAt = "reviewed_at"
+    case reviewerNote = "reviewer_note"
+    case createdAt = "created_at"
+  }
+}
+
 public struct MethodCard: Codable, Identifiable, Equatable, Sendable {
   public let id: String
   public let workspaceID: String
@@ -232,6 +292,36 @@ public struct MethodStatusRequest: Codable, Equatable, Sendable {
 
   public init(status: String) {
     self.status = status
+  }
+}
+
+public enum ExampleReviewDecision: String, Codable, Sendable {
+  case approve
+  case reject
+}
+
+public struct ExampleReviewRequest: Codable, Equatable, Sendable {
+  public let decision: ExampleReviewDecision
+  public let reviewerNote: String
+
+  enum CodingKeys: String, CodingKey {
+    case decision
+    case reviewerNote = "reviewer_note"
+  }
+
+  public init(decision: ExampleReviewDecision, reviewerNote: String = "") {
+    self.decision = decision
+    self.reviewerNote = reviewerNote
+  }
+}
+
+public struct ExampleReviewResult: Codable, Equatable, Sendable {
+  public let example: ProblemExample
+  public let learnedMethods: [MethodCard]
+
+  enum CodingKeys: String, CodingKey {
+    case example
+    case learnedMethods = "learned_methods"
   }
 }
 

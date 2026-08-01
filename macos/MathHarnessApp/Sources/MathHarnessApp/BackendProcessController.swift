@@ -103,7 +103,9 @@ final class BackendProcessController {
     var childEnvironment = environment
     childEnvironment["MATH_HARNESS_LOCAL_TOKEN"] = token
     childEnvironment["MATH_HARNESS_DATA_DIR"] = dataRoot.path
-    childEnvironment["MATH_HARNESS_METHOD_EXTRACTOR"] = "rules"
+    childEnvironment["MATH_HARNESS_METHOD_EXTRACTOR"] =
+      AppSettings.solverProvider == .mimo && AppSettings.mimoMethodExtraction
+      ? "mimo" : "rules"
     childEnvironment["MATH_HARNESS_SOLVER"] = AppSettings.solverProvider.rawValue
     childEnvironment["MATH_HARNESS_ENV_FILE"] =
       runtimeDirectory

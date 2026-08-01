@@ -1,8 +1,8 @@
 # Math Harness
 
-一个面向数学专家成长的本地优先 Harness。v0.6.0 第一次提供原生 macOS App：用户可在
-SwiftUI 界面中创建隔离工作区、提交问题、查看验证结果和审阅方法卡；现有 Python、
-SymPy 与模型组件作为随 App 打包的独立本地进程运行。
+一个面向数学专家成长的本地优先 Harness。v0.7.0 接通了第一条安全的对话成长闭环：
+每次成功求解会自动形成带来源的知识草稿，macOS App 提供例题与方法草稿复核队列；
+只有独立数学验证通过且经人工确认的内容才能晋级正式方法库。
 
 v0.5.1 收紧了成长系统最关键的三条边界：未经复核的数据不能改写已晋级知识，重叠方法
 合并不能重复应用，训练与全部留出集必须在评测开始前通过全局隔离检查。
@@ -20,11 +20,11 @@ v0.3.3 之前，方法卡一旦创建内容就永久冻结，后续例子只能�
 在此之上，v0.3.3 建立的信任边界保持不变：
 
 1. 创建彼此隔离的工作区；
-2. 录入题目、解答和可选的结构化数学表达式；
+2. 录入题目、解答，或直接在对话中求解；
 3. 使用受限解析器和 SymPy 验证答案；
 4. 使用规则或结构化 LLM 从解答中提取候选方法卡；
-5. 新录入知识默认进入待审区，只有数学验证通过且明确标记 `reviewed=true`
-   的精选案例才会自动晋级；
+5. 对话结果自动进入待审区并关联原始 `SolutionAttempt`；只有数学验证通过且由人工
+   复核例题与方法草稿后才会晋级；
 6. 新题到来时只检索当前工作区已晋级的方法；
 7. 由离线 SymPy 或可选的结构化 LLM 生成候选解；
 8. 先把模型常见数学记法规范化为安全解析器可接受的有限表达式；
@@ -38,10 +38,32 @@ v0.3.3 之前，方法卡一旦创建内容就永久冻结，后续例子只能�
 14. 以新记录保存人工纠正，不覆盖原始错误历史；
 15. 分别使用独立留出集评测方法检索和端到端解题门禁。
 
+## v0.7.0 新增：对话成长闭环
+
+- 每次持久化求解和人工纠正都会自动生成一条 `conversation` 来源的知识草稿，保存
+  原题、最终答案、推导步骤、验证报告、候选方法全文和 `source_attempt_id`。同一次
+  求解重复捕获保持幂等；生成失败会留下审计事件而不会制造空答案。
+- macOS 知识侧栏新增“待复核 / 方法卡”双视图。复核卡完整展示答案、独立验证状态、
+  即将写入的方法名称、目标与步骤，并支持复核意见、批准和驳回。
+- App 使用 MiMo 求解时默认也让 MiMo 提炼模板外的新方法；设置中可关闭这次额外请求，
+  改用免费、确定性的内置规则模板。
+- 晋级只能从例题复核发生。缺少 `math_target` 或验证未通过的草稿不能批准；原来直接
+  把待审方法卡改成 `promoted` 的入口已关闭，避免绕过来源证据。
+- 驳回草稿会保留审计历史，并自动拒绝已经没有其他例题证据的孤立待审方法；不会影响
+  已晋级知识或其他草稿共享的方法。
+- SQLite 会自动增加来源、方法草稿、复核时间与意见字段；旧工作区首次打开自动迁移。
+
+新增 API：
+
+```text
+POST /workspaces/{id}/attempts/{attempt_id}/capture
+POST /workspaces/{id}/examples/{example_id}/review
+```
+
 ## v0.6.0 新增：原生 macOS Alpha
 
 - 使用 SwiftUI 构建三栏原生界面：工作区侧边栏、数学对话、方法知识库；支持创建和
-  切换工作区、查看历史尝试、提交结构化验算目标，以及人工晋级或废弃方法卡。
+  切换工作区、查看历史尝试、提交结构化验算目标，以及查看或废弃方法卡。
 - App 自动启动独立 Python helper。helper 只监听 `127.0.0.1` 的系统随机端口，每次
   启动生成新的 256 位令牌，全部 API 路由都必须通过 Bearer Token 鉴权。
 - PyInstaller 把 Python 3.12、SymPy、FastAPI 和可选模型客户端一并放进 App，最终用户
@@ -358,6 +380,7 @@ v0.3.3 → v0.4.0 的差距说明了旧指标的水分：同一套检索，换�
 POST   /workspaces
 POST   /workspaces/{id}/examples
 GET    /workspaces/{id}/examples
+POST   /workspaces/{id}/examples/{example_id}/review
 GET    /workspaces/{id}/methods
 GET    /workspaces/{id}/methods/{method_id}/versions
 POST   /workspaces/{id}/methods/merge-proposals
@@ -370,6 +393,7 @@ POST   /workspaces/{id}/solve-plan
 POST   /workspaces/{id}/solve
 GET    /workspaces/{id}/attempts
 GET    /workspaces/{id}/attempts/{attempt_id}
+POST   /workspaces/{id}/attempts/{attempt_id}/capture
 POST   /workspaces/{id}/attempts/{attempt_id}/corrections
 GET    /workspaces/{id}/learning-events
 POST   /workspaces/{id}/evaluations
@@ -378,9 +402,9 @@ POST   /workspaces/{id}/solve-evaluations
 GET    /workspaces/{id}/solve-evaluations
 ```
 
-方法可由人工在 `pending_review`、`promoted`、`deprecated` 之间调整；每次状态变化
-和每次评测都会写入该工作区自己的学习事件流。求解评测不会保存普通尝试，也不会
-修改方法成功/失败统计。
+方法晋级必须来自“验证通过的例题 + 人工复核”；方法卡仍可人工废弃。每次复核、状态
+变化和评测都会写入该工作区自己的学习事件流。求解评测不会保存普通尝试，也不会修改
+方法成功/失败统计。
 
 ## 当前边界
 
@@ -414,8 +438,7 @@ GET    /workspaces/{id}/solve-evaluations
   CPU/内存/时间限制。
 - macOS Alpha 已把整个服务与 GUI 分成两个进程，但单次 SymPy 任务仍在 helper 主进程
   内运行；超时、取消和每道题独立 worker 尚未完成。
-- macOS 界面当前以可选择的等宽文本展示表达式，尚未加入离线 LaTeX 排版；成功对话也
-  尚未自动转成待审知识案例。
+- macOS 界面当前以可选择的等宽文本展示表达式，尚未加入离线 LaTeX 排版。
 
 ## 示例：摄取一道已解题
 

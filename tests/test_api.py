@@ -9,7 +9,7 @@ def test_api_vertical_slice(tmp_path):
     client = TestClient(create_app(tmp_path))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["version"] == "0.6.0"
+    assert response.json()["version"] == "0.7.0"
 
     response = client.post(
         "/workspaces",
@@ -71,6 +71,29 @@ def test_api_vertical_slice(tmp_path):
     response = client.get(f"/workspaces/{workspace_id}/attempts/{attempt_id}")
     assert response.status_code == 200
     assert response.json()["generation"]["provider"] == "sympy"
+
+    response = client.get(f"/workspaces/{workspace_id}/examples")
+    assert response.status_code == 200
+    captured = next(
+        example
+        for example in response.json()
+        if example["source_attempt_id"] == attempt_id
+    )
+    assert captured["origin"] == "conversation"
+    assert captured["status"] == "pending_review"
+
+    response = client.post(f"/workspaces/{workspace_id}/attempts/{attempt_id}/capture")
+    assert response.status_code == 200
+    assert response.json()["created"] is False
+    assert response.json()["example"]["id"] == captured["id"]
+
+    response = client.post(
+        f"/workspaces/{workspace_id}/examples/{captured['id']}/review",
+        json={"decision": "approve", "reviewer_note": "API smoke review"},
+    )
+    assert response.status_code == 200
+    assert response.json()["example"]["status"] == "promoted"
+    assert response.json()["example"]["reviewed"] is True
 
     response = client.post(
         f"/workspaces/{workspace_id}/attempts/{attempt_id}/corrections",
@@ -151,3 +174,35 @@ def test_api_vertical_slice(tmp_path):
     assert any(
         event["event_type"] == "method_status_changed" for event in response.json()
     )
+
+
+def test_review_api_enforces_verified_example_boundary(tmp_path):
+    client = TestClient(create_app(tmp_path))
+    workspace_id = client.post(
+        "/workspaces",
+        json={"name": "复核边界"},
+    ).json()["id"]
+    ingestion = client.post(
+        f"/workspaces/{workspace_id}/examples",
+        json={
+            "problem": "解释一个尚未结构化的证明",
+            "solution": "保留这个案例，之后再验证。",
+        },
+    )
+    assert ingestion.status_code == 201
+    example = ingestion.json()["example"]
+    method = ingestion.json()["learned_methods"][0]
+
+    response = client.post(
+        f"/workspaces/{workspace_id}/examples/{example['id']}/review",
+        json={"decision": "approve"},
+    )
+    assert response.status_code == 409
+    assert "独立数学验证" in response.json()["detail"]
+
+    response = client.patch(
+        f"/workspaces/{workspace_id}/methods/{method['id']}",
+        json={"status": "promoted"},
+    )
+    assert response.status_code == 409
+    assert "已验证例题" in response.json()["detail"]

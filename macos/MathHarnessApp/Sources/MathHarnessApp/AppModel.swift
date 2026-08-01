@@ -15,9 +15,11 @@ final class AppModel: ObservableObject {
   @Published private(set) var workspaces: [Workspace] = []
   @Published var selectedWorkspaceID: String?
   @Published private(set) var attempts: [SolutionAttempt] = []
+  @Published private(set) var examples: [ProblemExample] = []
   @Published private(set) var methods: [MethodCard] = []
   @Published private(set) var isSolving = false
   @Published private(set) var isRefreshing = false
+  @Published private(set) var reviewingExampleID: String?
   @Published var errorMessage: String?
 
   private let backend = BackendProcessController()
@@ -25,6 +27,16 @@ final class AppModel: ObservableObject {
 
   var selectedWorkspace: Workspace? {
     workspaces.first { $0.id == selectedWorkspaceID }
+  }
+
+  var pendingExamples: [ProblemExample] {
+    examples
+      .filter { $0.status == "pending_review" }
+      .sorted { $0.createdAt > $1.createdAt }
+  }
+
+  func isAttemptCaptured(_ attemptID: String) -> Bool {
+    examples.contains { $0.sourceAttemptID == attemptID }
   }
 
   func start() async {
@@ -53,6 +65,7 @@ final class AppModel: ObservableObject {
     api = nil
     backendPhase = .idle
     attempts = []
+    examples = []
     methods = []
     await start()
   }
@@ -130,10 +143,13 @@ final class AppModel: ObservableObject {
           maxOutputTokens: AppSettings.maxOutputTokens
         )
       )
-      let loadedMethods = try await api.listMethods(workspaceID: workspaceID)
+      async let loadedMethods = api.listMethods(workspaceID: workspaceID)
+      async let loadedExamples = api.listExamples(workspaceID: workspaceID)
+      let (methods, examples) = try await (loadedMethods, loadedExamples)
       if workspaceID == selectedWorkspaceID {
         attempts.append(attempt)
-        methods = loadedMethods
+        self.methods = methods
+        self.examples = examples
       }
       return true
     } catch {
@@ -158,18 +174,56 @@ final class AppModel: ObservableObject {
     }
   }
 
+  func reviewExample(
+    _ example: ProblemExample,
+    decision: ExampleReviewDecision,
+    reviewerNote: String
+  ) async {
+    guard let api, let workspaceID = selectedWorkspaceID else { return }
+    reviewingExampleID = example.id
+    errorMessage = nil
+    defer {
+      if reviewingExampleID == example.id {
+        reviewingExampleID = nil
+      }
+    }
+    do {
+      _ = try await api.reviewExample(
+        workspaceID: workspaceID,
+        exampleID: example.id,
+        decision: decision,
+        reviewerNote: reviewerNote
+      )
+      async let loadedExamples = api.listExamples(workspaceID: workspaceID)
+      async let loadedMethods = api.listMethods(workspaceID: workspaceID)
+      let (examples, methods) = try await (loadedExamples, loadedMethods)
+      guard workspaceID == selectedWorkspaceID else { return }
+      self.examples = examples
+      self.methods = methods
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
   func refreshSelectedWorkspace() async {
     guard let api, let workspaceID = selectedWorkspaceID else {
       attempts = []
+      examples = []
       methods = []
       return
     }
     do {
       async let loadedAttempts = api.listAttempts(workspaceID: workspaceID)
+      async let loadedExamples = api.listExamples(workspaceID: workspaceID)
       async let loadedMethods = api.listMethods(workspaceID: workspaceID)
-      let (attempts, methods) = try await (loadedAttempts, loadedMethods)
+      let (attempts, examples, methods) = try await (
+        loadedAttempts,
+        loadedExamples,
+        loadedMethods
+      )
       guard workspaceID == selectedWorkspaceID else { return }
       self.attempts = attempts.sorted { $0.createdAt < $1.createdAt }
+      self.examples = examples
       self.methods = methods
     } catch {
       errorMessage = error.localizedDescription

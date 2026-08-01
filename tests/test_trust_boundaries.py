@@ -523,6 +523,11 @@ def test_inconsistent_final_step_cannot_receive_verified_status(tmp_path):
 
     assert attempt.status is SolutionAttemptStatus.REJECTED
     assert "candidate_final_step_consistency" in attempt.verification.checks
+    captured = service.list_examples(workspace.id)
+    assert len(captured) == 1
+    assert captured[0].source_attempt_id == attempt.id
+    assert captured[0].verification.status is VerificationStatus.REJECTED
+    assert captured[0].status is KnowledgeStatus.REJECTED
 
 
 def test_fallback_preserves_history_without_crediting_retrieved_methods(
