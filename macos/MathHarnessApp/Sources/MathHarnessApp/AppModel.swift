@@ -18,8 +18,10 @@ final class AppModel: ObservableObject {
   @Published private(set) var examples: [ProblemExample] = []
   @Published private(set) var methods: [MethodCard] = []
   @Published private(set) var isSolving = false
+  @Published private(set) var isDraftingTarget = false
   @Published private(set) var isRefreshing = false
   @Published private(set) var reviewingExampleID: String?
+  @Published private(set) var editingExampleID: String?
   @Published var errorMessage: String?
 
   private let backend = BackendProcessController()
@@ -31,7 +33,10 @@ final class AppModel: ObservableObject {
 
   var pendingExamples: [ProblemExample] {
     examples
-      .filter { $0.status == "pending_review" }
+      .filter {
+        $0.status == "pending_review"
+          || ($0.status == "rejected" && $0.reviewedAt == nil)
+      }
       .sorted { $0.createdAt > $1.createdAt }
   }
 
@@ -158,6 +163,27 @@ final class AppModel: ObservableObject {
     }
   }
 
+  func draftMathTarget(problem: String) async -> MathTargetDraftResult? {
+    guard let api, let workspaceID = selectedWorkspaceID else { return nil }
+    let trimmedProblem = problem.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedProblem.isEmpty else {
+      errorMessage = "请先输入数学问题。"
+      return nil
+    }
+    isDraftingTarget = true
+    errorMessage = nil
+    defer { isDraftingTarget = false }
+    do {
+      return try await api.draftMathTarget(
+        workspaceID: workspaceID,
+        problem: trimmedProblem
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
   func updateMethod(_ method: MethodCard, status: String) async {
     guard let api, let workspaceID = selectedWorkspaceID else { return }
     do {
@@ -192,6 +218,7 @@ final class AppModel: ObservableObject {
         workspaceID: workspaceID,
         exampleID: example.id,
         decision: decision,
+        expectedRevision: example.revision,
         reviewerNote: reviewerNote
       )
       async let loadedExamples = api.listExamples(workspaceID: workspaceID)
@@ -202,6 +229,37 @@ final class AppModel: ObservableObject {
       self.methods = methods
     } catch {
       errorMessage = error.localizedDescription
+    }
+  }
+
+  func updateExampleDraft(
+    _ example: ProblemExample,
+    request: ExampleDraftUpdateRequest
+  ) async -> Bool {
+    guard let api, let workspaceID = selectedWorkspaceID else { return false }
+    editingExampleID = example.id
+    errorMessage = nil
+    defer {
+      if editingExampleID == example.id {
+        editingExampleID = nil
+      }
+    }
+    do {
+      _ = try await api.updateExampleDraft(
+        workspaceID: workspaceID,
+        exampleID: example.id,
+        request: request
+      )
+      async let loadedExamples = api.listExamples(workspaceID: workspaceID)
+      async let loadedMethods = api.listMethods(workspaceID: workspaceID)
+      let (examples, methods) = try await (loadedExamples, loadedMethods)
+      guard workspaceID == selectedWorkspaceID else { return false }
+      self.examples = examples
+      self.methods = methods
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
     }
   }
 

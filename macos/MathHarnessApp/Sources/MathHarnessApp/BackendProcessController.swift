@@ -106,6 +106,8 @@ final class BackendProcessController {
     childEnvironment["MATH_HARNESS_METHOD_EXTRACTOR"] =
       AppSettings.solverProvider == .mimo && AppSettings.mimoMethodExtraction
       ? "mimo" : "rules"
+    childEnvironment["MATH_HARNESS_TARGET_DRAFTER"] =
+      AppSettings.solverProvider == .mimo ? "mimo" : "rules"
     childEnvironment["MATH_HARNESS_SOLVER"] = AppSettings.solverProvider.rawValue
     childEnvironment["MATH_HARNESS_ENV_FILE"] =
       runtimeDirectory

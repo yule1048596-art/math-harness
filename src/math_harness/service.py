@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
+from threading import RLock
 
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
@@ -22,10 +23,13 @@ from math_harness.models import (
     EvaluationRequest,
     EvaluationRun,
     ExampleCreate,
+    ExampleDraftUpdate,
+    ExampleDraftUpdateResult,
     ExampleOrigin,
     ExampleReviewDecision,
     ExampleReviewRequest,
     ExampleReviewResult,
+    ExampleVersion,
     ExtractionStatus,
     GenerationStageKind,
     GenerationStatus,
@@ -33,6 +37,8 @@ from math_harness.models import (
     KnowledgeStatus,
     LearningEvent,
     MathPayload,
+    MathTargetDraftRequest,
+    MathTargetDraftResult,
     MergeProposalStatus,
     MethodCard,
     MethodExtractionResult,
@@ -70,6 +76,10 @@ from math_harness.solving import (
 )
 from math_harness.storage import WorkspaceManager
 from math_harness.structure import extract_features
+from math_harness.target_drafting import (
+    TargetDrafterProtocol,
+    build_target_drafter_from_env,
+)
 from math_harness.verifier import SolutionVerifier
 
 
@@ -82,6 +92,7 @@ class MathHarnessService:
         retriever: MethodRetriever | None = None,
         generator: SolutionGeneratorProtocol | None = None,
         normalizer: CandidateSolutionNormalizer | None = None,
+        target_drafter: TargetDrafterProtocol | None = None,
     ) -> None:
         load_local_environment()
         self.workspaces = WorkspaceManager(data_root)
@@ -90,6 +101,8 @@ class MathHarnessService:
         self.retriever = retriever or MethodRetriever()
         self.generator = generator or build_solution_generator_from_env()
         self.normalizer = normalizer or CandidateSolutionNormalizer()
+        self.target_drafter = target_drafter or build_target_drafter_from_env()
+        self._knowledge_lock = RLock()
 
     def create_workspace(self, request: WorkspaceCreate) -> Workspace:
         return self.workspaces.create(request)
@@ -100,14 +113,25 @@ class MathHarnessService:
     def list_workspaces(self) -> list[Workspace]:
         return self.workspaces.list()
 
+    def draft_math_target(
+        self,
+        workspace_id: str,
+        request: MathTargetDraftRequest,
+    ) -> MathTargetDraftResult:
+        # Resolve the workspace first so drafting cannot be used as a cross-scope
+        # side channel from an invalid workspace identifier.
+        self.workspaces.get(workspace_id)
+        return self.target_drafter.draft(request.problem)
+
     def ingest_example(
         self, workspace_id: str, request: ExampleCreate
     ) -> IngestionResult:
-        return self._ingest_example(
-            workspace_id,
-            request,
-            origin=ExampleOrigin.MANUAL,
-        )
+        with self._knowledge_lock:
+            return self._ingest_example(
+                workspace_id,
+                request,
+                origin=ExampleOrigin.MANUAL,
+            )
 
     def _ingest_example(
         self,
@@ -134,40 +158,7 @@ class MathHarnessService:
 
         extraction_result = self._extract_methods(request, verification.status)
         if origin is ExampleOrigin.CONVERSATION:
-            # A generic fallback is useful for explicit corpus ingestion, but on
-            # every chat turn it would create a low-signal method card. Keep the
-            # problem/solution draft while waiting for actual method evidence.
-            kept_methods = [
-                draft
-                for draft in extraction_result.methods
-                if draft.key != "generic_example"
-            ]
-            kept_keys = {draft.key for draft in kept_methods}
-            if len(kept_methods) != len(extraction_result.methods):
-                extraction_result = extraction_result.model_copy(
-                    update={
-                        "methods": kept_methods,
-                        "trace": extraction_result.trace.model_copy(
-                            update={
-                                "extracted_method_keys": [
-                                    key
-                                    for key in extraction_result.trace.extracted_method_keys
-                                    if key in kept_keys
-                                ],
-                                "evidence_by_method": {
-                                    key: evidence
-                                    for key, evidence in extraction_result.trace.evidence_by_method.items()
-                                    if key in kept_keys
-                                },
-                                "confidence_by_method": {
-                                    key: confidence
-                                    for key, confidence in extraction_result.trace.confidence_by_method.items()
-                                    if key in kept_keys
-                                },
-                            }
-                        ),
-                    }
-                )
+            extraction_result = self._filter_conversation_extraction(extraction_result)
         now = utc_now()
         example = ProblemExample(
             id=str(uuid.uuid4()),
@@ -189,6 +180,7 @@ class MathHarnessService:
             source_attempt_id=source_attempt_id,
             reviewed_at=now if request.reviewed else None,
             created_at=now,
+            updated_at=now,
         )
         store.add_example(example, extraction_result.methods)
 
@@ -249,13 +241,174 @@ class MathHarnessService:
                 )
             )
 
+    @staticmethod
+    def _filter_conversation_extraction(
+        extraction_result: MethodExtractionResult,
+    ) -> MethodExtractionResult:
+        # A generic fallback is useful for explicit corpus ingestion, but on every
+        # chat turn it would create low-signal method cards.
+        kept_methods = [
+            draft
+            for draft in extraction_result.methods
+            if draft.key != "generic_example"
+        ]
+        if len(kept_methods) == len(extraction_result.methods):
+            return extraction_result
+        kept_keys = {draft.key for draft in kept_methods}
+        return extraction_result.model_copy(
+            update={
+                "methods": kept_methods,
+                "trace": extraction_result.trace.model_copy(
+                    update={
+                        "extracted_method_keys": [
+                            key
+                            for key in extraction_result.trace.extracted_method_keys
+                            if key in kept_keys
+                        ],
+                        "evidence_by_method": {
+                            key: evidence
+                            for key, evidence in extraction_result.trace.evidence_by_method.items()
+                            if key in kept_keys
+                        },
+                        "confidence_by_method": {
+                            key: confidence
+                            for key, confidence in extraction_result.trace.confidence_by_method.items()
+                            if key in kept_keys
+                        },
+                    }
+                ),
+            }
+        )
+
     def get_example(self, workspace_id: str, example_id: str) -> ProblemExample:
         return self.workspaces.store(workspace_id).get_example(example_id)
 
     def list_examples(self, workspace_id: str) -> list[ProblemExample]:
         return self.workspaces.store(workspace_id).list_examples()
 
+    def list_example_versions(
+        self,
+        workspace_id: str,
+        example_id: str,
+    ) -> list[ExampleVersion]:
+        return self.workspaces.store(workspace_id).list_example_versions(example_id)
+
+    def update_example_draft(
+        self,
+        workspace_id: str,
+        example_id: str,
+        request: ExampleDraftUpdate,
+    ) -> ExampleDraftUpdateResult:
+        with self._knowledge_lock:
+            return self._update_example_draft(workspace_id, example_id, request)
+
+    def _update_example_draft(
+        self,
+        workspace_id: str,
+        example_id: str,
+        request: ExampleDraftUpdate,
+    ) -> ExampleDraftUpdateResult:
+        store = self.workspaces.store(workspace_id)
+        example = store.get_example(example_id)
+        if example.revision != request.expected_revision:
+            raise InvalidKnowledgeState("知识草稿已被其他操作更新；请刷新后再保存。")
+        if example.status is KnowledgeStatus.PROMOTED or example.reviewed:
+            raise InvalidKnowledgeState("已晋级或已复核的例题不能作为草稿编辑。")
+        if example.status is KnowledgeStatus.DEPRECATED or (
+            example.status is KnowledgeStatus.REJECTED
+            and example.reviewed_at is not None
+        ):
+            raise InvalidKnowledgeState("已人工驳回或废弃的例题不能继续编辑。")
+
+        changed_fields = [
+            field
+            for field, old, new in (
+                ("problem", example.problem, request.problem),
+                ("solution", example.solution, request.solution),
+                ("tags", example.tags, request.tags),
+                ("method_hint", example.method_hint, request.method_hint),
+                ("math_payload", example.math_payload, request.math_payload),
+            )
+            if old != new
+        ]
+        if not changed_fields:
+            return ExampleDraftUpdateResult(
+                example=example,
+                learned_methods=store.list_methods_for_example(example.id),
+            )
+
+        verification = self.verifier.verify(request.math_payload)
+        create_request = ExampleCreate(
+            problem=request.problem,
+            solution=request.solution,
+            tags=request.tags,
+            method_hint=request.method_hint,
+            math_payload=request.math_payload,
+            reviewed=False,
+        )
+        extraction_result = self._extract_methods(
+            create_request,
+            verification.status,
+        )
+        if example.origin is ExampleOrigin.CONVERSATION:
+            extraction_result = self._filter_conversation_extraction(extraction_result)
+
+        now = utc_now()
+        updated = example.model_copy(
+            update={
+                "problem": request.problem,
+                "solution": request.solution,
+                "tags": request.tags,
+                "method_hint": request.method_hint,
+                "problem_kind": classify_problem(request.problem),
+                "math_payload": request.math_payload,
+                "verification": verification,
+                "extraction": extraction_result.trace,
+                "method_drafts": [
+                    draft.model_dump(mode="json") for draft in extraction_result.methods
+                ],
+                "status": (
+                    KnowledgeStatus.REJECTED
+                    if verification.status is VerificationStatus.REJECTED
+                    else KnowledgeStatus.PENDING_REVIEW
+                ),
+                "reviewed": False,
+                "reviewed_at": None,
+                "reviewer_note": "",
+                "revision": example.revision + 1,
+                "updated_at": now,
+            }
+        )
+        saved = store.replace_example_draft(
+            updated,
+            extraction_result.methods,
+            changed_fields=changed_fields,
+        )
+        learned_methods: list[MethodCard] = []
+        if verification.status is not VerificationStatus.REJECTED:
+            for draft in extraction_result.methods:
+                learned_methods.append(
+                    store.upsert_method(
+                        draft=draft,
+                        example_id=example.id,
+                        status=KnowledgeStatus.PENDING_REVIEW,
+                        verified=False,
+                    )
+                )
+        return ExampleDraftUpdateResult(
+            example=saved,
+            learned_methods=learned_methods,
+        )
+
     def capture_solution_attempt(
+        self,
+        workspace_id: str,
+        attempt_id: str,
+    ) -> ConversationCaptureResult:
+        with self._knowledge_lock:
+            return self._capture_solution_attempt(workspace_id, attempt_id)
+
+    def _capture_solution_attempt(
         self,
         workspace_id: str,
         attempt_id: str,
@@ -317,8 +470,19 @@ class MathHarnessService:
         example_id: str,
         request: ExampleReviewRequest,
     ) -> ExampleReviewResult:
+        with self._knowledge_lock:
+            return self._review_example(workspace_id, example_id, request)
+
+    def _review_example(
+        self,
+        workspace_id: str,
+        example_id: str,
+        request: ExampleReviewRequest,
+    ) -> ExampleReviewResult:
         store = self.workspaces.store(workspace_id)
         example = store.get_example(example_id)
+        if example.revision != request.expected_revision:
+            raise InvalidKnowledgeState("知识草稿已被其他操作更新；请刷新并重新复核。")
 
         if request.decision is ExampleReviewDecision.REJECT:
             if example.status is KnowledgeStatus.PROMOTED:
@@ -340,7 +504,7 @@ class MathHarnessService:
             KnowledgeStatus.DEPRECATED,
         }:
             raise InvalidKnowledgeState("已拒绝或废弃的例题不能晋级。")
-        if example.source_attempt_id is not None:
+        if example.source_attempt_id is not None and example.revision == 1:
             source_attempt = store.get_solution_attempt(example.source_attempt_id)
             if source_attempt.status is not SolutionAttemptStatus.VERIFIED:
                 raise InvalidKnowledgeState(
@@ -389,6 +553,7 @@ class MathHarnessService:
         reviewed = store.complete_example_review(
             example.id,
             request.reviewer_note,
+            expected_revision=request.expected_revision,
             extraction=replacement_extraction,
             method_drafts=drafts if replacement_extraction is not None else None,
         )

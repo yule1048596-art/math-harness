@@ -195,9 +195,16 @@ private struct SolveComposer: View {
   @State private var showingTarget = true
   @State private var expression = ""
   @State private var variable = "x"
+  @State private var parameters = ""
+  @State private var assumptions = ""
   @State private var point = "oo"
+  @State private var direction = "two_sided"
   @State private var mode: VerificationMode = .asymptoticExpansion
   @State private var remainderPower = "2"
+  @State private var targetDraftSummary: String?
+  @State private var targetDraftWarnings: [String] = []
+  @State private var draftedProblem: String?
+  @State private var awaitingTargetConfirmation = false
 
   var body: some View {
     VStack(spacing: 10) {
@@ -224,15 +231,40 @@ private struct SolveComposer: View {
       DisclosureGroup("可验证数学目标", isExpanded: $showingTarget) {
         VStack(spacing: 8) {
           HStack {
+            Button {
+              requestTargetDraft()
+            } label: {
+              if model.isDraftingTarget {
+                ProgressView()
+                  .controlSize(.mini)
+              } else {
+                Label("自动整理", systemImage: "wand.and.stars")
+              }
+            }
+            .buttonStyle(.bordered)
+            .disabled(
+              problem.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || model.isDraftingTarget || model.isSolving
+            )
             TextField(
               "表达式，例如 sqrt(x**2+x)-x",
               text: $expression
             )
             .font(.body.monospaced())
+          }
+          HStack {
             TextField("变量", text: $variable)
               .frame(width: 72)
+            TextField("参数（逗号分隔）", text: $parameters)
+              .frame(minWidth: 130)
             TextField("趋近点", text: $point)
               .frame(width: 90)
+            Picker("方向", selection: $direction) {
+              Text("双侧").tag("two_sided")
+              Text("左侧").tag("left")
+              Text("右侧").tag("right")
+            }
+            .frame(width: 150)
           }
           HStack {
             Picker("验算模式", selection: $mode) {
@@ -248,9 +280,29 @@ private struct SolveComposer: View {
             TextField("标签（逗号分隔）", text: $tags)
             Spacer()
           }
+          TextField(
+            "假设，例如 a:positive; n:integer（可选）",
+            text: $assumptions
+          )
+          if let targetDraftSummary {
+            VStack(alignment: .leading, spacing: 3) {
+              Label(
+                awaitingTargetConfirmation
+                  ? "\(targetDraftSummary) 请检查后确认求解。"
+                  : targetDraftSummary,
+                systemImage: awaitingTargetConfirmation
+                  ? "checkmark.bubble" : "info.bubble"
+              )
+              ForEach(targetDraftWarnings, id: \.self) { warning in
+                Text("• \(warning)")
+              }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .foregroundStyle(awaitingTargetConfirmation ? .blue : .orange)
+          }
           HStack {
             Image(systemName: "checkmark.shield")
-            Text("表达式使用受限 SymPy 语法；留空时仍可对话，但结果可能需要人工复核。")
+            Text("自动整理只生成建议稿；表达式、变量、趋近点和假设均由你确认后才会用于验算。")
             Spacer()
           }
           .font(.caption)
@@ -261,19 +313,31 @@ private struct SolveComposer: View {
       .font(.caption)
 
       HStack {
-        Text(model.isSolving ? "正在检索、求解并验证……" : "⌘↩ 发送")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+        Text(
+          model.isSolving
+            ? "正在检索、求解并验证……"
+            : model.isDraftingTarget ? "正在整理可验证目标……" : "⌘↩ 发送"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
         Spacer()
         Button {
           submit()
         } label: {
-          if model.isSolving {
+          if model.isSolving || model.isDraftingTarget {
             ProgressView()
               .controlSize(.small)
               .frame(width: 58)
           } else {
-            Label("求解", systemImage: "arrow.up.circle.fill")
+            Label(
+              awaitingTargetConfirmation
+                ? "确认并求解"
+                : isUnstructuredContinuation ? "继续非结构化" : "求解",
+              systemImage: awaitingTargetConfirmation
+                ? "checkmark.shield.fill"
+                : isUnstructuredContinuation
+                  ? "bubble.left.and.text.bubble.right" : "arrow.up.circle.fill"
+            )
           }
         }
         .keyboardShortcut(.return, modifiers: [.command])
@@ -281,20 +345,48 @@ private struct SolveComposer: View {
         .disabled(
           problem.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || model.isSolving
+            || model.isDraftingTarget
         )
       }
     }
     .padding(.horizontal, 18)
     .padding(.vertical, 12)
     .background(.regularMaterial)
+    .onChange(of: problem) { _, _ in
+      if awaitingTargetConfirmation {
+        resetTargetFields()
+      }
+      draftedProblem = nil
+      awaitingTargetConfirmation = false
+      targetDraftSummary = nil
+      targetDraftWarnings = []
+    }
+  }
+
+  private var isUnstructuredContinuation: Bool {
+    let trimmedProblem = problem.trimmingCharacters(in: .whitespacesAndNewlines)
+    return draftedProblem == trimmedProblem
+      && expression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && targetDraftSummary != nil
   }
 
   private func submit() {
-    let target: SolveMathTargetRequest?
+    let submittedProblem = problem.trimmingCharacters(in: .whitespacesAndNewlines)
     let trimmedExpression = expression.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmedExpression.isEmpty, draftedProblem != submittedProblem {
+      requestTargetDraft()
+      return
+    }
+
+    let target: SolveMathTargetRequest?
     if trimmedExpression.isEmpty {
       target = nil
     } else {
+      let trimmedVariable = variable.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmedVariable.isEmpty else {
+        model.errorMessage = "数学目标的变量不能为空。"
+        return
+      }
       let power: Int?
       if mode == .asymptoticExpansion {
         guard let parsed = Int(remainderPower), (1...50).contains(parsed) else {
@@ -305,10 +397,22 @@ private struct SolveComposer: View {
       } else {
         power = nil
       }
+      let normalizedParameters = parseCommaSeparated(parameters)
+      guard
+        let parsedAssumptions = parseAssumptions(
+          assumptions,
+          allowedSymbols: Set([trimmedVariable] + normalizedParameters)
+        )
+      else {
+        return
+      }
       target = SolveMathTargetRequest(
         expression: trimmedExpression,
-        variable: variable.trimmingCharacters(in: .whitespacesAndNewlines),
+        variable: trimmedVariable,
+        parameters: normalizedParameters,
+        assumptions: parsedAssumptions,
         point: point.trimmingCharacters(in: .whitespacesAndNewlines),
+        direction: direction,
         mode: mode,
         remainderPower: power
       )
@@ -319,7 +423,6 @@ private struct SolveComposer: View {
       .split(separator: ",")
       .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
       .filter { !$0.isEmpty }
-    let submittedProblem = problem
     Task {
       if await model.solve(
         problem: submittedProblem,
@@ -327,8 +430,108 @@ private struct SolveComposer: View {
         mathTarget: target
       ) {
         problem = ""
-        expression = ""
+        resetTargetFields()
       }
     }
+  }
+
+  private func requestTargetDraft() {
+    let submittedProblem = problem.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !submittedProblem.isEmpty else {
+      model.errorMessage = "请先输入数学问题。"
+      return
+    }
+    Task {
+      guard let result = await model.draftMathTarget(problem: submittedProblem) else {
+        return
+      }
+      guard problem.trimmingCharacters(in: .whitespacesAndNewlines) == submittedProblem else {
+        return
+      }
+      draftedProblem = submittedProblem
+      targetDraftSummary = result.summary
+      targetDraftWarnings = result.warnings
+      guard let target = result.target else {
+        awaitingTargetConfirmation = false
+        showingTarget = true
+        return
+      }
+      applyTargetDraft(target)
+      awaitingTargetConfirmation = true
+      showingTarget = true
+    }
+  }
+
+  private func applyTargetDraft(_ target: SolveMathTargetRequest) {
+    expression = target.expression
+    variable = target.variable
+    parameters = target.parameters.joined(separator: ", ")
+    assumptions = target.assumptions
+      .keys.sorted()
+      .map { key in "\(key):\(target.assumptions[key, default: []].joined(separator: ","))" }
+      .joined(separator: "; ")
+    point = target.point
+    direction = target.direction
+    mode = target.mode
+    remainderPower = target.remainderPower.map(String.init) ?? ""
+  }
+
+  private func parseCommaSeparated(_ value: String) -> [String] {
+    var seen = Set<String>()
+    return
+      value
+      .split(separator: ",")
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty && seen.insert($0).inserted }
+  }
+
+  private func parseAssumptions(
+    _ value: String,
+    allowedSymbols: Set<String>
+  ) -> [String: [String]]? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.isEmpty { return [:] }
+    let allowedProperties: Set<String> = [
+      "real", "positive", "negative", "nonzero", "integer",
+      "nonnegative", "nonpositive",
+    ]
+    var result: [String: [String]] = [:]
+    for rawClause in trimmed.split(separator: ";") {
+      let parts = rawClause.split(separator: ":", maxSplits: 1)
+      guard parts.count == 2 else {
+        model.errorMessage = "假设格式应为 a:positive; n:integer。"
+        return nil
+      }
+      let symbol = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+      guard allowedSymbols.contains(symbol) else {
+        model.errorMessage = "假设中的符号 \(symbol) 必须先声明为变量或参数。"
+        return nil
+      }
+      let properties = parts[1]
+        .split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+        .filter { !$0.isEmpty }
+      guard !properties.isEmpty, properties.allSatisfy(allowedProperties.contains) else {
+        model.errorMessage = "假设属性只支持 positive、integer、nonzero 等受限值。"
+        return nil
+      }
+      result[symbol] = Array(Set(properties)).sorted()
+    }
+    return result
+  }
+
+  private func resetTargetFields() {
+    expression = ""
+    variable = "x"
+    parameters = ""
+    assumptions = ""
+    point = "oo"
+    direction = "two_sided"
+    mode = .asymptoticExpansion
+    remainderPower = "2"
+    draftedProblem = nil
+    awaitingTargetConfirmation = false
+    targetDraftSummary = nil
+    targetDraftWarnings = []
   }
 }

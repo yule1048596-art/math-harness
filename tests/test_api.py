@@ -9,7 +9,7 @@ def test_api_vertical_slice(tmp_path):
     client = TestClient(create_app(tmp_path))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["version"] == "0.7.0"
+    assert response.json()["version"] == "0.8.0"
 
     response = client.post(
         "/workspaces",
@@ -17,6 +17,14 @@ def test_api_vertical_slice(tmp_path):
     )
     assert response.status_code == 201
     workspace_id = response.json()["id"]
+
+    response = client.post(
+        f"/workspaces/{workspace_id}/math-target-drafts",
+        json={"problem": "求 x→∞ 时 sqrt(x^2+x)-x 的渐进展开到 O(x^-2)"},
+    )
+    assert response.status_code == 200
+    assert response.json()["requires_confirmation"] is True
+    assert response.json()["target"]["expression"] == "sqrt(x**2+x)-x"
 
     response = client.post(
         f"/workspaces/{workspace_id}/examples",
@@ -87,9 +95,40 @@ def test_api_vertical_slice(tmp_path):
     assert response.json()["created"] is False
     assert response.json()["example"]["id"] == captured["id"]
 
+    response = client.patch(
+        f"/workspaces/{workspace_id}/examples/{captured['id']}",
+        json={
+            "expected_revision": 1,
+            "problem": captured["problem"],
+            "solution": captured["solution"] + "\n人工确认余项阶数。",
+            "tags": captured["tags"],
+            "method_hint": captured["method_hint"],
+            "math_payload": {
+                "expression": "sqrt(x**2 + x) - x",
+                "expected": "1/2 - 1/(8*x)",
+                "variable": "x",
+                "point": "oo",
+                "remainder_power": 2,
+            },
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["example"]["revision"] == 2
+    assert response.json()["example"]["verification"]["status"] == "verified"
+
+    response = client.get(
+        f"/workspaces/{workspace_id}/examples/{captured['id']}/versions"
+    )
+    assert response.status_code == 200
+    assert [item["revision"] for item in response.json()] == [1]
+
     response = client.post(
         f"/workspaces/{workspace_id}/examples/{captured['id']}/review",
-        json={"decision": "approve", "reviewer_note": "API smoke review"},
+        json={
+            "decision": "approve",
+            "expected_revision": 2,
+            "reviewer_note": "API smoke review",
+        },
     )
     assert response.status_code == 200
     assert response.json()["example"]["status"] == "promoted"
@@ -195,7 +234,7 @@ def test_review_api_enforces_verified_example_boundary(tmp_path):
 
     response = client.post(
         f"/workspaces/{workspace_id}/examples/{example['id']}/review",
-        json={"decision": "approve"},
+        json={"decision": "approve", "expected_revision": 1},
     )
     assert response.status_code == 409
     assert "独立数学验证" in response.json()["detail"]

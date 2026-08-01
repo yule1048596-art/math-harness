@@ -64,10 +64,34 @@ public actor APIClient {
     )
   }
 
+  public func draftMathTarget(
+    workspaceID: String,
+    problem: String
+  ) async throws -> MathTargetDraftResult {
+    try await send(
+      path: "workspaces/\(workspaceID)/math-target-drafts",
+      method: "POST",
+      body: MathTargetDraftRequest(problem: problem)
+    )
+  }
+
+  public func updateExampleDraft(
+    workspaceID: String,
+    exampleID: String,
+    request: ExampleDraftUpdateRequest
+  ) async throws -> ExampleDraftUpdateResult {
+    try await send(
+      path: "workspaces/\(workspaceID)/examples/\(exampleID)",
+      method: "PATCH",
+      body: request
+    )
+  }
+
   public func reviewExample(
     workspaceID: String,
     exampleID: String,
     decision: ExampleReviewDecision,
+    expectedRevision: Int,
     reviewerNote: String = ""
   ) async throws -> ExampleReviewResult {
     try await send(
@@ -75,6 +99,7 @@ public actor APIClient {
       method: "POST",
       body: ExampleReviewRequest(
         decision: decision,
+        expectedRevision: expectedRevision,
         reviewerNote: reviewerNote
       )
     )
