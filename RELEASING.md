@@ -14,6 +14,11 @@
    uv run --no-editable ruff check .
    uv run --no-editable pytest
    uv build
+   swift build --package-path macos/MathHarnessApp
+   swift run --package-path macos/MathHarnessApp MathHarnessCoreChecks
+   ./scripts/build_macos_app.sh
+   ./scripts/test_macos_bundle.sh
+   MATH_HARNESS_SKIP_APP_BUILD=true ./scripts/package_macos_dmg.sh
    ```
 
 4. 合并版本提交到 `main`。
@@ -26,5 +31,5 @@
    ```
 
 标签触发 `.github/workflows/release.yml`。工作流会重新安装锁定依赖、执行检查、
-构建 wheel 和 source distribution，然后创建 GitHub Release 并上传构建产物。
-GitHub 同时为每个标签提供标准源码 ZIP 和 tar.gz 归档。
+构建 wheel、source distribution 和 Apple Silicon macOS App ZIP/DMG，然后创建 GitHub
+Release 并上传构建产物。GitHub 同时为每个标签提供标准源码 ZIP 和 tar.gz 归档。

@@ -1,8 +1,11 @@
 # Math Harness
 
-一个面向数学专家成长的可运行原型。v0.5.1 收紧了成长系统最关键的三条边界：未经
-复核的数据不能改写已晋级知识，重叠方法合并不能重复应用，训练与全部留出集必须在
-评测开始前通过全局隔离检查。
+一个面向数学专家成长的本地优先 Harness。v0.6.0 第一次提供原生 macOS App：用户可在
+SwiftUI 界面中创建隔离工作区、提交问题、查看验证结果和审阅方法卡；现有 Python、
+SymPy 与模型组件作为随 App 打包的独立本地进程运行。
+
+v0.5.1 收紧了成长系统最关键的三条边界：未经复核的数据不能改写已晋级知识，重叠方法
+合并不能重复应用，训练与全部留出集必须在评测开始前通过全局隔离检查。
 
 v0.5.0 解决了「数据量是所有结论的天花板」这个问题：加入可验证的语料生成器、把
 检索升级为算子树上的叶到根路径，并提供人工确认的方法卡去重合并。
@@ -34,6 +37,21 @@ v0.3.3 之前，方法卡一旦创建内容就永久冻结，后续例子只能�
     未显式指定方法的人工纠正不参与计分；
 14. 以新记录保存人工纠正，不覆盖原始错误历史；
 15. 分别使用独立留出集评测方法检索和端到端解题门禁。
+
+## v0.6.0 新增：原生 macOS Alpha
+
+- 使用 SwiftUI 构建三栏原生界面：工作区侧边栏、数学对话、方法知识库；支持创建和
+  切换工作区、查看历史尝试、提交结构化验算目标，以及人工晋级或废弃方法卡。
+- App 自动启动独立 Python helper。helper 只监听 `127.0.0.1` 的系统随机端口，每次
+  启动生成新的 256 位令牌，全部 API 路由都必须通过 Bearer Token 鉴权。
+- PyInstaller 把 Python 3.12、SymPy、FastAPI 和可选模型客户端一并放进 App，最终用户
+  无需预装 Python、`uv` 或浏览器。
+- MiMo API Key 保存到 macOS Keychain；非秘密偏好保存在系统设置中。切换求解器后 App
+  会重启本地引擎，不把密钥写入项目、数据库或日志。
+- 工作区数据默认位于 `~/Library/Application Support/Math Harness/`；App
+  意外退出时，helper 会检测父进程消失并自行停止。
+- 新增 Apple Silicon 独立包构建、签名、DMG/公证脚本、Swift 协议自检和打包后端到端
+  验证。完整开发与分发说明见 [`macos/README.md`](macos/README.md)。
 
 ## v0.5.1 新增
 
@@ -137,6 +155,24 @@ v0.5.0 按 approach0 在数学公式检索上的做法，改为在算子树上�
 0，自然退回词面路径，冷启动安全。表达式解析失败降级为空特征，绝不让检索整体失败。
 
 ## 快速开始
+
+### macOS App
+
+开发模式（只安装 Apple Command Line Tools 即可）：
+
+```bash
+./scripts/run_macos_app.sh
+```
+
+构建包含 Python 运行时的独立 Apple Silicon App：
+
+```bash
+./scripts/build_macos_app.sh
+./scripts/test_macos_bundle.sh
+MATH_HARNESS_SKIP_APP_BUILD=true ./scripts/package_macos_dmg.sh
+```
+
+### API / Python 开发
 
 ```bash
 uv sync --no-editable --extra dev
@@ -376,6 +412,10 @@ GET    /workspaces/{id}/solve-evaluations
 - 离线求解器只覆盖有限的表达式等价与级数任务，不是通用定理证明器；
 - 当前符号计算在进程内运行；面向不受信任的多用户服务前，还应加入进程级
   CPU/内存/时间限制。
+- macOS Alpha 已把整个服务与 GUI 分成两个进程，但单次 SymPy 任务仍在 helper 主进程
+  内运行；超时、取消和每道题独立 worker 尚未完成。
+- macOS 界面当前以可选择的等宽文本展示表达式，尚未加入离线 LaTeX 排版；成功对话也
+  尚未自动转成待审知识案例。
 
 ## 示例：摄取一道已解题
 
@@ -431,11 +471,21 @@ SymPy 兜底默认返回空列表。
 
 这个布局优先保证本地原型的物理隔离。转为多用户服务时，应迁移到 PostgreSQL、行级权限和按工作区过滤的向量索引。
 
+macOS App 使用系统 Application Support 目录作为根目录：
+
+```text
+~/Library/Application Support/Math Harness/
+  registry.sqlite3
+  Logs/backend.log
+  workspaces/
+    <workspace-id>/workspace.sqlite3
+```
+
 ## 版本归档
 
 项目从 `v0.2.0` 起使用带注释的 Git 标签保存版本。推送 `vX.Y.Z` 标签后，
 GitHub Actions 会在干净环境中重新测试和构建，并创建带 wheel、source
-distribution 和标准源码归档的 GitHub Release。完整步骤见
+distribution、Apple Silicon macOS App ZIP/DMG 和标准源码归档的 GitHub Release。完整步骤见
 [`RELEASING.md`](RELEASING.md)。
 
 ## License
