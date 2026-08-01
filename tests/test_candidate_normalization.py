@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from math_harness.models import CandidateSolution, CandidateStep, SolveMathTarget
+from math_harness.models import (
+    CandidateSolution,
+    CandidateStep,
+    SolveMathTarget,
+    VerificationMode,
+)
 from math_harness.normalization import CandidateSolutionNormalizer
 
 
@@ -73,3 +78,17 @@ def test_normalizer_does_not_remove_non_trailing_order_term():
 
     assert result.candidate.answer_expression == "O(x) + x"
     assert result.actions == ()
+
+
+def test_normalizer_preserves_big_o_for_exact_equivalence():
+    result = CandidateSolutionNormalizer().normalize(
+        _candidate("1 + O(x)"),
+        SolveMathTarget(
+            expression="1",
+            point="0",
+            mode=VerificationMode.EXACT_EQUIVALENCE,
+        ),
+    )
+
+    assert result.candidate.answer_expression == "1 + O(x)"
+    assert "strip_trailing_order_term" not in result.actions

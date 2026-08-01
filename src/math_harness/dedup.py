@@ -69,12 +69,24 @@ def _card_text(card: MethodCard) -> str:
 
 
 def _order(left: MethodCard, right: MethodCard) -> tuple[MethodCard, MethodCard]:
-    """主卡选择必须确定性：样本多者为主，并列取更早创建的那张。"""
+    """主卡选择必须确定性：先保可信卡，再比较样本量与创建时间。"""
 
     left_samples = MethodSignature.model_validate(left.signature or {}).sample_count
     right_samples = MethodSignature.model_validate(right.signature or {}).sample_count
-    left_rank = (-left_samples, left.created_at, left.id)
-    right_rank = (-right_samples, right.created_at, right.id)
+    status_rank = {
+        KnowledgeStatus.PROMOTED: 0,
+        KnowledgeStatus.PENDING_REVIEW: 1,
+        KnowledgeStatus.CAPTURED: 2,
+        KnowledgeStatus.REJECTED: 3,
+        KnowledgeStatus.DEPRECATED: 4,
+    }
+    left_rank = (status_rank[left.status], -left_samples, left.created_at, left.id)
+    right_rank = (
+        status_rank[right.status],
+        -right_samples,
+        right.created_at,
+        right.id,
+    )
     return (left, right) if left_rank <= right_rank else (right, left)
 
 

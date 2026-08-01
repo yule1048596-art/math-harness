@@ -9,6 +9,7 @@ from math_harness.dataset import (
     _serialize,
     generate_examples,
     load_holdout_expressions,
+    load_seed_training_expressions,
 )
 from math_harness.models import VerificationMode, VerificationStatus
 from math_harness.verifier import SolutionVerifier
@@ -101,7 +102,10 @@ def test_unverifiable_instance_is_dropped_not_downgraded():
             ),
         ),
     )
-    examples, report = generate_examples(families=(bogus,))
+    examples, report = generate_examples(
+        families=(bogus,),
+        excluded_expressions=set(),
+    )
 
     assert examples == []
     assert report.rejected == 1
@@ -121,6 +125,16 @@ def test_generated_corpus_never_contains_a_holdout_expression():
     for example in examples:
         expression = "".join(example.math_payload.expression.split())
         assert expression not in holdout, example.problem
+
+
+def test_generated_corpus_never_duplicates_manual_training_expression():
+    examples, report = generate_examples()
+    manual = load_seed_training_expressions()
+
+    assert report.excluded > 0
+    for example in examples:
+        expression = "".join(example.math_payload.expression.split())
+        assert expression not in manual, example.problem
 
 
 def test_checked_in_corpus_matches_the_generator():

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from math_harness.api import create_app
 from math_harness.dedup import (
     DEFAULT_THRESHOLD,
+    MergeCandidate,
     card_to_draft,
     find_merge_candidates,
     load_threshold,
@@ -183,6 +184,28 @@ def test_primary_selection_prefers_more_samples_then_earlier_creation():
     assert candidates[0].duplicate_key == "thin_card"
 
 
+def test_primary_selection_prefers_promoted_over_larger_pending_card():
+    rich = _signature(
+        "sqrt(x**2 + x) - x",
+        "sqrt(x**2 + 3*x) - x",
+        "sqrt(x**2 + 5*x) - x",
+    )
+    poor = _signature("sqrt(x**2 + x) - x")
+    candidates = find_merge_candidates(
+        [
+            _card(
+                "pending_rich",
+                rich,
+                status=KnowledgeStatus.PENDING_REVIEW,
+            ),
+            _card("promoted_thin", poor),
+        ]
+    )
+
+    assert candidates[0].primary_key == "promoted_thin"
+    assert candidates[0].duplicate_key == "pending_rich"
+
+
 def test_threshold_is_configurable(monkeypatch):
     monkeypatch.setenv("MATH_HARNESS_DEDUP_THRESHOLD", "0.99")
     assert load_threshold() == 0.99
@@ -352,6 +375,108 @@ def test_resolved_proposal_cannot_be_applied_twice(workspace_with_duplicates):
     service.apply_merge_proposal(workspace.id, proposal.id)
     with pytest.raises(ValueError, match="already resolved"):
         service.apply_merge_proposal(workspace.id, proposal.id)
+
+
+def test_merge_invalidates_overlapping_proposals_and_rescan_reactivates_valid_pair(
+    tmp_path,
+    verified_asymptotic_example,
+):
+    service = MathHarnessService(tmp_path)
+    workspace = service.create_workspace(WorkspaceCreate(name="重叠合并图"))
+    example_id = service.ingest_example(
+        workspace.id, verified_asymptotic_example
+    ).example.id
+    store = service.workspaces.store(workspace.id)
+    features = extract_features(_payload())
+    for key in ("alpha_method", "beta_method", "gamma_method"):
+        store.upsert_method(
+            draft=card_to_draft(_card(key, MethodSignature())),
+            example_id=example_id,
+            status=KnowledgeStatus.PROMOTED,
+            verified=True,
+            features=features,
+        )
+
+    proposals = service.scan_merge_proposals(workspace.id)
+    chosen = next(
+        item
+        for item in proposals
+        if {item.primary_key, item.duplicate_key} == {"alpha_method", "beta_method"}
+    )
+    overlapping = next(
+        item
+        for item in proposals
+        if item.id != chosen.id
+        and (
+            chosen.primary_method_id
+            in {item.primary_method_id, item.duplicate_method_id}
+            or chosen.duplicate_method_id
+            in {item.primary_method_id, item.duplicate_method_id}
+        )
+    )
+
+    service.apply_merge_proposal(workspace.id, chosen.id)
+
+    assert store.get_merge_proposal(overlapping.id).status is MergeProposalStatus.STALE
+    with pytest.raises(ValueError, match="already resolved: stale"):
+        service.apply_merge_proposal(workspace.id, overlapping.id)
+
+    rescanned = service.scan_merge_proposals(workspace.id)
+    remaining = next(
+        item
+        for item in rescanned
+        if {item.primary_key, item.duplicate_key} == {"alpha_method", "gamma_method"}
+    )
+    assert remaining.status is MergeProposalStatus.PENDING
+
+
+def test_apply_legacy_proposal_never_deprecates_promoted_card(
+    tmp_path,
+    verified_asymptotic_example,
+):
+    service = MathHarnessService(tmp_path)
+    workspace = service.create_workspace(WorkspaceCreate(name="旧提案方向"))
+    example_id = service.ingest_example(
+        workspace.id, verified_asymptotic_example
+    ).example.id
+    store = service.workspaces.store(workspace.id)
+    promoted = store.upsert_method(
+        draft=card_to_draft(_card("promoted_method", MethodSignature())),
+        example_id=example_id,
+        status=KnowledgeStatus.PROMOTED,
+        verified=True,
+    )
+    pending = store.upsert_method(
+        draft=card_to_draft(_card("pending_method", MethodSignature())),
+        example_id=example_id,
+        status=KnowledgeStatus.PENDING_REVIEW,
+        verified=False,
+    )
+    proposal = next(
+        item
+        for item in store.record_merge_proposals(
+            [
+                MergeCandidate(
+                    primary_id=pending.id,
+                    primary_key=pending.key,
+                    duplicate_id=promoted.id,
+                    duplicate_key=promoted.key,
+                    score=1.0,
+                    signature_similarity=1.0,
+                    text_similarity=1.0,
+                    reasons=["legacy orientation"],
+                )
+            ]
+        )
+        if {item.primary_key, item.duplicate_key}
+        == {"promoted_method", "pending_method"}
+    )
+
+    merged = store.apply_merge_proposal(proposal.id)
+
+    assert merged.id == promoted.id
+    assert merged.status is KnowledgeStatus.PROMOTED
+    assert store.get_method(pending.id).status is KnowledgeStatus.DEPRECATED
 
 
 def test_reject_leaves_both_cards_untouched(workspace_with_duplicates):

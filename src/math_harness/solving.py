@@ -21,6 +21,7 @@ from math_harness.models import (
     VerificationMode,
     VerificationReport,
 )
+from math_harness.verifier import SolutionVerifier
 
 
 class _NonExpressionOutcome(Exception):
@@ -75,7 +76,7 @@ class OfflineSympySolutionGenerator:
             expression = self.parser.parse(math_target.expression, symbols)
             variable = symbols[math_target.variable]
             point = self._parse_point(math_target.point, symbols)
-            answer = self._solve(expression, variable, point, math_target)
+            answer = self._solve(expression, variable, point, math_target, symbols)
             answer_expression = sp.sstr(answer)
             self.parser.parse(answer_expression, symbols)
         except _NonExpressionOutcome as outcome:
@@ -166,33 +167,36 @@ class OfflineSympySolutionGenerator:
         variable: sp.Symbol,
         point: sp.Expr,
         target: SolveMathTarget,
+        symbols: dict[str, sp.Symbol],
     ) -> sp.Expr:
         if target.mode is VerificationMode.EXACT_EQUIVALENCE:
             simplified = sp.simplify(expression)
-            try:
-                original_domain = sp.calculus.util.continuous_domain(
-                    expression,
-                    variable,
-                    sp.S.Reals,
-                )
-                simplified_domain = sp.calculus.util.continuous_domain(
-                    simplified,
-                    variable,
-                    sp.S.Reals,
-                )
-            except (NotImplementedError, ValueError) as exc:
-                raise _NonExpressionOutcome(
-                    AnswerKind.CONDITIONAL,
-                    "精确化简的定义域无法自动判定，需要人工复核。",
-                ) from exc
-            if original_domain != simplified_domain:
-                raise _NonExpressionOutcome(
-                    AnswerKind.CONDITIONAL,
-                    (
-                        "化简会改变原表达式的定义域，不能把化简式作为全域上的"
-                        "完全相同结果。"
-                    ),
-                )
+            for symbol in symbols.values():
+                try:
+                    base_domain = SolutionVerifier._base_real_domain(symbol)
+                    original_domain = sp.calculus.util.continuous_domain(
+                        expression,
+                        symbol,
+                        sp.S.Reals,
+                    ).intersect(base_domain)
+                    simplified_domain = sp.calculus.util.continuous_domain(
+                        simplified,
+                        symbol,
+                        sp.S.Reals,
+                    ).intersect(base_domain)
+                except (NotImplementedError, ValueError) as exc:
+                    raise _NonExpressionOutcome(
+                        AnswerKind.CONDITIONAL,
+                        "精确化简的定义域无法自动判定，需要人工复核。",
+                    ) from exc
+                if original_domain != simplified_domain:
+                    raise _NonExpressionOutcome(
+                        AnswerKind.CONDITIONAL,
+                        (
+                            "化简会改变原表达式的定义域，不能把化简式作为全域上的"
+                            "完全相同结果。"
+                        ),
+                    )
             return simplified
         if target.mode is VerificationMode.LIMIT:
             value = self._limit(expression, variable, point, target)

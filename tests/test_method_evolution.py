@@ -7,6 +7,7 @@ from math_harness.api import create_app
 from math_harness.errors import RecordNotFound
 from math_harness.merging import (
     MAX_APPLICABLE_WHEN,
+    MAX_PROCEDURE,
     MAX_TAGS,
     merge_method_content,
 )
@@ -178,6 +179,28 @@ def test_method_content_accumulates_across_examples(seeded):
     assert second.failure_modes == ["遗漏定义域", "有理化后过早截断"]
     assert second.tags == ["asymptotic", "radical", "cancellation"]
     assert second.version == first.version + 1
+
+
+def test_first_method_version_enforces_field_limits(seeded):
+    _service, _workspace, store, example_id = seeded
+
+    created = store.upsert_method(
+        draft=_draft(
+            key="bounded_first_version",
+            applicable_when=[
+                f"条件 {index}" for index in range(MAX_APPLICABLE_WHEN + 5)
+            ],
+            procedure=[f"步骤 {index}" for index in range(MAX_PROCEDURE + 5)],
+            tags=[f"tag-{index}" for index in range(MAX_TAGS + 5)],
+        ),
+        example_id=example_id,
+        status=KnowledgeStatus.PROMOTED,
+        verified=True,
+    )
+
+    assert len(created.applicable_when) == MAX_APPLICABLE_WHEN
+    assert len(created.procedure) == MAX_PROCEDURE
+    assert len(created.tags) == MAX_TAGS
 
 
 def test_version_snapshot_preserves_content_before_the_rewrite(seeded):

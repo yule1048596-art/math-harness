@@ -218,6 +218,32 @@ def test_structure_reranks_when_a_target_is_supplied():
     assert any("数学结构契合度" in r for r in with_structure[0].reasons)
 
 
+def test_failure_feedback_lowers_an_otherwise_equal_method():
+    retriever = MethodRetriever()
+    signature = MethodSignature().accumulate(extract_features(_target()))
+    methods = [
+        _card(
+            "failure_heavy",
+            signature,
+            name="相同方法",
+            success_count=10,
+            failure_count=20,
+        ),
+        _card(
+            "reliable",
+            signature,
+            name="相同方法",
+            success_count=10,
+            failure_count=0,
+        ),
+    ]
+
+    matches = retriever.search(methods, "相同方法")
+
+    assert [match.method.key for match in matches] == ["reliable", "failure_heavy"]
+    assert matches[0].score > matches[1].score
+
+
 # --- 端到端 -------------------------------------------------------------
 
 

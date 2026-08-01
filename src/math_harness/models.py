@@ -302,6 +302,7 @@ class MergeProposalStatus(StrEnum):
     PENDING = "pending"
     APPLIED = "applied"
     REJECTED = "rejected"
+    STALE = "stale"
 
 
 class MethodMergeProposal(BaseModel):

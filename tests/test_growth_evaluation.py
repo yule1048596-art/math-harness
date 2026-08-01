@@ -2,17 +2,68 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from math_harness.eval_cli import run_growth_evaluation
+import pytest
+
+from math_harness.eval_cli import (
+    _load_jsonl,
+    _validate_dataset_isolation,
+    run_growth_evaluation,
+)
 from math_harness.models import (
     EvaluationCase,
     EvaluationRequest,
+    ExampleCreate,
     KnowledgeStatus,
     MethodStatusUpdate,
+    SolveEvaluationCase,
     WorkspaceCreate,
 )
 from math_harness.service import MathHarnessService
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_pilot_training_and_all_holdouts_are_globally_isolated():
+    training = [
+        example
+        for path in (
+            PROJECT_ROOT / "data/pilot/asymptotic_train.jsonl",
+            PROJECT_ROOT / "data/pilot/asymptotic_train_generated.jsonl",
+        )
+        for example in _load_jsonl(path, ExampleCreate)
+    ]
+    holdouts = [
+        *_load_jsonl(
+            PROJECT_ROOT / "data/pilot/asymptotic_holdout.jsonl", EvaluationCase
+        ),
+        *_load_jsonl(
+            PROJECT_ROOT / "data/pilot/asymptotic_retrieval_v2.jsonl",
+            EvaluationCase,
+        ),
+        *_load_jsonl(
+            PROJECT_ROOT / "data/pilot/asymptotic_solve_holdout.jsonl",
+            SolveEvaluationCase,
+        ),
+    ]
+
+    _validate_dataset_isolation(training, holdouts)
+
+
+def test_dataset_preflight_rejects_duplicate_training_expressions():
+    example = ExampleCreate(
+        problem="重复题",
+        solution="重复解",
+        reviewed=True,
+        math_payload={
+            "expression": "1 / (x + 1)",
+            "expected": "1/x - 1/x**2",
+            "point": "oo",
+            "remainder_power": 3,
+        },
+    )
+
+    with pytest.raises(ValueError, match="duplicate training expression"):
+        _validate_dataset_isolation([example, example.model_copy()], [])
 
 
 def test_growth_evaluation_improves_on_pilot_holdout(tmp_path):

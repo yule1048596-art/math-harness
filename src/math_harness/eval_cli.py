@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from math_harness.methods import MethodExtractor
 from math_harness.models import (
     EvaluationCase,
     EvaluationMetrics,
@@ -14,9 +15,11 @@ from math_harness.models import (
     ExampleCreate,
     SolveEvaluationCase,
     SolveEvaluationRequest,
+    SolveMathTarget,
     WorkspaceCreate,
 )
 from math_harness.service import MathHarnessService
+from math_harness.solving import OfflineSympySolutionGenerator
 
 
 def _load_jsonl[ModelT: BaseModel](path: Path, model: type[ModelT]) -> list[ModelT]:
@@ -46,6 +49,57 @@ def _delta(before: EvaluationMetrics, after: EvaluationMetrics) -> dict[str, flo
     }
 
 
+def _target_fingerprint(target: SolveMathTarget) -> str:
+    """Identify one mathematical task while ignoring its known training answer."""
+
+    payload = target.model_dump(mode="json", exclude_none=True)
+    payload.pop("expected", None)
+    payload["expression"] = "".join(target.expression.split())
+    payload["point"] = "".join(target.point.split())
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+def _validate_dataset_isolation(
+    training_examples: Sequence[ExampleCreate],
+    holdout_cases: Sequence[EvaluationCase | SolveEvaluationCase],
+) -> None:
+    """Fail before evaluation when train data is duplicated or leaks into holdouts."""
+
+    seen_training: dict[str, str] = {}
+    duplicate_training: set[str] = set()
+    for example in training_examples:
+        if example.math_payload is None:
+            continue
+        fingerprint = _target_fingerprint(example.math_payload)
+        expression = "".join(example.math_payload.expression.split())
+        if fingerprint in seen_training:
+            duplicate_training.add(expression)
+        else:
+            seen_training[fingerprint] = expression
+
+    holdout_expressions = {
+        _target_fingerprint(case.math_target)
+        for case in holdout_cases
+        if case.math_target is not None
+    }
+    overlap = {
+        seen_training[fingerprint]
+        for fingerprint in set(seen_training) & holdout_expressions
+    }
+
+    errors: list[str] = []
+    if duplicate_training:
+        errors.append(
+            "duplicate training expression(s): " + ", ".join(sorted(duplicate_training))
+        )
+    if overlap:
+        errors.append(
+            "training/holdout expression overlap: " + ", ".join(sorted(overlap))
+        )
+    if errors:
+        raise ValueError("dataset isolation failed; " + "; ".join(errors))
+
+
 def run_growth_evaluation(
     data_root: Path,
     train_paths: Sequence[Path],
@@ -54,13 +108,6 @@ def run_growth_evaluation(
     solve_holdout_path: Path | None = None,
     retrieval_set_path: Path | None = None,
 ) -> dict[str, object]:
-    service = MathHarnessService(data_root)
-    workspace = service.create_workspace(
-        WorkspaceCreate(
-            name="渐进估计成长评测",
-            description="由固定训练集和留出集创建的可复现实验空间。",
-        )
-    )
     cases = _load_jsonl(holdout_path, EvaluationCase)
     training_examples = [
         example for path in train_paths for example in _load_jsonl(path, ExampleCreate)
@@ -75,6 +122,24 @@ def run_growth_evaluation(
         _load_jsonl(retrieval_set_path, EvaluationCase)
         if retrieval_set_path is not None
         else []
+    )
+    _validate_dataset_isolation(
+        training_examples,
+        [*cases, *retrieval_cases, *solve_cases],
+    )
+
+    # Evaluation is hermetic: local .env provider choices must never turn a
+    # reproducibility check into a paid/networked model call.
+    service = MathHarnessService(
+        data_root,
+        extractor=MethodExtractor(),
+        generator=OfflineSympySolutionGenerator(),
+    )
+    workspace = service.create_workspace(
+        WorkspaceCreate(
+            name="渐进估计成长评测",
+            description="由固定训练集和留出集创建的可复现实验空间。",
+        )
     )
 
     baseline = service.evaluate_workspace(

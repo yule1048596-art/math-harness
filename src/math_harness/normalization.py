@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from math_harness.models import CandidateSolution, SolveMathTarget
+from math_harness.models import CandidateSolution, SolveMathTarget, VerificationMode
 
 _CARET_PATTERN = re.compile(r"(?<!\*)\^(?!\*)")
 _LOWERCASE_E_PATTERN = re.compile(r"(?<![A-Za-z0-9_])e(?![A-Za-z0-9_])")
@@ -68,9 +68,14 @@ class CandidateSolutionNormalizer:
                 normalized = replaced
                 actions.append("normalize_e_constant")
 
-        normalized, changed = self._strip_trailing_order_term(normalized)
-        if changed:
-            actions.append("strip_trailing_order_term")
+        if (
+            math_target is not None
+            and math_target.mode is VerificationMode.ASYMPTOTIC_EXPANSION
+            and math_target.remainder_power is not None
+        ):
+            normalized, changed = self._strip_trailing_order_term(normalized)
+            if changed:
+                actions.append("strip_trailing_order_term")
 
         normalized = normalized.strip()
         if not normalized or normalized == expression:
