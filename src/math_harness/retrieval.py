@@ -4,6 +4,11 @@ import re
 
 from math_harness.classifier import infer_query_tags
 from math_harness.models import MethodCard, MethodMatch
+from math_harness.structure import (
+    MethodSignature,
+    StructuralFeatures,
+    signature_score,
+)
 
 _TOKEN_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*|[\u4e00-\u9fff]")
 
@@ -29,10 +34,13 @@ class MethodRetriever:
         query: str,
         tags: list[str] | None = None,
         top_k: int = 5,
+        features: StructuralFeatures | None = None,
     ) -> list[MethodMatch]:
         query_tokens = _tokens(query)
         query_tags = {tag.lower() for tag in (tags or [])}
         query_tags.update(infer_query_tags(query))
+        # 没有结构信息时完全走原有词面打分，行为与 v0.3.x 一致。
+        use_structure = features is not None and not features.is_empty
         matches: list[MethodMatch] = []
 
         for method in methods:
@@ -50,11 +58,30 @@ class MethodRetriever:
             shared_tags = query_tags & method_tags
             tag_score = len(shared_tags) / max(1, len(query_tags))
             history_score = min(method.success_count / 10, 1.0)
-            score = min(
-                1.0, text_score * 0.45 + tag_score * 0.45 + history_score * 0.10
+            structure_score = (
+                signature_score(
+                    MethodSignature.model_validate(method.signature or {}),
+                    features,
+                )
+                if use_structure
+                else 0.0
             )
+            if use_structure:
+                score = min(
+                    1.0,
+                    structure_score * 0.45
+                    + text_score * 0.20
+                    + tag_score * 0.25
+                    + history_score * 0.10,
+                )
+            else:
+                score = min(
+                    1.0, text_score * 0.45 + tag_score * 0.45 + history_score * 0.10
+                )
 
             reasons = []
+            if structure_score > 0:
+                reasons.append(f"数学结构契合度 {structure_score:.2f}")
             if shared_tags:
                 reasons.append(f"标签匹配：{', '.join(sorted(shared_tags))}")
             if text_score > 0:

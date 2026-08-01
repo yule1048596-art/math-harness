@@ -9,12 +9,14 @@ from datetime import datetime
 from pathlib import Path
 
 from math_harness.errors import RecordNotFound, WorkspaceNotFound
+from math_harness.merging import merge_method_content
 from math_harness.models import (
     EvaluationRun,
     KnowledgeStatus,
     LearningEvent,
     MethodCard,
     MethodDraft,
+    MethodVersion,
     ProblemExample,
     SolutionAttempt,
     SolutionAttemptStatus,
@@ -23,6 +25,7 @@ from math_harness.models import (
     WorkspaceCreate,
     utc_now,
 )
+from math_harness.structure import MethodSignature, StructuralFeatures
 
 
 def _dump(value: object) -> str:
@@ -181,11 +184,28 @@ class WorkspaceStore:
                     version INTEGER NOT NULL,
                     success_count INTEGER NOT NULL,
                     failure_count INTEGER NOT NULL,
+                    signature_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE(workspace_id, method_key),
                     CHECK (workspace_id <> '')
                 );
+
+                CREATE TABLE IF NOT EXISTS method_versions (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    method_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    content_json TEXT NOT NULL,
+                    source_example_id TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, method_id, version),
+                    FOREIGN KEY (method_id) REFERENCES methods(id) ON DELETE CASCADE,
+                    CHECK (workspace_id <> '')
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_method_versions_method
+                    ON method_versions(workspace_id, method_id, version);
 
                 CREATE TABLE IF NOT EXISTS method_examples (
                     workspace_id TEXT NOT NULL,
@@ -260,6 +280,12 @@ class WorkspaceStore:
                 "examples",
                 "reviewed",
                 "INTEGER NOT NULL DEFAULT 0",
+            )
+            self._ensure_column(
+                connection,
+                "methods",
+                "signature_json",
+                "TEXT NOT NULL DEFAULT '{}'",
             )
 
     @staticmethod
@@ -345,6 +371,7 @@ class WorkspaceStore:
         example_id: str,
         status: KnowledgeStatus,
         verified: bool,
+        features: StructuralFeatures | None = None,
     ) -> MethodCard:
         now = utc_now()
         with self.connection() as connection:
@@ -352,6 +379,16 @@ class WorkspaceStore:
                 "SELECT * FROM methods WHERE workspace_id = ? AND method_key = ?",
                 (self.workspace_id, draft.key),
             ).fetchone()
+            previous_signature = (
+                MethodSignature.model_validate_json(existing["signature_json"] or "{}")
+                if existing is not None
+                else MethodSignature()
+            )
+            signature = (
+                previous_signature.accumulate(features)
+                if features is not None
+                else previous_signature
+            )
             if existing is None:
                 method_id = str(uuid.uuid4())
                 connection.execute(
@@ -359,8 +396,9 @@ class WorkspaceStore:
                     INSERT INTO methods (
                         id, workspace_id, method_key, name, goal, applicable_json,
                         procedure_json, failure_modes_json, tags_json, status, version,
-                        success_count, failure_count, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        success_count, failure_count, signature_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         method_id,
@@ -376,11 +414,13 @@ class WorkspaceStore:
                         1,
                         1 if verified else 0,
                         0,
+                        signature.model_dump_json(),
                         now.isoformat(),
                         now.isoformat(),
                     ),
                 )
                 event_type = "method_created"
+                event_extra: dict[str, object] = {}
             else:
                 method_id = existing["id"]
                 next_status = (
@@ -388,23 +428,84 @@ class WorkspaceStore:
                     if verified or existing["status"] == KnowledgeStatus.PROMOTED.value
                     else existing["status"]
                 )
-                connection.execute(
-                    """
-                    UPDATE methods
-                    SET status = ?, version = version + 1,
-                        success_count = success_count + ?,
-                        updated_at = ?
-                    WHERE id = ? AND workspace_id = ?
-                    """,
-                    (
-                        next_status,
-                        1 if verified else 0,
-                        now.isoformat(),
-                        method_id,
-                        self.workspace_id,
-                    ),
-                )
-                event_type = "method_updated"
+                current = self._row_to_method(existing, [])
+                merged = merge_method_content(current, draft)
+                if merged.changed:
+                    # 先把改写前的内容按当前版本号存档，再更新。原始理解不被覆盖，
+                    # 与「人工纠正以新记录保存」的审计风格一致。
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO method_versions (
+                            id, workspace_id, method_id, version, content_json,
+                            source_example_id, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            self.workspace_id,
+                            method_id,
+                            existing["version"],
+                            _dump(
+                                {
+                                    "name": current.name,
+                                    "goal": current.goal,
+                                    "applicable_when": current.applicable_when,
+                                    "procedure": current.procedure,
+                                    "failure_modes": current.failure_modes,
+                                    "tags": current.tags,
+                                }
+                            ),
+                            example_id,
+                            now.isoformat(),
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE methods
+                        SET status = ?, version = version + 1,
+                            success_count = success_count + ?,
+                            name = ?, goal = ?, applicable_json = ?,
+                            procedure_json = ?, failure_modes_json = ?, tags_json = ?,
+                            signature_json = ?, updated_at = ?
+                        WHERE id = ? AND workspace_id = ?
+                        """,
+                        (
+                            next_status,
+                            1 if verified else 0,
+                            merged.name,
+                            merged.goal,
+                            _dump(merged.applicable_when),
+                            _dump(merged.procedure),
+                            _dump(merged.failure_modes),
+                            _dump(merged.tags),
+                            signature.model_dump_json(),
+                            now.isoformat(),
+                            method_id,
+                            self.workspace_id,
+                        ),
+                    )
+                    event_type = "method_content_evolved"
+                    event_extra = {"added": merged.added}
+                else:
+                    connection.execute(
+                        """
+                        UPDATE methods
+                        SET status = ?, version = version + 1,
+                            success_count = success_count + ?,
+                            signature_json = ?, updated_at = ?
+                        WHERE id = ? AND workspace_id = ?
+                        """,
+                        (
+                            next_status,
+                            1 if verified else 0,
+                            signature.model_dump_json(),
+                            now.isoformat(),
+                            method_id,
+                            self.workspace_id,
+                        ),
+                    )
+                    event_type = "method_updated"
+                    event_extra = {}
 
             connection.execute(
                 """
@@ -418,7 +519,7 @@ class WorkspaceStore:
                 connection,
                 event_type,
                 method_id,
-                {"example_id": example_id, "status": status.value},
+                {"example_id": example_id, "status": status.value, **event_extra},
             )
 
         return self.get_method(method_id)
@@ -467,6 +568,38 @@ class WorkspaceStore:
                 (self.workspace_id, method_id),
             ).fetchall()
         return self._row_to_method(row, [item["example_id"] for item in example_rows])
+
+    def list_method_versions(self, method_id: str) -> list[MethodVersion]:
+        """按版本升序返回该方法卡被改写前的历史快照。"""
+
+        with self.connection() as connection:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM methods WHERE id = ? AND workspace_id = ?",
+                    (method_id, self.workspace_id),
+                ).fetchone()
+                is None
+            ):
+                raise RecordNotFound(f"method not found in workspace: {method_id}")
+            rows = connection.execute(
+                """
+                SELECT * FROM method_versions
+                WHERE workspace_id = ? AND method_id = ?
+                ORDER BY version
+                """,
+                (self.workspace_id, method_id),
+            ).fetchall()
+        return [
+            MethodVersion(
+                method_id=row["method_id"],
+                workspace_id=row["workspace_id"],
+                version=row["version"],
+                source_example_id=row["source_example_id"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                **json.loads(row["content_json"]),
+            )
+            for row in rows
+        ]
 
     def list_methods(
         self, include_pending: bool = True, include_deprecated: bool = False
@@ -837,6 +970,7 @@ class WorkspaceStore:
             tags=json.loads(row["tags_json"]),
             status=KnowledgeStatus(row["status"]),
             version=row["version"],
+            signature=json.loads(row["signature_json"] or "{}"),
             success_count=row["success_count"],
             failure_count=row["failure_count"],
             example_ids=example_ids,

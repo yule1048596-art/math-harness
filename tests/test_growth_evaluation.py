@@ -22,9 +22,15 @@ def test_growth_evaluation_improves_on_pilot_holdout(tmp_path):
         holdout_path=PROJECT_ROOT / "data/pilot/asymptotic_holdout.jsonl",
         top_k=3,
         solve_holdout_path=(PROJECT_ROOT / "data/pilot/asymptotic_solve_holdout.jsonl"),
+        retrieval_set_path=(PROJECT_ROOT / "data/pilot/asymptotic_retrieval_v2.jsonl"),
     )
 
-    assert report["learning"]["verified_examples"] == 6
+    # 训练集整体必须可验证：任何一条过不了 SymPy，它的方法就不会晋级，
+    # 也就不会进入检索，评测结论会被静默地稀释。
+    assert (
+        report["learning"]["verified_examples"]
+        == report["dataset"]["training_examples"]
+    )
     assert report["before"]["recall_at_k"] == 0
     assert report["after"]["recall_at_k"] > report["before"]["recall_at_k"]
     assert report["after"]["mean_reciprocal_rank"] > 0
@@ -34,6 +40,25 @@ def test_growth_evaluation_improves_on_pilot_holdout(tmp_path):
     assert report["solve_gate"]["verified_rate"] == 0.666667
     assert report["solve_gate"]["needs_review_rate"] == 0.333333
     assert report["solve_gate"]["generation_failure_rate"] == 0
+
+
+def test_real_problem_retrieval_set_is_reported_alongside_legacy_holdout(tmp_path):
+    report = run_growth_evaluation(
+        data_root=tmp_path,
+        train_path=PROJECT_ROOT / "data/pilot/asymptotic_train.jsonl",
+        holdout_path=PROJECT_ROOT / "data/pilot/asymptotic_holdout.jsonl",
+        top_k=3,
+        retrieval_set_path=(PROJECT_ROOT / "data/pilot/asymptotic_retrieval_v2.jsonl"),
+    )
+
+    legacy = report["after"]
+    real = report["retrieval_v2"]["after"]
+
+    assert report["retrieval_v2"]["before"]["hit_at_1"] == 0
+    assert real["hit_at_1"] > 0
+    # 旧口径的查询是方法卡改写句，真实题面必然更难。这条断言把两者的差距钉住，
+    # 一旦有人再拿旧口径的 1.0 当作检索能力的证据就会失败。
+    assert real["hit_at_1"] < legacy["hit_at_1"]
 
 
 def test_evaluations_and_manual_status_changes_are_audited(

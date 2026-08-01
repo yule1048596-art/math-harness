@@ -270,6 +270,8 @@ class MethodCard(BaseModel):
     version: int = 1
     success_count: int = 0
     failure_count: int = 0
+    # 这张方法卡通常用在什么数学结构上，由它关联例子确定性累积而来。
+    signature: dict[str, object] = Field(default_factory=dict)
     example_ids: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -278,6 +280,22 @@ class MethodCard(BaseModel):
     @classmethod
     def validate_key(cls, value: str | MethodKind) -> str:
         return _normalize_method_key(value)
+
+
+class MethodVersion(BaseModel):
+    """某个方法卡在被改写之前的内容快照，用于回溯它是如何长出来的。"""
+
+    method_id: str
+    workspace_id: str
+    version: int
+    name: str
+    goal: str
+    applicable_when: list[str]
+    procedure: list[str]
+    failure_modes: list[str]
+    tags: list[str]
+    source_example_id: str | None = None
+    created_at: datetime
 
 
 class MethodDraft(BaseModel):
@@ -309,6 +327,8 @@ class MethodSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=10_000)
     tags: list[str] = Field(default_factory=list, max_length=30)
     top_k: int = Field(default=5, ge=1, le=20)
+    # 提供后走结构化检索；不提供则完全保持原有的词面打分。
+    math_target: SolveMathTarget | None = None
 
 
 class MethodMatch(BaseModel):
@@ -550,6 +570,8 @@ class EvaluationCase(BaseModel):
     problem: str = Field(min_length=1, max_length=20_000)
     tags: list[str] = Field(default_factory=list, max_length=30)
     expected_method_keys: list[str] = Field(min_length=1, max_length=20)
+    # 带上结构化目标后，检索才能用数学结构而不只是词面来匹配方法。
+    math_target: SolveMathTarget | None = None
 
     @field_validator("expected_method_keys", mode="before")
     @classmethod

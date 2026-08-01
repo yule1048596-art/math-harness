@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from math_harness.models import (
     EvaluationCase,
+    EvaluationMetrics,
     EvaluationRequest,
     ExampleCreate,
     SolveEvaluationCase,
@@ -33,12 +34,24 @@ def _load_jsonl[ModelT: BaseModel](path: Path, model: type[ModelT]) -> list[Mode
     return records
 
 
+def _delta(before: EvaluationMetrics, after: EvaluationMetrics) -> dict[str, float]:
+    return {
+        "hit_at_1": round(after.hit_at_1 - before.hit_at_1, 6),
+        "recall_at_k": round(after.recall_at_k - before.recall_at_k, 6),
+        "mean_reciprocal_rank": round(
+            after.mean_reciprocal_rank - before.mean_reciprocal_rank, 6
+        ),
+        "zero_result_rate": round(after.zero_result_rate - before.zero_result_rate, 6),
+    }
+
+
 def run_growth_evaluation(
     data_root: Path,
     train_path: Path,
     holdout_path: Path,
     top_k: int,
     solve_holdout_path: Path | None = None,
+    retrieval_set_path: Path | None = None,
 ) -> dict[str, object]:
     service = MathHarnessService(data_root)
     workspace = service.create_workspace(
@@ -54,10 +67,26 @@ def run_growth_evaluation(
         if solve_holdout_path is not None
         else []
     )
+    # 第二套口径：真实题面。旧留出集是方法卡的改写句，两者并跑才能看出差别。
+    retrieval_cases = (
+        _load_jsonl(retrieval_set_path, EvaluationCase)
+        if retrieval_set_path is not None
+        else []
+    )
 
     baseline = service.evaluate_workspace(
         workspace.id,
         EvaluationRequest(name="before_learning", cases=cases, top_k=top_k),
+    )
+    retrieval_baseline = (
+        service.evaluate_workspace(
+            workspace.id,
+            EvaluationRequest(
+                name="retrieval_v2_before", cases=retrieval_cases, top_k=top_k
+            ),
+        )
+        if retrieval_cases
+        else None
     )
     ingestion_results = [
         service.ingest_example(workspace.id, example) for example in training_examples
@@ -65,6 +94,16 @@ def run_growth_evaluation(
     after = service.evaluate_workspace(
         workspace.id,
         EvaluationRequest(name="after_learning", cases=cases, top_k=top_k),
+    )
+    retrieval_after = (
+        service.evaluate_workspace(
+            workspace.id,
+            EvaluationRequest(
+                name="retrieval_v2_after", cases=retrieval_cases, top_k=top_k
+            ),
+        )
+        if retrieval_cases
+        else None
     )
     solve_gate = (
         service.evaluate_solver(
@@ -100,6 +139,10 @@ def run_growth_evaluation(
                 str(solve_holdout_path.resolve()) if solve_holdout_path else None
             ),
             "solve_holdout_cases": len(solve_cases),
+            "retrieval_set_path": (
+                str(retrieval_set_path.resolve()) if retrieval_set_path else None
+            ),
+            "retrieval_set_cases": len(retrieval_cases),
         },
         "learning": {
             "verified_examples": verified_count,
@@ -110,21 +153,16 @@ def run_growth_evaluation(
         "solve_gate": (
             solve_gate.metrics.model_dump(mode="json") if solve_gate else None
         ),
-        "delta": {
-            "hit_at_1": round(after.metrics.hit_at_1 - baseline.metrics.hit_at_1, 6),
-            "recall_at_k": round(
-                after.metrics.recall_at_k - baseline.metrics.recall_at_k, 6
-            ),
-            "mean_reciprocal_rank": round(
-                after.metrics.mean_reciprocal_rank
-                - baseline.metrics.mean_reciprocal_rank,
-                6,
-            ),
-            "zero_result_rate": round(
-                after.metrics.zero_result_rate - baseline.metrics.zero_result_rate,
-                6,
-            ),
-        },
+        "delta": _delta(baseline.metrics, after.metrics),
+        "retrieval_v2": (
+            {
+                "before": retrieval_baseline.metrics.model_dump(mode="json"),
+                "after": retrieval_after.metrics.model_dump(mode="json"),
+                "delta": _delta(retrieval_baseline.metrics, retrieval_after.metrics),
+            }
+            if retrieval_baseline and retrieval_after
+            else None
+        ),
     }
 
 
@@ -153,6 +191,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/pilot/asymptotic_solve_holdout.jsonl"),
     )
+    parser.add_argument(
+        "--retrieval-set",
+        type=Path,
+        default=Path("data/pilot/asymptotic_retrieval_v2.jsonl"),
+        help="真实题面的检索留出集，与旧口径并跑做对照。",
+    )
     parser.add_argument("--top-k", type=int, default=3, choices=range(1, 21))
     return parser
 
@@ -165,6 +209,7 @@ def main() -> None:
         holdout_path=args.holdout,
         top_k=args.top_k,
         solve_holdout_path=args.solve_holdout,
+        retrieval_set_path=args.retrieval_set,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

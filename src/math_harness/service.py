@@ -31,6 +31,7 @@ from math_harness.models import (
     MethodExtractionTrace,
     MethodMatch,
     MethodStatusUpdate,
+    MethodVersion,
     ProblemExample,
     SolutionAttempt,
     SolutionAttemptStatus,
@@ -59,6 +60,7 @@ from math_harness.solving import (
     build_solution_generator_from_env,
 )
 from math_harness.storage import WorkspaceManager
+from math_harness.structure import extract_features
 from math_harness.verifier import SolutionVerifier
 
 
@@ -129,6 +131,12 @@ class MathHarnessService:
                 if promotion_approved
                 else KnowledgeStatus.PENDING_REVIEW
             )
+            # 只有验证通过的例子才把结构计入签名：未经验证的结构不该影响以后的检索。
+            features = (
+                extract_features(request.math_payload)
+                if verification.status is VerificationStatus.VERIFIED
+                else None
+            )
             for draft in extraction_result.methods:
                 learned_methods.append(
                     store.upsert_method(
@@ -136,6 +144,7 @@ class MathHarnessService:
                         example_id=example.id,
                         status=method_status,
                         verified=promotion_approved,
+                        features=features,
                     )
                 )
 
@@ -190,6 +199,11 @@ class MathHarnessService:
             include_deprecated=include_deprecated,
         )
 
+    def list_method_versions(
+        self, workspace_id: str, method_id: str
+    ) -> list[MethodVersion]:
+        return self.workspaces.store(workspace_id).list_method_versions(method_id)
+
     def update_method_status(
         self,
         workspace_id: str,
@@ -209,11 +223,18 @@ class MathHarnessService:
         query: str,
         tags: list[str] | None = None,
         top_k: int = 5,
+        math_target: SolveMathTarget | None = None,
     ) -> list[MethodMatch]:
         methods = self.workspaces.store(workspace_id).list_methods(
             include_pending=False
         )
-        return self.retriever.search(methods, query, tags=tags, top_k=top_k)
+        return self.retriever.search(
+            methods,
+            query,
+            tags=tags,
+            top_k=top_k,
+            features=extract_features(math_target) if math_target else None,
+        )
 
     def build_solve_plan(
         self,
@@ -221,8 +242,15 @@ class MathHarnessService:
         problem: str,
         tags: list[str] | None = None,
         top_k: int = 5,
+        math_target: SolveMathTarget | None = None,
     ) -> SolvePlan:
-        matches = self.search_methods(workspace_id, problem, tags=tags, top_k=top_k)
+        matches = self.search_methods(
+            workspace_id,
+            problem,
+            tags=tags,
+            top_k=top_k,
+            math_target=math_target,
+        )
         return SolvePlan(
             workspace_id=workspace_id,
             problem=problem,
@@ -256,6 +284,7 @@ class MathHarnessService:
             request.problem,
             tags=request.tags,
             top_k=request.top_k,
+            math_target=request.math_target,
         )
         if generation_result is None:
             generation_result = self._generate_candidate(request, matches)
@@ -929,6 +958,7 @@ class MathHarnessService:
                 case.problem,
                 tags=case.tags,
                 top_k=request.top_k,
+                math_target=case.math_target,
             )
             returned = [match.method.key for match in matches]
             expected = set(case.expected_method_keys)

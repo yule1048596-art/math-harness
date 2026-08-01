@@ -18,6 +18,7 @@ from math_harness.models import (
     MethodMatch,
     MethodSearchRequest,
     MethodStatusUpdate,
+    MethodVersion,
     ProblemExample,
     SolutionAttempt,
     SolutionCorrection,
@@ -102,6 +103,13 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
             include_deprecated=include_deprecated,
         )
 
+    @app.get(
+        "/workspaces/{workspace_id}/methods/{method_id}/versions",
+        response_model=list[MethodVersion],
+    )
+    def list_method_versions(workspace_id: str, method_id: str) -> list[MethodVersion]:
+        return service.list_method_versions(workspace_id, method_id)
+
     @app.patch(
         "/workspaces/{workspace_id}/methods/{method_id}",
         response_model=MethodCard,
@@ -125,6 +133,7 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
             request.query,
             tags=request.tags,
             top_k=request.top_k,
+            math_target=request.math_target,
         )
 
     @app.post(
@@ -137,6 +146,7 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
             request.query,
             tags=request.tags,
             top_k=request.top_k,
+            math_target=request.math_target,
         )
 
     @app.post(
