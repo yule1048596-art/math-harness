@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import JSONResponse
 
 from math_harness import __version__
 from math_harness.errors import RecordNotFound, WorkspaceNotFound
@@ -35,8 +37,13 @@ from math_harness.models import (
 from math_harness.service import MathHarnessService
 
 
-def create_app(data_root: Path | str | None = None) -> FastAPI:
+def create_app(
+    data_root: Path | str | None = None,
+    *,
+    local_token: str | None = None,
+) -> FastAPI:
     root = data_root or os.getenv("MATH_HARNESS_DATA_DIR", ".math_harness")
+    token = local_token or os.getenv("MATH_HARNESS_LOCAL_TOKEN")
     service = MathHarnessService(root)
     app = FastAPI(
         title="Math Harness",
@@ -44,6 +51,19 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
         description="工作区隔离、可验证、可成长的数学 AI harness 原型。",
     )
     app.state.service = service
+
+    if token:
+
+        @app.middleware("http")
+        async def require_local_token(request: Request, call_next):
+            supplied = request.headers.get("authorization", "")
+            expected = f"Bearer {token}"
+            if not secrets.compare_digest(supplied, expected):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "missing or invalid local app token"},
+                )
+            return await call_next(request)
 
     @app.exception_handler(WorkspaceNotFound)
     async def workspace_not_found_handler(_, exc: WorkspaceNotFound):

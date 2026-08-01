@@ -65,3 +65,42 @@ jobs:
               --title "${tag}" \
               --generate-notes
           fi
+
+  macos-app:
+    needs: test-build-release
+    runs-on: macos-15
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --no-editable --extra dev --extra llm
+
+      - name: Check Swift API contract
+        run: |
+          swift format lint --recursive --strict \
+            macos/MathHarnessApp/Package.swift \
+            macos/MathHarnessApp/Sources
+          swift run --package-path macos/MathHarnessApp MathHarnessCoreChecks
+
+      - name: Build and test standalone macOS app
+        run: |
+          ./scripts/build_macos_app.sh
+          ./scripts/test_macos_bundle.sh
+          MATH_HARNESS_SKIP_APP_BUILD=true ./scripts/package_macos_dmg.sh
+
+      - name: Upload macOS app to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${GITHUB_REF_NAME}" dist/Math-Harness-* --clobber
