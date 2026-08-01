@@ -134,11 +134,10 @@ class MathHarnessService:
                 if promotion_approved
                 else KnowledgeStatus.PENDING_REVIEW
             )
-            # 只有验证通过的例子才把结构计入签名：未经验证的结构不该影响以后的检索。
+            # 签名会直接影响后续检索，因此它和方法晋级共用同一条信任边界：
+            # 数学上可验证但尚未经人工复核的例子，也不能改写已晋级知识。
             features = (
-                extract_features(request.math_payload)
-                if verification.status is VerificationStatus.VERIFIED
-                else None
+                extract_features(request.math_payload) if promotion_approved else None
             )
             for draft in extraction_result.methods:
                 learned_methods.append(

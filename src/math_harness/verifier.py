@@ -37,7 +37,7 @@ class SolutionVerifier:
             point = self._parse_point(payload.point, symbols)
 
             if payload.mode is VerificationMode.EXACT_EQUIVALENCE:
-                return self._verify_exact(expression, expected, variable)
+                return self._verify_exact(expression, expected, symbols)
             if payload.mode is VerificationMode.LIMIT:
                 return self._verify_limit(
                     expression,
@@ -96,7 +96,7 @@ class SolutionVerifier:
     def _verify_exact(
         expression: sp.Expr,
         expected: sp.Expr,
-        variable: sp.Symbol,
+        symbols: dict[str, sp.Symbol],
     ) -> VerificationReport:
         difference = sp.simplify(expression - expected)
         equivalent = difference.equals(0)
@@ -117,38 +117,47 @@ class SolutionVerifier:
                 computed=computed,
             )
 
-        try:
-            base_domain = SolutionVerifier._base_real_domain(variable)
-            expression_domain = sp.calculus.util.continuous_domain(
-                expression,
-                variable,
-                sp.S.Reals,
-            ).intersect(base_domain)
-            expected_domain = sp.calculus.util.continuous_domain(
-                expected,
-                variable,
-                sp.S.Reals,
-            ).intersect(base_domain)
-        except (NotImplementedError, ValueError) as exc:
-            return VerificationReport(
-                status=VerificationStatus.NEEDS_REVIEW,
-                summary="表达式值相同，但自动验证无法可靠比较定义域，需要复核。",
-                checks=[
-                    "safe_parse",
-                    "symbolic_difference",
-                    "domain_check_inconclusive",
-                ],
-                computed=computed,
-                error=f"{exc.__class__.__name__}: {exc}",
-            )
+        domains_equal = True
+        primary_symbol_name = next(iter(symbols))
+        for symbol_name, symbol in symbols.items():
+            try:
+                base_domain = SolutionVerifier._base_real_domain(symbol)
+                expression_domain = sp.calculus.util.continuous_domain(
+                    expression,
+                    symbol,
+                    sp.S.Reals,
+                ).intersect(base_domain)
+                expected_domain = sp.calculus.util.continuous_domain(
+                    expected,
+                    symbol,
+                    sp.S.Reals,
+                ).intersect(base_domain)
+            except (NotImplementedError, ValueError) as exc:
+                return VerificationReport(
+                    status=VerificationStatus.NEEDS_REVIEW,
+                    summary=(
+                        f"表达式值相同，但自动验证无法可靠比较符号 {symbol_name} "
+                        "的定义域，需要复核。"
+                    ),
+                    checks=[
+                        "safe_parse",
+                        "symbolic_difference",
+                        "domain_check_inconclusive",
+                    ],
+                    computed=computed,
+                    error=f"{exc.__class__.__name__}: {exc}",
+                )
 
-        computed.update(
-            {
-                "expression_domain": sp.sstr(expression_domain),
-                "expected_domain": sp.sstr(expected_domain),
-            }
-        )
-        if expression_domain == expected_domain:
+            computed[f"expression_domain:{symbol_name}"] = sp.sstr(expression_domain)
+            computed[f"expected_domain:{symbol_name}"] = sp.sstr(expected_domain)
+            # Keep the v0.5 response keys for the main variable while exposing
+            # parameter-specific evidence alongside them.
+            if symbol_name == primary_symbol_name:
+                computed["expression_domain"] = sp.sstr(expression_domain)
+                computed["expected_domain"] = sp.sstr(expected_domain)
+            domains_equal = domains_equal and expression_domain == expected_domain
+
+        if domains_equal:
             status = VerificationStatus.VERIFIED
             summary = "符号值与定义域均等价，验证通过。"
         else:

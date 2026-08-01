@@ -17,7 +17,18 @@ from math_harness.models import (
 from math_harness.solving import OfflineSympySolutionGenerator
 from math_harness.verifier import SolutionVerifier
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+def _discover_project_root() -> Path:
+    """Find checked-out pilot data in editable and wheel-based CLI runs."""
+
+    source_root = Path(__file__).resolve().parents[2]
+    for candidate in (source_root, Path.cwd().resolve()):
+        if (candidate / "data/pilot").is_dir():
+            return candidate
+    return source_root
+
+
+_PROJECT_ROOT = _discover_project_root()
 
 # 按方法家族程序化生成训练语料。
 #
@@ -396,23 +407,18 @@ HOLDOUT_FILES: tuple[str, ...] = (
     "data/pilot/asymptotic_holdout.jsonl",
 )
 
+# The generated extension augments this hand-authored seed; repeating seed
+# expressions would inflate sample counts without adding mathematical coverage.
+SEED_TRAIN_FILES: tuple[str, ...] = ("data/pilot/asymptotic_train.jsonl",)
+
 
 def _normalize_expression(expression: str) -> str:
     return "".join(expression.split())
 
 
-def load_holdout_expressions(
-    paths: Sequence[Path] | None = None,
-) -> set[str]:
-    """收集所有留出集用到的表达式，供生成器排除。"""
-
-    resolved = (
-        list(paths)
-        if paths is not None
-        else [_PROJECT_ROOT / name for name in HOLDOUT_FILES]
-    )
+def _load_expressions(paths: Sequence[Path]) -> set[str]:
     expressions: set[str] = set()
-    for path in resolved:
+    for path in paths:
         if not path.exists():
             continue
         for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -424,6 +430,38 @@ def load_holdout_expressions(
             if target and target.get("expression"):
                 expressions.add(_normalize_expression(target["expression"]))
     return expressions
+
+
+def _default_dataset_paths(names: Sequence[str]) -> list[Path]:
+    paths = [_PROJECT_ROOT / name for name in names]
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "required isolation dataset(s) not found: " + ", ".join(missing)
+        )
+    return paths
+
+
+def load_holdout_expressions(
+    paths: Sequence[Path] | None = None,
+) -> set[str]:
+    """收集所有留出集用到的表达式，供生成器排除。"""
+
+    resolved = (
+        list(paths) if paths is not None else _default_dataset_paths(HOLDOUT_FILES)
+    )
+    return _load_expressions(resolved)
+
+
+def load_seed_training_expressions(
+    paths: Sequence[Path] | None = None,
+) -> set[str]:
+    """Collect hand-authored seed expressions so generated data only adds coverage."""
+
+    resolved = (
+        list(paths) if paths is not None else _default_dataset_paths(SEED_TRAIN_FILES)
+    )
+    return _load_expressions(resolved)
 
 
 @dataclass
@@ -466,7 +504,7 @@ def generate_examples(
     excluded = (
         excluded_expressions
         if excluded_expressions is not None
-        else load_holdout_expressions()
+        else load_holdout_expressions() | load_seed_training_expressions()
     )
 
     for family in families:

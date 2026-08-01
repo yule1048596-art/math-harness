@@ -68,6 +68,27 @@ def _prefer_existing(existing: str, incoming: str) -> str:
     return existing if existing.strip() else incoming
 
 
+def sanitize_method_draft(draft: MethodDraft) -> MethodDraft:
+    """Apply the same deterministic list limits to first versions and replacements."""
+
+    applicable_when, _ = _union_preserving_order(
+        [], draft.applicable_when, MAX_APPLICABLE_WHEN
+    )
+    procedure, _ = _union_preserving_order([], draft.procedure, MAX_PROCEDURE)
+    failure_modes, _ = _union_preserving_order(
+        [], draft.failure_modes, MAX_FAILURE_MODES
+    )
+    tags, _ = _union_preserving_order([], draft.tags, MAX_TAGS)
+    return draft.model_copy(
+        update={
+            "applicable_when": applicable_when,
+            "procedure": procedure,
+            "failure_modes": failure_modes,
+            "tags": tags,
+        }
+    )
+
+
 def merge_method_content(
     existing: MethodCard,
     draft: MethodDraft,

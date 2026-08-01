@@ -65,7 +65,11 @@ class MethodRetriever:
             method_tags = {tag.lower() for tag in method.tags}
             shared_tags = query_tags & method_tags
             tag_score = len(shared_tags) / max(1, len(query_tags))
-            history_score = min(method.success_count / 10, 1.0)
+            history_volume = min(method.success_count / 10, 1.0)
+            reliability = (method.success_count + 1) / (
+                method.success_count + method.failure_count + 1
+            )
+            history_score = history_volume * reliability
             structure_score = (
                 signature_score(signatures[method.id], features, idf)
                 if use_structure
@@ -93,6 +97,8 @@ class MethodRetriever:
                 reasons.append("题目结构词与方法说明相似")
             if method.success_count:
                 reasons.append(f"已有 {method.success_count} 个验证通过的来源案例")
+            if method.failure_count:
+                reasons.append(f"已有 {method.failure_count} 次失败反馈")
 
             if score > 0:
                 matches.append(
@@ -106,7 +112,8 @@ class MethodRetriever:
         matches.sort(
             key=lambda match: (
                 match.score,
-                match.method.success_count,
+                match.method.success_count - match.method.failure_count,
+                -match.method.failure_count,
                 match.method.updated_at,
             ),
             reverse=True,

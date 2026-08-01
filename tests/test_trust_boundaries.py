@@ -7,8 +7,14 @@ from math_harness.models import (
     CandidateSolution,
     CandidateStep,
     ExampleCreate,
+    ExtractionStatus,
     GenerationStatus,
+    KnowledgeStatus,
     MathPayload,
+    MethodDraft,
+    MethodExtractionResult,
+    MethodExtractionTrace,
+    MethodStatusUpdate,
     SolutionAttemptStatus,
     SolutionCorrection,
     SolutionGenerationResult,
@@ -21,7 +27,11 @@ from math_harness.models import (
     WorkspaceCreate,
 )
 from math_harness.service import MathHarnessService
-from math_harness.solving import FallbackSolutionGenerator
+from math_harness.solving import (
+    FallbackSolutionGenerator,
+    OfflineSympySolutionGenerator,
+)
+from math_harness.structure import MethodSignature
 from math_harness.verifier import SolutionVerifier
 
 
@@ -192,6 +202,52 @@ class WrongThenNoEquivalentGenerator(NoEquivalentGenerator):
         return super().generate("", [], None, 256)
 
 
+class SequencedExtractor:
+    name = "sequenced-test-extractor"
+    prompt_version = "sequenced-v1"
+
+    def __init__(self, drafts: list[MethodDraft]) -> None:
+        self._drafts = iter(drafts)
+
+    def extract(self, problem: str, solution: str, hint: str | None = None):
+        del problem, solution, hint
+        draft = next(self._drafts)
+        return MethodExtractionResult(
+            methods=[draft],
+            trace=MethodExtractionTrace(
+                provider=self.name,
+                prompt_version=self.prompt_version,
+                status=ExtractionStatus.SUCCESS,
+                extracted_method_keys=[draft.key],
+            ),
+        )
+
+
+def _method_draft(name: str, marker: str) -> MethodDraft:
+    return MethodDraft(
+        key="rationalization",
+        name=name,
+        goal=f"{marker}目标",
+        applicable_when=[f"{marker}适用条件"],
+        procedure=[f"{marker}步骤"],
+        failure_modes=[f"{marker}失败模式"],
+        tags=[marker],
+    )
+
+
+def _exact_example(expression: str, *, reviewed: bool) -> ExampleCreate:
+    return ExampleCreate(
+        problem=f"精确化简 {expression}",
+        solution="测试解答",
+        reviewed=reviewed,
+        math_payload=MathPayload(
+            expression=expression,
+            expected=expression,
+            mode=VerificationMode.EXACT_EQUIVALENCE,
+        ),
+    )
+
+
 def test_unreviewed_solution_cannot_promote_methods(tmp_path):
     service = MathHarnessService(tmp_path, extractor=MethodExtractor())
     workspace = service.create_workspace(WorkspaceCreate(name="知识隔离"))
@@ -234,6 +290,98 @@ def test_reviewed_verified_solution_can_promote_methods(
     assert all(method.status.value == "promoted" for method in result.learned_methods)
 
 
+def test_unreviewed_example_cannot_mutate_an_existing_promoted_method(tmp_path):
+    trusted = _method_draft("可信方法", "trusted")
+    poisoned = _method_draft("污染方法", "poisoned")
+    service = MathHarnessService(
+        tmp_path,
+        extractor=SequencedExtractor([trusted, poisoned]),
+    )
+    workspace = service.create_workspace(WorkspaceCreate(name="晋级边界"))
+
+    first = service.ingest_example(
+        workspace.id,
+        _exact_example("sqrt(x**2 + x) - x", reviewed=True),
+    )
+    before = first.learned_methods[0]
+    second = service.ingest_example(
+        workspace.id,
+        _exact_example("sin(x)**2 + cos(x)**2", reviewed=False),
+    )
+    after = second.learned_methods[0]
+
+    assert after == before
+    assert "poisoned" not in after.tags
+    assert second.example.id not in after.example_ids
+    assert any(
+        event.event_type == "untrusted_method_update_ignored"
+        for event in service.list_learning_events(workspace.id)
+    )
+
+
+def test_first_trusted_example_replaces_pending_content_and_signature(tmp_path):
+    poisoned = _method_draft("不可信旧方法", "poisoned")
+    trusted = _method_draft("可信新方法", "trusted")
+    service = MathHarnessService(
+        tmp_path,
+        extractor=SequencedExtractor([poisoned, trusted]),
+    )
+    workspace = service.create_workspace(WorkspaceCreate(name="可信首样本"))
+
+    pending = service.ingest_example(
+        workspace.id,
+        _exact_example("sin(x)**2 + cos(x)**2", reviewed=False),
+    )
+    promoted = service.ingest_example(
+        workspace.id,
+        _exact_example("sqrt(x**2 + x) - x", reviewed=True),
+    )
+    method = promoted.learned_methods[0]
+
+    assert pending.learned_methods[0].status.value == "pending_review"
+    assert method.status.value == "promoted"
+    assert method.name == trusted.name
+    assert method.goal == trusted.goal
+    assert method.procedure == trusted.procedure
+    assert method.tags == trusted.tags
+    assert method.example_ids == [promoted.example.id]
+    assert method.success_count == 1
+    signature = MethodSignature.model_validate(method.signature)
+    assert signature.sample_count == 1
+    assert signature.modes == {"exact_equivalence": 1}
+
+
+def test_ingestion_does_not_revive_a_deprecated_method(tmp_path):
+    original = _method_draft("已废弃方法", "original")
+    incoming = _method_draft("试图复活", "revive")
+    service = MathHarnessService(
+        tmp_path,
+        extractor=SequencedExtractor([original, incoming]),
+    )
+    workspace = service.create_workspace(WorkspaceCreate(name="废弃边界"))
+    created = service.ingest_example(
+        workspace.id,
+        _exact_example("sqrt(x**2 + x) - x", reviewed=True),
+    ).learned_methods[0]
+    before = service.update_method_status(
+        workspace.id,
+        created.id,
+        MethodStatusUpdate(status=KnowledgeStatus.DEPRECATED),
+    )
+
+    after = service.ingest_example(
+        workspace.id,
+        _exact_example("sqrt(x**2 + 3*x) - x", reviewed=True),
+    ).learned_methods[0]
+
+    assert after == before
+    assert "revive" not in after.tags
+    assert any(
+        event.event_type == "inactive_method_update_ignored"
+        for event in service.list_learning_events(workspace.id)
+    )
+
+
 def test_exact_equivalence_rejects_domain_holes():
     report = SolutionVerifier().verify(
         MathPayload(
@@ -247,6 +395,53 @@ def test_exact_equivalence_rejects_domain_holes():
 
     assert report.status is VerificationStatus.REJECTED
     assert report.computed["expression_domain"] != report.computed["expected_domain"]
+
+
+def test_exact_equivalence_checks_parameter_domain_holes():
+    report = SolutionVerifier().verify(
+        MathPayload(
+            expression="a/a",
+            expected="1",
+            variable="x",
+            parameters=["a"],
+            mode=VerificationMode.EXACT_EQUIVALENCE,
+        )
+    )
+
+    assert report.status is VerificationStatus.REJECTED
+    assert (
+        report.computed["expression_domain:a"] != report.computed["expected_domain:a"]
+    )
+
+
+def test_exact_equivalence_honors_nonzero_parameter_assumption():
+    report = SolutionVerifier().verify(
+        MathPayload(
+            expression="a/a",
+            expected="1",
+            variable="x",
+            parameters=["a"],
+            assumptions={"a": [SymbolProperty.NONZERO]},
+            mode=VerificationMode.EXACT_EQUIVALENCE,
+        )
+    )
+
+    assert report.status is VerificationStatus.VERIFIED
+
+
+def test_offline_exact_solver_preserves_parameter_domain_conditions():
+    target = SolveMathTarget(
+        expression="a/a",
+        variable="x",
+        parameters=["a"],
+        mode=VerificationMode.EXACT_EQUIVALENCE,
+    )
+
+    result = OfflineSympySolutionGenerator().generate("化简 a/a", [], target, 256)
+
+    assert result.candidate is not None
+    assert result.candidate.answer_kind is AnswerKind.CONDITIONAL
+    assert result.candidate.answer_expression is None
 
 
 def test_zero_is_not_a_valid_asymptotic_equivalent():

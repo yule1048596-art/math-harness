@@ -10,7 +10,7 @@ from pathlib import Path
 
 from math_harness.dedup import MergeCandidate, card_to_draft
 from math_harness.errors import RecordNotFound, WorkspaceNotFound
-from math_harness.merging import merge_method_content
+from math_harness.merging import merge_method_content, sanitize_method_draft
 from math_harness.models import (
     EvaluationRun,
     KnowledgeStatus,
@@ -394,24 +394,34 @@ class WorkspaceStore:
         verified: bool,
         features: StructuralFeatures | None = None,
     ) -> MethodCard:
+        """Create or evolve a method without letting unreviewed data cross trust levels.
+
+        ``verified`` means the caller approved promotion (machine verification plus
+        human review), not merely that SymPy accepted the example. Pending cards may
+        collect pending evidence, but promoted or manually retired cards are immutable
+        to untrusted ingestion.
+        """
+
         now = utc_now()
+        draft = sanitize_method_draft(draft)
+        ignored = False
         with self.connection() as connection:
             existing = connection.execute(
                 "SELECT * FROM methods WHERE workspace_id = ? AND method_key = ?",
                 (self.workspace_id, draft.key),
             ).fetchone()
-            previous_signature = (
-                MethodSignature.model_validate_json(existing["signature_json"] or "{}")
-                if existing is not None
-                else MethodSignature()
-            )
-            signature = (
-                previous_signature.accumulate(features)
-                if features is not None
-                else previous_signature
-            )
             if existing is None:
                 method_id = str(uuid.uuid4())
+                signature = (
+                    MethodSignature().accumulate(features)
+                    if verified and features is not None
+                    else MethodSignature()
+                )
+                initial_status = (
+                    KnowledgeStatus.PROMOTED
+                    if verified
+                    else KnowledgeStatus.PENDING_REVIEW
+                )
                 connection.execute(
                     """
                     INSERT INTO methods (
@@ -431,7 +441,7 @@ class WorkspaceStore:
                         _dump(draft.procedure),
                         _dump(draft.failure_modes),
                         _dump(draft.tags),
-                        status.value,
+                        initial_status.value,
                         1,
                         1 if verified else 0,
                         0,
@@ -442,18 +452,47 @@ class WorkspaceStore:
                 )
                 event_type = "method_created"
                 event_extra: dict[str, object] = {}
+                event_status = initial_status
             else:
                 method_id = existing["id"]
-                next_status = (
-                    KnowledgeStatus.PROMOTED.value
-                    if verified or existing["status"] == KnowledgeStatus.PROMOTED.value
-                    else existing["status"]
-                )
                 current = self._row_to_method(existing, [])
-                merged = merge_method_content(current, draft)
-                if merged.changed:
-                    # 先把改写前的内容按当前版本号存档，再更新。原始理解不被覆盖，
-                    # 与「人工纠正以新记录保存」的审计风格一致。
+                current_status = KnowledgeStatus(existing["status"])
+                protected = {
+                    KnowledgeStatus.PROMOTED,
+                    KnowledgeStatus.REJECTED,
+                    KnowledgeStatus.DEPRECATED,
+                }
+                retired = {
+                    KnowledgeStatus.REJECTED,
+                    KnowledgeStatus.DEPRECATED,
+                }
+
+                if (not verified and current_status in protected) or (
+                    verified and current_status in retired
+                ):
+                    ignored = True
+                    event_type = (
+                        "untrusted_method_update_ignored"
+                        if not verified
+                        else "inactive_method_update_ignored"
+                    )
+                    self._record_event(
+                        connection,
+                        event_type,
+                        method_id,
+                        {
+                            "example_id": example_id,
+                            "existing_status": current_status.value,
+                            "requested_status": status.value,
+                        },
+                    )
+                elif verified and current_status in {
+                    KnowledgeStatus.PENDING_REVIEW,
+                    KnowledgeStatus.CAPTURED,
+                }:
+                    # The pending content may be entirely model-derived. The first
+                    # trusted sample establishes the canonical card instead of
+                    # inheriting that untrusted first draft.
                     connection.execute(
                         """
                         INSERT OR IGNORE INTO method_versions (
@@ -480,6 +519,11 @@ class WorkspaceStore:
                             now.isoformat(),
                         ),
                     )
+                    signature = (
+                        MethodSignature().accumulate(features)
+                        if features is not None
+                        else MethodSignature()
+                    )
                     connection.execute(
                         """
                         UPDATE methods
@@ -491,57 +535,136 @@ class WorkspaceStore:
                         WHERE id = ? AND workspace_id = ?
                         """,
                         (
-                            next_status,
-                            1 if verified else 0,
-                            merged.name,
-                            merged.goal,
-                            _dump(merged.applicable_when),
-                            _dump(merged.procedure),
-                            _dump(merged.failure_modes),
-                            _dump(merged.tags),
+                            KnowledgeStatus.PROMOTED.value,
+                            1,
+                            draft.name,
+                            draft.goal,
+                            _dump(draft.applicable_when),
+                            _dump(draft.procedure),
+                            _dump(draft.failure_modes),
+                            _dump(draft.tags),
                             signature.model_dump_json(),
                             now.isoformat(),
                             method_id,
                             self.workspace_id,
                         ),
                     )
-                    event_type = "method_content_evolved"
-                    event_extra = {"added": merged.added}
-                else:
                     connection.execute(
-                        """
-                        UPDATE methods
-                        SET status = ?, version = version + 1,
-                            success_count = success_count + ?,
-                            signature_json = ?, updated_at = ?
-                        WHERE id = ? AND workspace_id = ?
-                        """,
-                        (
-                            next_status,
-                            1 if verified else 0,
-                            signature.model_dump_json(),
-                            now.isoformat(),
-                            method_id,
-                            self.workspace_id,
-                        ),
+                        "DELETE FROM method_examples WHERE workspace_id = ? AND method_id = ?",
+                        (self.workspace_id, method_id),
                     )
-                    event_type = "method_updated"
-                    event_extra = {}
+                    event_type = "pending_method_promoted"
+                    event_extra = {"replaced_pending_content": True}
+                    event_status = KnowledgeStatus.PROMOTED
+                else:
+                    previous_signature = MethodSignature.model_validate_json(
+                        existing["signature_json"] or "{}"
+                    )
+                    signature = (
+                        previous_signature.accumulate(features)
+                        if verified and features is not None
+                        else previous_signature
+                    )
+                    next_status = (
+                        KnowledgeStatus.PROMOTED if verified else current_status
+                    )
+                    merged = merge_method_content(current, draft)
+                    if merged.changed:
+                        # Snapshot the content before a trusted or pending rewrite.
+                        connection.execute(
+                            """
+                            INSERT OR IGNORE INTO method_versions (
+                                id, workspace_id, method_id, version, content_json,
+                                source_example_id, created_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                str(uuid.uuid4()),
+                                self.workspace_id,
+                                method_id,
+                                existing["version"],
+                                _dump(
+                                    {
+                                        "name": current.name,
+                                        "goal": current.goal,
+                                        "applicable_when": current.applicable_when,
+                                        "procedure": current.procedure,
+                                        "failure_modes": current.failure_modes,
+                                        "tags": current.tags,
+                                    }
+                                ),
+                                example_id,
+                                now.isoformat(),
+                            ),
+                        )
+                        connection.execute(
+                            """
+                            UPDATE methods
+                            SET status = ?, version = version + 1,
+                                success_count = success_count + ?,
+                                name = ?, goal = ?, applicable_json = ?,
+                                procedure_json = ?, failure_modes_json = ?, tags_json = ?,
+                                signature_json = ?, updated_at = ?
+                            WHERE id = ? AND workspace_id = ?
+                            """,
+                            (
+                                next_status.value,
+                                1 if verified else 0,
+                                merged.name,
+                                merged.goal,
+                                _dump(merged.applicable_when),
+                                _dump(merged.procedure),
+                                _dump(merged.failure_modes),
+                                _dump(merged.tags),
+                                signature.model_dump_json(),
+                                now.isoformat(),
+                                method_id,
+                                self.workspace_id,
+                            ),
+                        )
+                        event_type = "method_content_evolved"
+                        event_extra = {"added": merged.added}
+                    else:
+                        connection.execute(
+                            """
+                            UPDATE methods
+                            SET status = ?, version = version + 1,
+                                success_count = success_count + ?,
+                                signature_json = ?, updated_at = ?
+                            WHERE id = ? AND workspace_id = ?
+                            """,
+                            (
+                                next_status.value,
+                                1 if verified else 0,
+                                signature.model_dump_json(),
+                                now.isoformat(),
+                                method_id,
+                                self.workspace_id,
+                            ),
+                        )
+                        event_type = "method_updated"
+                        event_extra = {}
+                    event_status = next_status
 
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO method_examples
-                    (workspace_id, method_id, example_id)
-                VALUES (?, ?, ?)
-                """,
-                (self.workspace_id, method_id, example_id),
-            )
-            self._record_event(
-                connection,
-                event_type,
-                method_id,
-                {"example_id": example_id, "status": status.value, **event_extra},
-            )
+            if not ignored:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO method_examples
+                        (workspace_id, method_id, example_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    (self.workspace_id, method_id, example_id),
+                )
+                self._record_event(
+                    connection,
+                    event_type,
+                    method_id,
+                    {
+                        "example_id": example_id,
+                        "status": event_status.value,
+                        **event_extra,
+                    },
+                )
 
         return self.get_method(method_id)
 
@@ -625,37 +748,123 @@ class WorkspaceStore:
     def record_merge_proposals(
         self, candidates: list[MergeCandidate]
     ) -> list[MethodMergeProposal]:
-        """写入疑似重复对。已存在的同一对保持原状，不覆盖人工已处理的结论。"""
+        """Write unordered duplicate pairs while preserving human resolutions.
+
+        A successful merge makes neighbouring graph edges stale. A later scan may
+        reactivate a still-valid stale edge with its current orientation and score;
+        applied and rejected decisions remain immutable.
+        """
 
         now = utc_now()
         with self.connection() as connection:
             for candidate in candidates:
-                connection.execute(
+                detail = _dump(
+                    {
+                        "primary_key": candidate.primary_key,
+                        "duplicate_key": candidate.duplicate_key,
+                        "signature_similarity": candidate.signature_similarity,
+                        "text_similarity": candidate.text_similarity,
+                        "reasons": candidate.reasons,
+                    }
+                )
+                existing_rows = connection.execute(
                     """
-                    INSERT OR IGNORE INTO method_merge_proposals (
-                        id, workspace_id, primary_method_id, duplicate_method_id,
-                        score, detail_json, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    SELECT id, status, primary_method_id, duplicate_method_id
+                    FROM method_merge_proposals
+                    WHERE workspace_id = ? AND (
+                        (primary_method_id = ? AND duplicate_method_id = ?)
+                        OR (primary_method_id = ? AND duplicate_method_id = ?)
+                    )
+                    ORDER BY created_at, id
                     """,
                     (
-                        str(uuid.uuid4()),
                         self.workspace_id,
                         candidate.primary_id,
                         candidate.duplicate_id,
-                        candidate.score,
-                        _dump(
-                            {
-                                "primary_key": candidate.primary_key,
-                                "duplicate_key": candidate.duplicate_key,
-                                "signature_similarity": candidate.signature_similarity,
-                                "text_similarity": candidate.text_similarity,
-                                "reasons": candidate.reasons,
-                            }
-                        ),
-                        MergeProposalStatus.PENDING.value,
-                        now.isoformat(),
+                        candidate.duplicate_id,
+                        candidate.primary_id,
                     ),
-                )
+                ).fetchall()
+                if any(
+                    row["status"]
+                    in {
+                        MergeProposalStatus.APPLIED.value,
+                        MergeProposalStatus.REJECTED.value,
+                    }
+                    for row in existing_rows
+                ):
+                    # A human decision applies to the unordered pair even if an
+                    # older release once stored the reverse orientation separately.
+                    continue
+                if not existing_rows:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO method_merge_proposals (
+                            id, workspace_id, primary_method_id, duplicate_method_id,
+                            score, detail_json, status, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            str(uuid.uuid4()),
+                            self.workspace_id,
+                            candidate.primary_id,
+                            candidate.duplicate_id,
+                            candidate.score,
+                            detail,
+                            MergeProposalStatus.PENDING.value,
+                            now.isoformat(),
+                        ),
+                    )
+                else:
+                    existing = next(
+                        (
+                            row
+                            for row in existing_rows
+                            if row["primary_method_id"] == candidate.primary_id
+                            and row["duplicate_method_id"] == candidate.duplicate_id
+                        ),
+                        existing_rows[0],
+                    )
+                    connection.execute(
+                        """
+                        UPDATE method_merge_proposals
+                        SET status = ?, resolved_at = ?
+                        WHERE workspace_id = ? AND id <> ? AND status IN (?, ?)
+                          AND (
+                            (primary_method_id = ? AND duplicate_method_id = ?)
+                            OR (primary_method_id = ? AND duplicate_method_id = ?)
+                          )
+                        """,
+                        (
+                            MergeProposalStatus.STALE.value,
+                            now.isoformat(),
+                            self.workspace_id,
+                            existing["id"],
+                            MergeProposalStatus.PENDING.value,
+                            MergeProposalStatus.STALE.value,
+                            candidate.primary_id,
+                            candidate.duplicate_id,
+                            candidate.duplicate_id,
+                            candidate.primary_id,
+                        ),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE method_merge_proposals
+                        SET primary_method_id = ?, duplicate_method_id = ?,
+                            score = ?, detail_json = ?, status = ?, resolved_at = NULL
+                        WHERE id = ? AND workspace_id = ?
+                        """,
+                        (
+                            candidate.primary_id,
+                            candidate.duplicate_id,
+                            candidate.score,
+                            detail,
+                            MergeProposalStatus.PENDING.value,
+                            existing["id"],
+                            self.workspace_id,
+                        ),
+                    )
         return self.list_merge_proposals()
 
     def list_merge_proposals(
@@ -710,122 +919,230 @@ class WorkspaceStore:
         `ON DELETE RESTRICT`，被尝试记录引用过的方法卡本来就删不掉。
         """
 
-        proposal = self.get_merge_proposal(proposal_id)
-        if proposal.status is not MergeProposalStatus.PENDING:
-            raise ValueError(
-                f"merge proposal already resolved: {proposal.status.value}"
-            )
-
-        primary = self.get_method(proposal.primary_method_id)
-        duplicate = self.get_method(proposal.duplicate_method_id)
-        merged = merge_method_content(primary, card_to_draft(duplicate))
-        signature = MethodSignature.model_validate(
-            primary.signature or {}
-        ).combined_with(MethodSignature.model_validate(duplicate.signature or {}))
         now = utc_now()
+        stale_error: str | None = None
+        primary_id: str | None = None
 
         with self.connection() as connection:
-            connection.execute(
+            # Serialize proposal resolution and re-read every decision input inside
+            # the lock. This prevents two overlapping graph edges from both applying.
+            connection.execute("BEGIN IMMEDIATE")
+            proposal_row = connection.execute(
                 """
-                INSERT OR IGNORE INTO method_versions (
-                    id, workspace_id, method_id, version, content_json,
-                    source_example_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                SELECT * FROM method_merge_proposals
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (proposal_id, self.workspace_id),
+            ).fetchone()
+            if proposal_row is None:
+                raise RecordNotFound(f"merge proposal not found: {proposal_id}")
+            proposal = self._row_to_proposal(proposal_row)
+            if proposal.status is not MergeProposalStatus.PENDING:
+                raise ValueError(
+                    f"merge proposal already resolved: {proposal.status.value}"
+                )
+
+            method_rows = connection.execute(
+                """
+                SELECT * FROM methods
+                WHERE workspace_id = ? AND id IN (?, ?)
                 """,
                 (
-                    str(uuid.uuid4()),
                     self.workspace_id,
-                    primary.id,
-                    primary.version,
-                    _dump(
-                        {
-                            "name": primary.name,
-                            "goal": primary.goal,
-                            "applicable_when": primary.applicable_when,
-                            "procedure": primary.procedure,
-                            "failure_modes": primary.failure_modes,
-                            "tags": primary.tags,
-                        }
+                    proposal.primary_method_id,
+                    proposal.duplicate_method_id,
+                ),
+            ).fetchall()
+            methods_by_id = {
+                row["id"]: self._row_to_method(row, []) for row in method_rows
+            }
+            if len(methods_by_id) != 2:
+                raise RecordNotFound("one or more merge methods no longer exist")
+            primary = methods_by_id[proposal.primary_method_id]
+            duplicate = methods_by_id[proposal.duplicate_method_id]
+
+            inactive = {KnowledgeStatus.REJECTED, KnowledgeStatus.DEPRECATED}
+            if primary.status in inactive or duplicate.status in inactive:
+                connection.execute(
+                    """
+                    UPDATE method_merge_proposals
+                    SET status = ?, resolved_at = ?
+                    WHERE id = ? AND workspace_id = ? AND status = ?
+                    """,
+                    (
+                        MergeProposalStatus.STALE.value,
+                        now.isoformat(),
+                        proposal_id,
+                        self.workspace_id,
+                        MergeProposalStatus.PENDING.value,
                     ),
-                    None,
-                    now.isoformat(),
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE methods
-                SET name = ?, goal = ?, applicable_json = ?, procedure_json = ?,
-                    failure_modes_json = ?, tags_json = ?, signature_json = ?,
-                    success_count = success_count + ?, failure_count = failure_count + ?,
-                    version = version + 1, updated_at = ?
-                WHERE id = ? AND workspace_id = ?
-                """,
-                (
-                    merged.name,
-                    merged.goal,
-                    _dump(merged.applicable_when),
-                    _dump(merged.procedure),
-                    _dump(merged.failure_modes),
-                    _dump(merged.tags),
-                    signature.model_dump_json(),
-                    duplicate.success_count,
-                    duplicate.failure_count,
-                    now.isoformat(),
+                )
+                connection.execute(
+                    """
+                    UPDATE method_merge_proposals
+                    SET status = ?, resolved_at = ?
+                    WHERE workspace_id = ? AND status = ?
+                      AND (
+                        primary_method_id IN (?, ?)
+                        OR duplicate_method_id IN (?, ?)
+                      )
+                    """,
+                    (
+                        MergeProposalStatus.STALE.value,
+                        now.isoformat(),
+                        self.workspace_id,
+                        MergeProposalStatus.PENDING.value,
+                        primary.id,
+                        duplicate.id,
+                        primary.id,
+                        duplicate.id,
+                    ),
+                )
+                stale_error = "merge proposal became stale because a method is inactive"
+            else:
+                if (
+                    primary.status is not KnowledgeStatus.PROMOTED
+                    and duplicate.status is KnowledgeStatus.PROMOTED
+                ):
+                    # Protect existing v0.5.0 proposals whose stored orientation
+                    # predates the promoted-first ordering rule.
+                    primary, duplicate = duplicate, primary
+                merged = merge_method_content(primary, card_to_draft(duplicate))
+                signature = MethodSignature.model_validate(
+                    primary.signature or {}
+                ).combined_with(
+                    MethodSignature.model_validate(duplicate.signature or {})
+                )
+                primary_id = primary.id
+
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO method_versions (
+                        id, workspace_id, method_id, version, content_json,
+                        source_example_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        self.workspace_id,
+                        primary.id,
+                        primary.version,
+                        _dump(
+                            {
+                                "name": primary.name,
+                                "goal": primary.goal,
+                                "applicable_when": primary.applicable_when,
+                                "procedure": primary.procedure,
+                                "failure_modes": primary.failure_modes,
+                                "tags": primary.tags,
+                            }
+                        ),
+                        None,
+                        now.isoformat(),
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE methods
+                    SET name = ?, goal = ?, applicable_json = ?, procedure_json = ?,
+                        failure_modes_json = ?, tags_json = ?, signature_json = ?,
+                        success_count = success_count + ?,
+                        failure_count = failure_count + ?,
+                        version = version + 1, updated_at = ?
+                    WHERE id = ? AND workspace_id = ?
+                    """,
+                    (
+                        merged.name,
+                        merged.goal,
+                        _dump(merged.applicable_when),
+                        _dump(merged.procedure),
+                        _dump(merged.failure_modes),
+                        _dump(merged.tags),
+                        signature.model_dump_json(),
+                        duplicate.success_count,
+                        duplicate.failure_count,
+                        now.isoformat(),
+                        primary.id,
+                        self.workspace_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO method_examples
+                        (workspace_id, method_id, example_id)
+                    SELECT workspace_id, ?, example_id FROM method_examples
+                    WHERE workspace_id = ? AND method_id = ?
+                    """,
+                    (primary.id, self.workspace_id, duplicate.id),
+                )
+                connection.execute(
+                    "DELETE FROM method_examples WHERE workspace_id = ? AND method_id = ?",
+                    (self.workspace_id, duplicate.id),
+                )
+                connection.execute(
+                    """
+                    UPDATE methods
+                    SET status = ?, version = version + 1, updated_at = ?
+                    WHERE id = ? AND workspace_id = ?
+                    """,
+                    (
+                        KnowledgeStatus.DEPRECATED.value,
+                        now.isoformat(),
+                        duplicate.id,
+                        self.workspace_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE method_merge_proposals
+                    SET status = ?, resolved_at = ?
+                    WHERE id = ? AND workspace_id = ?
+                    """,
+                    (
+                        MergeProposalStatus.APPLIED.value,
+                        now.isoformat(),
+                        proposal_id,
+                        self.workspace_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE method_merge_proposals
+                    SET status = ?, resolved_at = ?
+                    WHERE workspace_id = ? AND id <> ? AND status = ?
+                      AND (
+                        primary_method_id IN (?, ?)
+                        OR duplicate_method_id IN (?, ?)
+                      )
+                    """,
+                    (
+                        MergeProposalStatus.STALE.value,
+                        now.isoformat(),
+                        self.workspace_id,
+                        proposal_id,
+                        MergeProposalStatus.PENDING.value,
+                        primary.id,
+                        duplicate.id,
+                        primary.id,
+                        duplicate.id,
+                    ),
+                )
+                self._record_event(
+                    connection,
+                    "methods_merged",
                     primary.id,
-                    self.workspace_id,
-                ),
-            )
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO method_examples
-                    (workspace_id, method_id, example_id)
-                SELECT workspace_id, ?, example_id FROM method_examples
-                WHERE workspace_id = ? AND method_id = ?
-                """,
-                (primary.id, self.workspace_id, duplicate.id),
-            )
-            connection.execute(
-                "DELETE FROM method_examples WHERE workspace_id = ? AND method_id = ?",
-                (self.workspace_id, duplicate.id),
-            )
-            connection.execute(
-                """
-                UPDATE methods
-                SET status = ?, version = version + 1, updated_at = ?
-                WHERE id = ? AND workspace_id = ?
-                """,
-                (
-                    KnowledgeStatus.DEPRECATED.value,
-                    now.isoformat(),
-                    duplicate.id,
-                    self.workspace_id,
-                ),
-            )
-            connection.execute(
-                """
-                UPDATE method_merge_proposals
-                SET status = ?, resolved_at = ?
-                WHERE id = ? AND workspace_id = ?
-                """,
-                (
-                    MergeProposalStatus.APPLIED.value,
-                    now.isoformat(),
-                    proposal_id,
-                    self.workspace_id,
-                ),
-            )
-            self._record_event(
-                connection,
-                "methods_merged",
-                primary.id,
-                {
-                    "primary_key": primary.key,
-                    "duplicate_key": duplicate.key,
-                    "duplicate_method_id": duplicate.id,
-                    "score": proposal.score,
-                },
-            )
-        return self.get_method(primary.id)
+                    {
+                        "primary_key": primary.key,
+                        "duplicate_key": duplicate.key,
+                        "duplicate_method_id": duplicate.id,
+                        "score": proposal.score,
+                    },
+                )
+        if stale_error is not None:
+            raise ValueError(stale_error)
+        if primary_id is None:  # pragma: no cover - guarded by the branches above
+            raise RuntimeError("merge completed without a primary method")
+        return self.get_method(primary_id)
 
     @staticmethod
     def _row_to_proposal(row: sqlite3.Row) -> MethodMergeProposal:
