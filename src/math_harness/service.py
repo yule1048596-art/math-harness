@@ -6,6 +6,7 @@ from pathlib import Path
 
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
+from math_harness.dedup import find_merge_candidates
 from math_harness.extraction import (
     MethodExtractorProtocol,
     build_method_extractor_from_env,
@@ -26,10 +27,12 @@ from math_harness.models import (
     KnowledgeStatus,
     LearningEvent,
     MathPayload,
+    MergeProposalStatus,
     MethodCard,
     MethodExtractionResult,
     MethodExtractionTrace,
     MethodMatch,
+    MethodMergeProposal,
     MethodStatusUpdate,
     MethodVersion,
     ProblemExample,
@@ -203,6 +206,35 @@ class MathHarnessService:
         self, workspace_id: str, method_id: str
     ) -> list[MethodVersion]:
         return self.workspaces.store(workspace_id).list_method_versions(method_id)
+
+    def scan_merge_proposals(
+        self, workspace_id: str, threshold: float | None = None
+    ) -> list[MethodMergeProposal]:
+        """扫描疑似重复的方法卡。只写提案，不动数据——合并需人工确认。
+
+        显式触发而不是挂在摄取路径上：全量两两比较既慢又吵。
+        """
+
+        store = self.workspaces.store(workspace_id)
+        methods = store.list_methods(include_pending=True, include_deprecated=False)
+        return store.record_merge_proposals(
+            find_merge_candidates(methods, threshold=threshold)
+        )
+
+    def list_merge_proposals(
+        self, workspace_id: str, status: MergeProposalStatus | None = None
+    ) -> list[MethodMergeProposal]:
+        return self.workspaces.store(workspace_id).list_merge_proposals(status)
+
+    def apply_merge_proposal(self, workspace_id: str, proposal_id: str) -> MethodCard:
+        return self.workspaces.store(workspace_id).apply_merge_proposal(proposal_id)
+
+    def reject_merge_proposal(
+        self, workspace_id: str, proposal_id: str
+    ) -> MethodMergeProposal:
+        return self.workspaces.store(workspace_id).resolve_merge_proposal(
+            proposal_id, MergeProposalStatus.REJECTED
+        )
 
     def update_method_status(
         self,

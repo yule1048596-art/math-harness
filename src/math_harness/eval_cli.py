@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -47,7 +48,7 @@ def _delta(before: EvaluationMetrics, after: EvaluationMetrics) -> dict[str, flo
 
 def run_growth_evaluation(
     data_root: Path,
-    train_path: Path,
+    train_paths: Sequence[Path],
     holdout_path: Path,
     top_k: int,
     solve_holdout_path: Path | None = None,
@@ -61,7 +62,9 @@ def run_growth_evaluation(
         )
     )
     cases = _load_jsonl(holdout_path, EvaluationCase)
-    training_examples = _load_jsonl(train_path, ExampleCreate)
+    training_examples = [
+        example for path in train_paths for example in _load_jsonl(path, ExampleCreate)
+    ]
     solve_cases = (
         _load_jsonl(solve_holdout_path, SolveEvaluationCase)
         if solve_holdout_path is not None
@@ -131,7 +134,7 @@ def run_growth_evaluation(
     return {
         "workspace": workspace.model_dump(mode="json"),
         "dataset": {
-            "train_path": str(train_path.resolve()),
+            "train_paths": [str(path.resolve()) for path in train_paths],
             "holdout_path": str(holdout_path.resolve()),
             "training_examples": len(training_examples),
             "holdout_cases": len(cases),
@@ -179,7 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--train",
         type=Path,
-        default=Path("data/pilot/asymptotic_train.jsonl"),
+        action="append",
+        dest="train",
+        help="训练语料，可重复传入以合并多份（人工语料 + 生成语料）。",
     )
     parser.add_argument(
         "--holdout",
@@ -205,7 +210,11 @@ def main() -> None:
     args = build_parser().parse_args()
     report = run_growth_evaluation(
         data_root=args.data_root,
-        train_path=args.train,
+        train_paths=args.train
+        or [
+            Path("data/pilot/asymptotic_train.jsonl"),
+            Path("data/pilot/asymptotic_train_generated.jsonl"),
+        ],
         holdout_path=args.holdout,
         top_k=args.top_k,
         solve_holdout_path=args.solve_holdout,

@@ -7,13 +7,14 @@ from math_harness.models import MethodCard, MethodMatch
 from math_harness.structure import (
     MethodSignature,
     StructuralFeatures,
+    path_idf,
     signature_score,
 )
 
 _TOKEN_PATTERN = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]*|[\u4e00-\u9fff]")
 
 
-def _tokens(text: str) -> set[str]:
+def tokens(text: str) -> set[str]:
     normalized = text.lower()
     atomic = set(_TOKEN_PATTERN.findall(normalized))
     chinese = "".join(char for char in normalized if "\u4e00" <= char <= "\u9fff")
@@ -21,7 +22,7 @@ def _tokens(text: str) -> set[str]:
     return atomic | bigrams
 
 
-def _jaccard(left: set[str], right: set[str]) -> float:
+def jaccard(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
     return len(left & right) / len(left | right)
@@ -36,12 +37,19 @@ class MethodRetriever:
         top_k: int = 5,
         features: StructuralFeatures | None = None,
     ) -> list[MethodMatch]:
-        query_tokens = _tokens(query)
+        query_tokens = tokens(query)
         query_tags = {tag.lower() for tag in (tags or [])}
         query_tags.update(infer_query_tags(query))
         # 没有结构信息时完全走原有词面打分，行为与 v0.3.x 一致。
         use_structure = features is not None and not features.is_empty
         matches: list[MethodMatch] = []
+
+        signatures = {
+            method.id: MethodSignature.model_validate(method.signature or {})
+            for method in methods
+        }
+        # 路径 IDF 只对本次候选集有意义，现算一次给所有方法共用。
+        idf = path_idf(list(signatures.values())) if use_structure else {}
 
         for method in methods:
             method_text = "\n".join(
@@ -53,16 +61,13 @@ class MethodRetriever:
                     *method.failure_modes,
                 ]
             )
-            text_score = _jaccard(query_tokens, _tokens(method_text))
+            text_score = jaccard(query_tokens, tokens(method_text))
             method_tags = {tag.lower() for tag in method.tags}
             shared_tags = query_tags & method_tags
             tag_score = len(shared_tags) / max(1, len(query_tags))
             history_score = min(method.success_count / 10, 1.0)
             structure_score = (
-                signature_score(
-                    MethodSignature.model_validate(method.signature or {}),
-                    features,
-                )
+                signature_score(signatures[method.id], features, idf)
                 if use_structure
                 else 0.0
             )

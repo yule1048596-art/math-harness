@@ -298,6 +298,34 @@ class MethodVersion(BaseModel):
     created_at: datetime
 
 
+class MergeProposalStatus(StrEnum):
+    PENDING = "pending"
+    APPLIED = "applied"
+    REJECTED = "rejected"
+
+
+class MethodMergeProposal(BaseModel):
+    """疑似重复的一对方法卡。默认只提议，合并需人工确认。"""
+
+    id: str
+    workspace_id: str
+    primary_method_id: str
+    primary_key: str
+    duplicate_method_id: str
+    duplicate_key: str
+    score: float = Field(ge=0, le=1)
+    signature_similarity: float = Field(ge=0, le=1)
+    text_similarity: float = Field(ge=0, le=1)
+    reasons: list[str] = Field(default_factory=list)
+    status: MergeProposalStatus
+    created_at: datetime
+    resolved_at: datetime | None = None
+
+
+class MergeScanRequest(BaseModel):
+    threshold: float | None = Field(default=None, ge=0, le=1)
+
+
 class MethodDraft(BaseModel):
     key: str
     name: str

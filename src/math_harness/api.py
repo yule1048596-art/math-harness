@@ -14,8 +14,11 @@ from math_harness.models import (
     HealthResponse,
     IngestionResult,
     LearningEvent,
+    MergeProposalStatus,
+    MergeScanRequest,
     MethodCard,
     MethodMatch,
+    MethodMergeProposal,
     MethodSearchRequest,
     MethodStatusUpdate,
     MethodVersion,
@@ -109,6 +112,44 @@ def create_app(data_root: Path | str | None = None) -> FastAPI:
     )
     def list_method_versions(workspace_id: str, method_id: str) -> list[MethodVersion]:
         return service.list_method_versions(workspace_id, method_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/methods/merge-proposals",
+        response_model=list[MethodMergeProposal],
+        status_code=201,
+    )
+    def scan_merge_proposals(
+        workspace_id: str, request: MergeScanRequest | None = None
+    ) -> list[MethodMergeProposal]:
+        return service.scan_merge_proposals(
+            workspace_id, threshold=request.threshold if request else None
+        )
+
+    @app.get(
+        "/workspaces/{workspace_id}/methods/merge-proposals",
+        response_model=list[MethodMergeProposal],
+    )
+    def list_merge_proposals(
+        workspace_id: str,
+        status: MergeProposalStatus | None = None,
+    ) -> list[MethodMergeProposal]:
+        return service.list_merge_proposals(workspace_id, status)
+
+    @app.post(
+        "/workspaces/{workspace_id}/methods/merge-proposals/{proposal_id}/apply",
+        response_model=MethodCard,
+    )
+    def apply_merge_proposal(workspace_id: str, proposal_id: str) -> MethodCard:
+        return service.apply_merge_proposal(workspace_id, proposal_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/methods/merge-proposals/{proposal_id}/reject",
+        response_model=MethodMergeProposal,
+    )
+    def reject_merge_proposal(
+        workspace_id: str, proposal_id: str
+    ) -> MethodMergeProposal:
+        return service.reject_merge_proposal(workspace_id, proposal_id)
 
     @app.patch(
         "/workspaces/{workspace_id}/methods/{method_id}",

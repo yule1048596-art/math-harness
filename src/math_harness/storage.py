@@ -8,14 +8,17 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from math_harness.dedup import MergeCandidate, card_to_draft
 from math_harness.errors import RecordNotFound, WorkspaceNotFound
 from math_harness.merging import merge_method_content
 from math_harness.models import (
     EvaluationRun,
     KnowledgeStatus,
     LearningEvent,
+    MergeProposalStatus,
     MethodCard,
     MethodDraft,
+    MethodMergeProposal,
     MethodVersion,
     ProblemExample,
     SolutionAttempt,
@@ -206,6 +209,24 @@ class WorkspaceStore:
 
                 CREATE INDEX IF NOT EXISTS idx_method_versions_method
                     ON method_versions(workspace_id, method_id, version);
+
+                CREATE TABLE IF NOT EXISTS method_merge_proposals (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    primary_method_id TEXT NOT NULL,
+                    duplicate_method_id TEXT NOT NULL,
+                    score REAL NOT NULL,
+                    detail_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    UNIQUE(workspace_id, primary_method_id, duplicate_method_id),
+                    FOREIGN KEY (primary_method_id)
+                        REFERENCES methods(id) ON DELETE CASCADE,
+                    FOREIGN KEY (duplicate_method_id)
+                        REFERENCES methods(id) ON DELETE CASCADE,
+                    CHECK (workspace_id <> '')
+                );
 
                 CREATE TABLE IF NOT EXISTS method_examples (
                     workspace_id TEXT NOT NULL,
@@ -600,6 +621,234 @@ class WorkspaceStore:
             )
             for row in rows
         ]
+
+    def record_merge_proposals(
+        self, candidates: list[MergeCandidate]
+    ) -> list[MethodMergeProposal]:
+        """写入疑似重复对。已存在的同一对保持原状，不覆盖人工已处理的结论。"""
+
+        now = utc_now()
+        with self.connection() as connection:
+            for candidate in candidates:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO method_merge_proposals (
+                        id, workspace_id, primary_method_id, duplicate_method_id,
+                        score, detail_json, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        self.workspace_id,
+                        candidate.primary_id,
+                        candidate.duplicate_id,
+                        candidate.score,
+                        _dump(
+                            {
+                                "primary_key": candidate.primary_key,
+                                "duplicate_key": candidate.duplicate_key,
+                                "signature_similarity": candidate.signature_similarity,
+                                "text_similarity": candidate.text_similarity,
+                                "reasons": candidate.reasons,
+                            }
+                        ),
+                        MergeProposalStatus.PENDING.value,
+                        now.isoformat(),
+                    ),
+                )
+        return self.list_merge_proposals()
+
+    def list_merge_proposals(
+        self, status: MergeProposalStatus | None = None
+    ) -> list[MethodMergeProposal]:
+        query = "SELECT * FROM method_merge_proposals WHERE workspace_id = ?"
+        parameters: list[object] = [self.workspace_id]
+        if status is not None:
+            query += " AND status = ?"
+            parameters.append(status.value)
+        query += " ORDER BY score DESC, created_at, id"
+        with self.connection() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return [self._row_to_proposal(row) for row in rows]
+
+    def get_merge_proposal(self, proposal_id: str) -> MethodMergeProposal:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM method_merge_proposals
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (proposal_id, self.workspace_id),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"merge proposal not found: {proposal_id}")
+        return self._row_to_proposal(row)
+
+    def resolve_merge_proposal(
+        self, proposal_id: str, status: MergeProposalStatus
+    ) -> MethodMergeProposal:
+        proposal = self.get_merge_proposal(proposal_id)
+        if proposal.status is not MergeProposalStatus.PENDING:
+            raise ValueError(
+                f"merge proposal already resolved: {proposal.status.value}"
+            )
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE method_merge_proposals
+                SET status = ?, resolved_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (status.value, utc_now().isoformat(), proposal_id, self.workspace_id),
+            )
+        return self.get_merge_proposal(proposal_id)
+
+    def apply_merge_proposal(self, proposal_id: str) -> MethodCard:
+        """把副卡并入主卡。副卡置为 deprecated 而非删除。
+
+        不删除既是审计要求，也是技术必需：`attempt_methods` 的外键是
+        `ON DELETE RESTRICT`，被尝试记录引用过的方法卡本来就删不掉。
+        """
+
+        proposal = self.get_merge_proposal(proposal_id)
+        if proposal.status is not MergeProposalStatus.PENDING:
+            raise ValueError(
+                f"merge proposal already resolved: {proposal.status.value}"
+            )
+
+        primary = self.get_method(proposal.primary_method_id)
+        duplicate = self.get_method(proposal.duplicate_method_id)
+        merged = merge_method_content(primary, card_to_draft(duplicate))
+        signature = MethodSignature.model_validate(
+            primary.signature or {}
+        ).combined_with(MethodSignature.model_validate(duplicate.signature or {}))
+        now = utc_now()
+
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO method_versions (
+                    id, workspace_id, method_id, version, content_json,
+                    source_example_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(uuid.uuid4()),
+                    self.workspace_id,
+                    primary.id,
+                    primary.version,
+                    _dump(
+                        {
+                            "name": primary.name,
+                            "goal": primary.goal,
+                            "applicable_when": primary.applicable_when,
+                            "procedure": primary.procedure,
+                            "failure_modes": primary.failure_modes,
+                            "tags": primary.tags,
+                        }
+                    ),
+                    None,
+                    now.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE methods
+                SET name = ?, goal = ?, applicable_json = ?, procedure_json = ?,
+                    failure_modes_json = ?, tags_json = ?, signature_json = ?,
+                    success_count = success_count + ?, failure_count = failure_count + ?,
+                    version = version + 1, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    merged.name,
+                    merged.goal,
+                    _dump(merged.applicable_when),
+                    _dump(merged.procedure),
+                    _dump(merged.failure_modes),
+                    _dump(merged.tags),
+                    signature.model_dump_json(),
+                    duplicate.success_count,
+                    duplicate.failure_count,
+                    now.isoformat(),
+                    primary.id,
+                    self.workspace_id,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO method_examples
+                    (workspace_id, method_id, example_id)
+                SELECT workspace_id, ?, example_id FROM method_examples
+                WHERE workspace_id = ? AND method_id = ?
+                """,
+                (primary.id, self.workspace_id, duplicate.id),
+            )
+            connection.execute(
+                "DELETE FROM method_examples WHERE workspace_id = ? AND method_id = ?",
+                (self.workspace_id, duplicate.id),
+            )
+            connection.execute(
+                """
+                UPDATE methods
+                SET status = ?, version = version + 1, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    KnowledgeStatus.DEPRECATED.value,
+                    now.isoformat(),
+                    duplicate.id,
+                    self.workspace_id,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE method_merge_proposals
+                SET status = ?, resolved_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    MergeProposalStatus.APPLIED.value,
+                    now.isoformat(),
+                    proposal_id,
+                    self.workspace_id,
+                ),
+            )
+            self._record_event(
+                connection,
+                "methods_merged",
+                primary.id,
+                {
+                    "primary_key": primary.key,
+                    "duplicate_key": duplicate.key,
+                    "duplicate_method_id": duplicate.id,
+                    "score": proposal.score,
+                },
+            )
+        return self.get_method(primary.id)
+
+    @staticmethod
+    def _row_to_proposal(row: sqlite3.Row) -> MethodMergeProposal:
+        detail = json.loads(row["detail_json"])
+        return MethodMergeProposal(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            primary_method_id=row["primary_method_id"],
+            primary_key=detail["primary_key"],
+            duplicate_method_id=row["duplicate_method_id"],
+            duplicate_key=detail["duplicate_key"],
+            score=row["score"],
+            signature_similarity=detail["signature_similarity"],
+            text_similarity=detail["text_similarity"],
+            reasons=detail["reasons"],
+            status=MergeProposalStatus(row["status"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            resolved_at=(
+                datetime.fromisoformat(row["resolved_at"])
+                if row["resolved_at"]
+                else None
+            ),
+        )
 
     def list_methods(
         self, include_pending: bool = True, include_deprecated: bool = False

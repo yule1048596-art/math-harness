@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "math-harness"
-version = "0.4.0"
+version = "0.5.0"
 description = "Workspace-isolated, verifiable memory harness for growing mathematical experts."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -32,6 +32,7 @@ llm = [
 [project.scripts]
 math-harness-demo = "math_harness.demo:main"
 math-harness-eval = "math_harness.eval_cli:main"
+math-harness-dataset = "math_harness.dataset:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/math_harness"]
