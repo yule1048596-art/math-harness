@@ -22,6 +22,9 @@ final class AppModel: ObservableObject {
   @Published private(set) var isRefreshing = false
   @Published private(set) var reviewingExampleID: String?
   @Published private(set) var editingExampleID: String?
+  @Published private(set) var isImportingData = false
+  @Published private(set) var isBackingUp = false
+  @Published private(set) var isRestoring = false
   @Published var errorMessage: String?
 
   private let backend = BackendProcessController()
@@ -29,6 +32,10 @@ final class AppModel: ObservableObject {
 
   var selectedWorkspace: Workspace? {
     workspaces.first { $0.id == selectedWorkspaceID }
+  }
+
+  var isDataOperationInProgress: Bool {
+    isImportingData || isBackingUp || isRestoring
   }
 
   var pendingExamples: [ProblemExample] {
@@ -42,6 +49,10 @@ final class AppModel: ObservableObject {
 
   func isAttemptCaptured(_ attemptID: String) -> Bool {
     examples.contains { $0.sourceAttemptID == attemptID }
+  }
+
+  func showError(_ message: String) {
+    errorMessage = message
   }
 
   func start() async {
@@ -119,6 +130,72 @@ final class AppModel: ObservableObject {
     } catch {
       errorMessage = error.localizedDescription
       return false
+    }
+  }
+
+  func importExamples(
+    content: String,
+    sourceName: String,
+    reviewPolicy: ImportReviewPolicy,
+    extractorPolicy: ImportExtractorPolicy,
+    commit: Bool
+  ) async -> BulkExampleImportResult? {
+    guard let api, let workspaceID = selectedWorkspaceID else { return nil }
+    isImportingData = true
+    errorMessage = nil
+    defer { isImportingData = false }
+    do {
+      let result = try await api.bulkImportExamples(
+        workspaceID: workspaceID,
+        request: BulkExampleImportRequest(
+          content: content,
+          reviewPolicy: reviewPolicy,
+          extractorPolicy: extractorPolicy,
+          commit: commit,
+          sourceName: sourceName
+        )
+      )
+      if result.committed {
+        await refreshSelectedWorkspace()
+      }
+      return result
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  func exportWorkspaceBackup() async -> (data: Data, suggestedName: String)? {
+    guard let api, let workspace = selectedWorkspace else { return nil }
+    isBackingUp = true
+    errorMessage = nil
+    defer { isBackingUp = false }
+    do {
+      let data = try await api.exportWorkspaceBackup(workspaceID: workspace.id)
+      let safeName = workspace.name
+        .replacingOccurrences(of: "/", with: "-")
+        .replacingOccurrences(of: ":", with: "-")
+      return (data, "\(safeName)-Math-Harness.mathharness")
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  func restoreWorkspaceBackup(_ data: Data) async -> WorkspaceRestoreResult? {
+    guard let api else { return nil }
+    isRestoring = true
+    errorMessage = nil
+    defer { isRestoring = false }
+    do {
+      let result = try await api.restoreWorkspaceBackup(data)
+      workspaces = try await api.listWorkspaces().sorted { $0.createdAt < $1.createdAt }
+      selectedWorkspaceID = result.workspace.id
+      await refreshSelectedWorkspace()
+      return result
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
     }
   }
 

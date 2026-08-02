@@ -1,9 +1,11 @@
 # Math Harness
 
-一个面向数学专家成长的本地优先 Harness。v0.8.0 把对话成长闭环推进到可修正状态：
-自然语言题目可以先整理成由用户确认的可验证目标；自动生成的知识草稿允许编辑，并在
-保存后重新执行数学验证与方法提炼。旧内容按修订版本留档，只有新版本独立验证通过且经
-人工确认后，才会晋级正式方法库。
+一个面向数学专家成长的本地优先 Harness。v0.9.0 把“逐题培养”推进到可长期维护：
+JSON/JSONL 题库可以先整批预检、去重，再用一个 SQLite 事务写入；完整工作区可以导出为
+带版本、记录数和 SHA-256 清单的 `.mathharness` 备份，并安全恢复成不覆盖原数据的新空间。
+
+v0.8.0 把对话成长闭环推进到可修正状态：自然语言题目可以先整理成由用户确认的可验证
+目标；自动生成的知识草稿允许编辑，并在保存后重新执行数学验证与方法提炼。
 
 v0.5.1 收紧了成长系统最关键的三条边界：未经复核的数据不能改写已晋级知识，重叠方法
 合并不能重复应用，训练与全部留出集必须在评测开始前通过全局隔离检查。
@@ -38,6 +40,31 @@ v0.3.3 之前，方法卡一旦创建内容就永久冻结，后续例子只能�
     未显式指定方法的人工纠正不参与计分；
 14. 以新记录保存人工纠正，不覆盖原始错误历史；
 15. 分别使用独立留出集评测方法检索和端到端解题门禁。
+
+## v0.9.0 新增：批量培养与可恢复数据
+
+- `JSON`、`JSONL` 或 `NDJSON` 题库先逐项执行 Schema 校验、数学验证和内容指纹去重。
+  单批最多 500 题、5 MB；有任何格式错误时整批不可提交，错误会精确到项目或源文件行。
+- 预检不会调用方法提炼模型。用户最终确认后才提炼方法并写入；默认强制所有导入题进入
+  待复核区、默认使用免费确定性的本地规则。保留文件 `reviewed` 标记或使用当前 LLM
+  提炼器都必须显式选择。
+- 同一工作区已存在的题目和文件内重复题按规范化内容 SHA-256 跳过。所有新例题、方法卡、
+  关系与学习事件共用一个 SQLite 事务，任一步失败都会整批回滚。
+- 工作区可导出为 `.mathharness` ZIP：包含通过 SQLite Backup API 生成的一致性快照，以及
+  应用版本、原工作区元数据、逐表记录数、数据库大小和 SHA-256。
+- 恢复会拒绝超限、损坏、校验不一致、跨工作区混合、带额外表/视图/触发器或外键损坏的
+  归档。合法归档始终创建“恢复”副本，并重绑例题、方法、历史求解与嵌套 JSON 引用，
+  不覆盖现有工作区。
+- macOS 工具栏新增“数据”菜单，提供题库预检/确认、保存备份和恢复副本。示例格式见
+  [`examples/import-template.jsonl`](examples/import-template.jsonl)。
+
+新增 API：
+
+```text
+POST /workspaces/{id}/example-imports
+GET  /workspaces/{id}/backup
+POST /workspace-restores
+```
 
 ## v0.8.0 新增：目标确认与可修订知识
 
@@ -408,9 +435,15 @@ v0.3.3 → v0.4.0 的差距说明了旧指标的水分：同一套检索，换�
 
 ```text
 POST   /workspaces
+POST   /workspaces/{id}/math-target-drafts
 POST   /workspaces/{id}/examples
 GET    /workspaces/{id}/examples
+PATCH  /workspaces/{id}/examples/{example_id}
+GET    /workspaces/{id}/examples/{example_id}/versions
 POST   /workspaces/{id}/examples/{example_id}/review
+POST   /workspaces/{id}/example-imports
+GET    /workspaces/{id}/backup
+POST   /workspace-restores
 GET    /workspaces/{id}/methods
 GET    /workspaces/{id}/methods/{method_id}/versions
 POST   /workspaces/{id}/methods/merge-proposals

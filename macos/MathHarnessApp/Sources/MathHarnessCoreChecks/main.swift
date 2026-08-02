@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.8.0"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.9.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.8.0", "ready version")
+require(ready.version == "0.9.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -53,6 +53,44 @@ let workspace = try JSONDecoder().decode(Workspace.self, from: workspaceData)
 require(workspace.id == "ws-1", "workspace id")
 require(workspace.name == "渐进估计", "workspace name")
 require(workspace.createdAt.hasPrefix("2026-08-01"), "workspace timestamp")
+
+let importRequestData = try JSONEncoder().encode(
+  BulkExampleImportRequest(
+    content: #"{"problem":"题目","solution":"解答"}"#,
+    reviewPolicy: .pending,
+    extractorPolicy: .rules,
+    sourceName: "corpus.jsonl"
+  )
+)
+let importRequestObject =
+  try JSONSerialization.jsonObject(with: importRequestData) as? [String: Any]
+require(importRequestObject?["file_format"] as? String == "auto", "import format encoding")
+require(importRequestObject?["review_policy"] as? String == "pending", "review policy encoding")
+require(
+  importRequestObject?["extractor_policy"] as? String == "rules",
+  "extractor policy encoding"
+)
+require(importRequestObject?["commit"] as? Bool == false, "preflight encoding")
+
+let importResultData = Data(
+  #"{"source_name":"corpus.jsonl","detected_format":"jsonl","commit_requested":false,"committed":false,"can_commit":true,"total_count":1,"ready_count":1,"duplicate_count":0,"invalid_count":0,"imported_count":0,"items":[{"index":1,"status":"ready","problem_preview":"题目","fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","verification":{"status":"verified","summary":"通过","checks":[],"computed":{},"error":null},"method_keys":[],"example_id":null,"errors":[]}]}"#
+    .utf8
+)
+let importResult = try JSONDecoder().decode(BulkExampleImportResult.self, from: importResultData)
+require(importResult.canCommit, "import preflight gate")
+require(importResult.items.first?.verification?.status == "verified", "import verification")
+
+let restoreResultData = Data(
+  #"{"workspace":{"id":"ws-2","name":"渐进估计（恢复）","description":"测试","created_at":"2026-08-01T02:00:00Z"},"source_workspace_id":"ws-1","source_app_version":"0.9.0","archive_format_version":1,"restored_record_counts":{"examples":2}}"#
+    .utf8
+)
+let restoreResult = try JSONDecoder().decode(
+  WorkspaceRestoreResult.self,
+  from: restoreResultData
+)
+require(restoreResult.workspace.id == "ws-2", "restored workspace id")
+require(restoreResult.sourceWorkspaceID == "ws-1", "restore source workspace")
+require(restoreResult.restoredRecordCounts["examples"] == 2, "restore counts")
 
 let exampleData = Data(
   #"{"id":"ex-1","workspace_id":"ws-1","problem":"求展开","solution":"先有理化。","tags":["radical"],"method_hint":null,"reviewed":false,"problem_kind":"asymptotic","math_payload":null,"verification":{"status":"verified","summary":"通过","checks":[],"computed":{},"error":null},"extraction":{"provider":"rules","model":null,"status":"success","extracted_method_keys":["rationalization"]},"method_drafts":[{"key":"rationalization","name":"有理化","goal":"处理抵消","applicable_when":[],"procedure":["乘共轭"],"failure_modes":[],"tags":[]}],"status":"pending_review","origin":"conversation","source_attempt_id":"attempt-1","reviewed_at":null,"reviewer_note":"","revision":1,"created_at":"2026-08-01T01:03:00Z","updated_at":"2026-08-01T01:03:00Z"}"#

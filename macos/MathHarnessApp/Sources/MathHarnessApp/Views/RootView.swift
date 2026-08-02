@@ -1,9 +1,13 @@
+import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct RootView: View {
   @EnvironmentObject private var model: AppModel
   @State private var showingCreateWorkspace = false
   @State private var showingKnowledge = true
+  @State private var importDraft: CorpusImportDraft?
+  @State private var noticeMessage: String?
 
   var body: some View {
     NavigationSplitView {
@@ -32,11 +36,31 @@ struct RootView: View {
             Label("知识库", systemImage: "books.vertical")
           }
           .help(showingKnowledge ? "隐藏知识库" : "显示知识库")
+
+          Menu {
+            Button("导入题库……", systemImage: "square.and.arrow.down.on.square") {
+              chooseCorpusFile()
+            }
+            Button("备份当前工作区……", systemImage: "externaldrive.badge.timemachine") {
+              Task { await saveWorkspaceBackup() }
+            }
+            Divider()
+            Button("恢复工作区备份……", systemImage: "arrow.counterclockwise.circle") {
+              chooseWorkspaceBackup()
+            }
+          } label: {
+            Label("数据", systemImage: "externaldrive")
+          }
+          .help("导入题库、备份或恢复工作区")
+          .disabled(model.isDataOperationInProgress)
         }
       }
     }
     .sheet(isPresented: $showingCreateWorkspace) {
       CreateWorkspaceSheet()
+    }
+    .sheet(item: $importDraft) { draft in
+      BulkImportView(draft: draft)
     }
     .alert(
       "Math Harness",
@@ -48,6 +72,17 @@ struct RootView: View {
       Button("好") { model.errorMessage = nil }
     } message: {
       Text(model.errorMessage ?? "")
+    }
+    .alert(
+      "操作完成",
+      isPresented: Binding(
+        get: { noticeMessage != nil },
+        set: { if !$0 { noticeMessage = nil } }
+      )
+    ) {
+      Button("好") { noticeMessage = nil }
+    } message: {
+      Text(noticeMessage ?? "")
     }
   }
 
@@ -93,6 +128,72 @@ struct RootView: View {
         }
       }
     }
+  }
+
+  private func chooseCorpusFile() {
+    let panel = NSOpenPanel()
+    panel.title = "选择 JSON 或 JSONL 题库"
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.allowedContentTypes = [
+      .json,
+      UTType(filenameExtension: "jsonl") ?? .data,
+      UTType(filenameExtension: "ndjson") ?? .data,
+    ]
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    do {
+      let data = try readSecurityScopedData(from: url)
+      guard let content = String(data: data, encoding: .utf8) else {
+        model.showError("题库必须是 UTF-8 编码的 JSON 或 JSONL 文件。")
+        return
+      }
+      importDraft = CorpusImportDraft(content: content, sourceName: url.lastPathComponent)
+    } catch {
+      model.showError("无法读取题库：\(error.localizedDescription)")
+    }
+  }
+
+  private func saveWorkspaceBackup() async {
+    guard let exported = await model.exportWorkspaceBackup() else { return }
+    let panel = NSSavePanel()
+    panel.title = "保存 Math Harness 工作区备份"
+    panel.nameFieldStringValue = exported.suggestedName
+    panel.allowedContentTypes = [UTType(filenameExtension: "mathharness") ?? .data]
+    panel.canCreateDirectories = true
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    do {
+      try exported.data.write(to: url, options: .atomic)
+      noticeMessage = "工作区备份已保存到 \(url.lastPathComponent)。"
+    } catch {
+      model.showError("无法保存工作区备份：\(error.localizedDescription)")
+    }
+  }
+
+  private func chooseWorkspaceBackup() {
+    let panel = NSOpenPanel()
+    panel.title = "选择 Math Harness 工作区备份"
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.allowedContentTypes = [UTType(filenameExtension: "mathharness") ?? .data]
+    guard panel.runModal() == .OK, let url = panel.url else { return }
+    do {
+      let data = try readSecurityScopedData(from: url)
+      Task {
+        if let result = await model.restoreWorkspaceBackup(data) {
+          noticeMessage = "已创建恢复副本“\(result.workspace.name)”，原工作区未被覆盖。"
+        }
+      }
+    } catch {
+      model.showError("无法读取工作区备份：\(error.localizedDescription)")
+    }
+  }
+
+  private func readSecurityScopedData(from url: URL) throws -> Data {
+    let accessed = url.startAccessingSecurityScopedResource()
+    defer {
+      if accessed { url.stopAccessingSecurityScopedResource() }
+    }
+    return try Data(contentsOf: url)
   }
 }
 

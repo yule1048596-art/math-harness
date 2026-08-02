@@ -2,9 +2,17 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
+from math_harness.bulk_import import (
+    ParsedImportItem,
+    example_fingerprint,
+    parse_example_corpus,
+    problem_preview,
+    stored_example_fingerprint,
+)
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
 from math_harness.dedup import find_merge_candidates
@@ -13,8 +21,13 @@ from math_harness.extraction import (
     MethodExtractorProtocol,
     build_method_extractor_from_env,
 )
+from math_harness.methods import MethodExtractor
 from math_harness.models import (
     AnswerKind,
+    BulkExampleImportRequest,
+    BulkExampleImportResult,
+    BulkImportItemResult,
+    BulkImportItemStatus,
     CandidateSolution,
     CandidateStep,
     ConversationCaptureResult,
@@ -33,6 +46,7 @@ from math_harness.models import (
     ExtractionStatus,
     GenerationStageKind,
     GenerationStatus,
+    ImportExtractorPolicy,
     IngestionResult,
     KnowledgeStatus,
     LearningEvent,
@@ -66,21 +80,34 @@ from math_harness.models import (
     VerificationStatus,
     Workspace,
     WorkspaceCreate,
+    WorkspaceRestoreResult,
     utc_now,
 )
 from math_harness.normalization import CandidateSolutionNormalizer
+from math_harness.portability import (
+    create_workspace_archive,
+    restore_workspace_archive,
+)
 from math_harness.retrieval import MethodRetriever
 from math_harness.solving import (
     SolutionGeneratorProtocol,
     build_solution_generator_from_env,
 )
-from math_harness.storage import WorkspaceManager
+from math_harness.storage import WorkspaceManager, WorkspaceStore
 from math_harness.structure import extract_features
 from math_harness.target_drafting import (
     TargetDrafterProtocol,
     build_target_drafter_from_env,
 )
 from math_harness.verifier import SolutionVerifier
+
+
+@dataclass(frozen=True)
+class _PreparedIngestion:
+    request: ExampleCreate
+    example: ProblemExample
+    extraction_result: MethodExtractionResult
+    promotion_approved: bool
 
 
 class MathHarnessService:
@@ -113,6 +140,13 @@ class MathHarnessService:
     def list_workspaces(self) -> list[Workspace]:
         return self.workspaces.list()
 
+    def export_workspace_backup(self, workspace_id: str) -> bytes:
+        return create_workspace_archive(self.workspaces, workspace_id)
+
+    def restore_workspace_backup(self, payload: bytes) -> WorkspaceRestoreResult:
+        with self._knowledge_lock:
+            return restore_workspace_archive(self.workspaces, payload)
+
     def draft_math_target(
         self,
         workspace_id: str,
@@ -133,6 +167,144 @@ class MathHarnessService:
                 origin=ExampleOrigin.MANUAL,
             )
 
+    def bulk_import_examples(
+        self,
+        workspace_id: str,
+        request: BulkExampleImportRequest,
+    ) -> BulkExampleImportResult:
+        with self._knowledge_lock:
+            return self._bulk_import_examples(workspace_id, request)
+
+    def _bulk_import_examples(
+        self,
+        workspace_id: str,
+        request: BulkExampleImportRequest,
+    ) -> BulkExampleImportResult:
+        store = self.workspaces.store(workspace_id)
+        detected_format, parsed = parse_example_corpus(
+            request.content,
+            request.file_format,
+            request.review_policy,
+            source_name=request.source_name,
+        )
+        known_fingerprints = {
+            stored_example_fingerprint(example) for example in store.list_examples()
+        }
+        ready: list[tuple[ParsedImportItem, VerificationReport]] = []
+        item_results: list[BulkImportItemResult] = []
+        for item in parsed:
+            if item.request is None:
+                item_results.append(
+                    BulkImportItemResult(
+                        index=item.index,
+                        status=BulkImportItemStatus.INVALID,
+                        errors=list(item.errors),
+                    )
+                )
+                continue
+
+            fingerprint = example_fingerprint(item.request)
+            if fingerprint in known_fingerprints:
+                item_results.append(
+                    BulkImportItemResult(
+                        index=item.index,
+                        status=BulkImportItemStatus.DUPLICATE,
+                        problem_preview=problem_preview(item.request),
+                        fingerprint=fingerprint,
+                    )
+                )
+                continue
+
+            known_fingerprints.add(fingerprint)
+            verification = self.verifier.verify(item.request.math_payload)
+            ready.append((item, verification))
+            item_results.append(
+                BulkImportItemResult(
+                    index=item.index,
+                    status=BulkImportItemStatus.READY,
+                    problem_preview=problem_preview(item.request),
+                    fingerprint=fingerprint,
+                    verification=verification,
+                )
+            )
+
+        invalid_count = sum(
+            item.status is BulkImportItemStatus.INVALID for item in item_results
+        )
+        duplicate_count = sum(
+            item.status is BulkImportItemStatus.DUPLICATE for item in item_results
+        )
+        can_commit = invalid_count == 0
+        if not request.commit or not can_commit:
+            return BulkExampleImportResult(
+                source_name=request.source_name,
+                detected_format=detected_format,
+                commit_requested=request.commit,
+                committed=False,
+                can_commit=can_commit,
+                total_count=len(item_results),
+                ready_count=len(ready),
+                duplicate_count=duplicate_count,
+                invalid_count=invalid_count,
+                imported_count=0,
+                items=item_results,
+            )
+
+        extractor = (
+            MethodExtractor()
+            if request.extractor_policy is ImportExtractorPolicy.RULES
+            else self.extractor
+        )
+        prepared = [
+            self._prepare_ingestion(
+                workspace_id,
+                item.request,
+                origin=ExampleOrigin.MANUAL,
+                verification_override=verification,
+                extractor=extractor,
+            )
+            for item, verification in ready
+            if item.request is not None
+        ]
+        persisted: dict[int, IngestionResult] = {}
+        with store.atomic():
+            for (item, _), prepared_item in zip(ready, prepared, strict=True):
+                persisted[item.index] = self._persist_prepared_ingestion(
+                    store,
+                    prepared_item,
+                )
+
+        committed_items: list[BulkImportItemResult] = []
+        for result in item_results:
+            ingestion = persisted.get(result.index)
+            if ingestion is None:
+                committed_items.append(result)
+                continue
+            committed_items.append(
+                result.model_copy(
+                    update={
+                        "status": BulkImportItemStatus.IMPORTED,
+                        "example_id": ingestion.example.id,
+                        "method_keys": [
+                            method.key for method in ingestion.learned_methods
+                        ],
+                    }
+                )
+            )
+        return BulkExampleImportResult(
+            source_name=request.source_name,
+            detected_format=detected_format,
+            commit_requested=True,
+            committed=True,
+            can_commit=True,
+            total_count=len(committed_items),
+            ready_count=len(ready),
+            duplicate_count=duplicate_count,
+            invalid_count=0,
+            imported_count=len(persisted),
+            items=committed_items,
+        )
+
     def _ingest_example(
         self,
         workspace_id: str,
@@ -141,8 +313,30 @@ class MathHarnessService:
         origin: ExampleOrigin,
         source_attempt_id: str | None = None,
         verification_override: VerificationReport | None = None,
+        extractor: MethodExtractorProtocol | None = None,
+        store: WorkspaceStore | None = None,
     ) -> IngestionResult:
-        store = self.workspaces.store(workspace_id)
+        workspace_store = store or self.workspaces.store(workspace_id)
+        prepared = self._prepare_ingestion(
+            workspace_id,
+            request,
+            origin=origin,
+            source_attempt_id=source_attempt_id,
+            verification_override=verification_override,
+            extractor=extractor,
+        )
+        return self._persist_prepared_ingestion(workspace_store, prepared)
+
+    def _prepare_ingestion(
+        self,
+        workspace_id: str,
+        request: ExampleCreate,
+        *,
+        origin: ExampleOrigin,
+        source_attempt_id: str | None = None,
+        verification_override: VerificationReport | None = None,
+        extractor: MethodExtractorProtocol | None = None,
+    ) -> _PreparedIngestion:
         verification = verification_override or self.verifier.verify(
             request.math_payload
         )
@@ -156,7 +350,11 @@ class MathHarnessService:
         else:
             status = KnowledgeStatus.PENDING_REVIEW
 
-        extraction_result = self._extract_methods(request, verification.status)
+        extraction_result = self._extract_methods(
+            request,
+            verification.status,
+            extractor=extractor,
+        )
         if origin is ExampleOrigin.CONVERSATION:
             extraction_result = self._filter_conversation_extraction(extraction_result)
         now = utc_now()
@@ -182,10 +380,26 @@ class MathHarnessService:
             created_at=now,
             updated_at=now,
         )
+        return _PreparedIngestion(
+            request=request,
+            example=example,
+            extraction_result=extraction_result,
+            promotion_approved=promotion_approved,
+        )
+
+    def _persist_prepared_ingestion(
+        self,
+        store: WorkspaceStore,
+        prepared: _PreparedIngestion,
+    ) -> IngestionResult:
+        request = prepared.request
+        example = prepared.example
+        extraction_result = prepared.extraction_result
+        promotion_approved = prepared.promotion_approved
         store.add_example(example, extraction_result.methods)
 
         learned_methods: list[MethodCard] = []
-        if verification.status is not VerificationStatus.REJECTED:
+        if example.verification.status is not VerificationStatus.REJECTED:
             method_status = (
                 KnowledgeStatus.PROMOTED
                 if promotion_approved
@@ -213,9 +427,16 @@ class MathHarnessService:
         self,
         request: ExampleCreate,
         verification_status: VerificationStatus,
+        *,
+        extractor: MethodExtractorProtocol | None = None,
     ) -> MethodExtractionResult:
-        provider = getattr(self.extractor, "name", self.extractor.__class__.__name__)
-        prompt_version = getattr(self.extractor, "prompt_version", "unknown")
+        selected_extractor = extractor or self.extractor
+        provider = getattr(
+            selected_extractor,
+            "name",
+            selected_extractor.__class__.__name__,
+        )
+        prompt_version = getattr(selected_extractor, "prompt_version", "unknown")
         if verification_status is VerificationStatus.REJECTED:
             return MethodExtractionResult(
                 trace=MethodExtractionTrace(
@@ -226,14 +447,14 @@ class MathHarnessService:
                 )
             )
         try:
-            return self.extractor.extract(
+            return selected_extractor.extract(
                 request.problem, request.solution, request.method_hint
             )
         except Exception as exc:  # noqa: BLE001
             return MethodExtractionResult(
                 trace=MethodExtractionTrace(
                     provider=provider,
-                    model=getattr(self.extractor, "model", None),
+                    model=getattr(selected_extractor, "model", None),
                     prompt_version=prompt_version,
                     status=ExtractionStatus.ERROR,
                     error=f"{exc.__class__.__name__}: {exc}"[:2_000],

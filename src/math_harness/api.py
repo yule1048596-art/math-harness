@@ -4,16 +4,19 @@ import os
 import secrets
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi import Body, FastAPI, Query, Request
+from fastapi.responses import JSONResponse, Response
 
 from math_harness import __version__
 from math_harness.errors import (
     InvalidKnowledgeState,
+    InvalidPortableData,
     RecordNotFound,
     WorkspaceNotFound,
 )
 from math_harness.models import (
+    BulkExampleImportRequest,
+    BulkExampleImportResult,
     ConversationCaptureResult,
     EvaluationRequest,
     EvaluationRun,
@@ -45,7 +48,9 @@ from math_harness.models import (
     SolveRequest,
     Workspace,
     WorkspaceCreate,
+    WorkspaceRestoreResult,
 )
+from math_harness.portability import ARCHIVE_MEDIA_TYPE, MAX_ARCHIVE_BYTES
 from math_harness.service import MathHarnessService
 
 
@@ -89,6 +94,10 @@ def create_app(
     async def invalid_knowledge_state_handler(_, exc: InvalidKnowledgeState):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
+    @app.exception_handler(InvalidPortableData)
+    async def invalid_portable_data_handler(_, exc: InvalidPortableData):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
         return HealthResponse(status="ok", version=__version__)
@@ -104,6 +113,29 @@ def create_app(
     @app.get("/workspaces/{workspace_id}", response_model=Workspace)
     def get_workspace(workspace_id: str) -> Workspace:
         return service.get_workspace(workspace_id)
+
+    @app.get("/workspaces/{workspace_id}/backup")
+    def export_workspace_backup(workspace_id: str) -> Response:
+        payload = service.export_workspace_backup(workspace_id)
+        return Response(
+            content=payload,
+            media_type=ARCHIVE_MEDIA_TYPE,
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="math-harness-{workspace_id}.mathharness"'
+                )
+            },
+        )
+
+    @app.post("/workspace-restores", response_model=WorkspaceRestoreResult)
+    def restore_workspace_backup(
+        payload: bytes = Body(
+            media_type=ARCHIVE_MEDIA_TYPE,
+            min_length=1,
+            max_length=MAX_ARCHIVE_BYTES,
+        ),
+    ) -> WorkspaceRestoreResult:
+        return service.restore_workspace_backup(payload)
 
     @app.post(
         "/workspaces/{workspace_id}/math-target-drafts",
@@ -122,6 +154,16 @@ def create_app(
     )
     def ingest_example(workspace_id: str, request: ExampleCreate) -> IngestionResult:
         return service.ingest_example(workspace_id, request)
+
+    @app.post(
+        "/workspaces/{workspace_id}/example-imports",
+        response_model=BulkExampleImportResult,
+    )
+    def bulk_import_examples(
+        workspace_id: str,
+        request: BulkExampleImportRequest,
+    ) -> BulkExampleImportResult:
+        return service.bulk_import_examples(workspace_id, request)
 
     @app.get(
         "/workspaces/{workspace_id}/examples",
