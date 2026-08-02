@@ -72,6 +72,40 @@ WORKSPACE="$(curl -fsS \
     --data-binary '{"name":"macOS E2E","description":"packaged backend"}' \
     "$BASE_URL/workspaces")"
 WORKSPACE_ID="$(jq -r .id <<<"$WORKSPACE")"
+IMPORT_LINE='{"problem":"展开 (x+1)^2","solution":"按二项式展开得到 x^2+2x+1。","tags":["代数"],"reviewed":true,"math_payload":{"expression":"(x+1)**2","expected":"x**2+2*x+1","variable":"x","point":"0","mode":"exact_equivalence"}}'
+IMPORT_PREVIEW_BODY="$(jq -nc \
+    --arg content "$IMPORT_LINE" \
+    '{content:$content,file_format:"jsonl",source_name:"packaged.jsonl",commit:false}')"
+IMPORT_PREVIEW="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/json' \
+    --data-binary "$IMPORT_PREVIEW_BODY" \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/example-imports")"
+[[ "$(jq -r .can_commit <<<"$IMPORT_PREVIEW")" == "true" ]]
+[[ "$(jq -r .ready_count <<<"$IMPORT_PREVIEW")" == "1" ]]
+IMPORT_COMMIT_BODY="$(jq '.commit = true' <<<"$IMPORT_PREVIEW_BODY")"
+IMPORT_COMMIT="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/json' \
+    --data-binary "$IMPORT_COMMIT_BODY" \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/example-imports")"
+[[ "$(jq -r .committed <<<"$IMPORT_COMMIT")" == "true" ]]
+[[ "$(jq -r .imported_count <<<"$IMPORT_COMMIT")" == "1" ]]
+[[ "$(jq -r '.items[0].status' <<<"$IMPORT_COMMIT")" == "imported" ]]
+BACKUP_ARCHIVE="$STAGING_ROOT/workspace.mathharness"
+curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/backup" \
+    -o "$BACKUP_ARCHIVE"
+RESTORE="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/vnd.math-harness.workspace+zip' \
+    --data-binary "@$BACKUP_ARCHIVE" \
+    "$BASE_URL/workspace-restores")"
+RESTORED_WORKSPACE_ID="$(jq -r .workspace.id <<<"$RESTORE")"
+[[ "$RESTORED_WORKSPACE_ID" != "$WORKSPACE_ID" ]]
+[[ "$(jq -r .source_workspace_id <<<"$RESTORE")" == "$WORKSPACE_ID" ]]
+[[ "$(jq -r .restored_record_counts.examples <<<"$RESTORE")" == "1" ]]
 TARGET_DRAFT="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     -H 'Content-Type: application/json' \
@@ -140,6 +174,8 @@ REVIEW="$(curl -fsS \
 
 print "health=$(jq -r '.status + " v" + .version' <<<"$HEALTH")"
 print "workspace=$(jq -r .name <<<"$WORKSPACE")"
+print "bulk_import=$(jq -r '.ready_count | tostring' <<<"$IMPORT_PREVIEW") ready → $(jq -r '.imported_count | tostring' <<<"$IMPORT_COMMIT") imported"
+print "backup_restore=$(jq -r '.workspace.name' <<<"$RESTORE")"
 print "solve_status=$(jq -r .status <<<"$SOLUTION")"
 print "answer=$(jq -r .candidate.answer_expression <<<"$SOLUTION")"
 print "model_fallback=$(jq -r .generation.fallback_used <<<"$SOLUTION")"

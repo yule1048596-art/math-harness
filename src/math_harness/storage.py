@@ -131,25 +131,116 @@ class WorkspaceManager:
         self.get(workspace_id)
         return WorkspaceStore(self.database_path(workspace_id), workspace_id)
 
+    def register_snapshot(
+        self,
+        workspace: Workspace,
+        snapshot_path: Path,
+    ) -> Workspace:
+        """Register one already validated and rebound workspace database."""
+
+        target_path = self.database_path(workspace.id)
+        if target_path.exists():
+            raise InvalidKnowledgeState(
+                f"restored workspace already exists: {workspace.id}"
+            )
+        target_path.parent.mkdir(parents=True, exist_ok=False)
+        try:
+            source = sqlite3.connect(snapshot_path)
+            destination = sqlite3.connect(target_path)
+            try:
+                source.backup(destination)
+                destination.commit()
+            finally:
+                destination.close()
+                source.close()
+            WorkspaceStore(target_path, workspace.id)
+            with self._registry_connection() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO workspaces (id, name, description, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        workspace.id,
+                        workspace.name,
+                        workspace.description,
+                        workspace.created_at.isoformat(),
+                    ),
+                )
+        except Exception:
+            for path in (
+                target_path,
+                Path(f"{target_path}-wal"),
+                Path(f"{target_path}-shm"),
+            ):
+                path.unlink(missing_ok=True)
+            target_path.parent.rmdir()
+            raise
+        return workspace
+
 
 class WorkspaceStore:
     def __init__(self, database_path: Path, workspace_id: str) -> None:
         self.database_path = database_path
         self.workspace_id = workspace_id
+        self._atomic_connection: sqlite3.Connection | None = None
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.database_path)
-        connection.row_factory = sqlite3.Row
+        if self._atomic_connection is not None:
+            yield self._atomic_connection
+            return
+
+        connection = self._open_connection()
         try:
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA journal_mode = WAL")
             yield connection
             connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
         finally:
             connection.close()
+
+    @contextmanager
+    def atomic(self) -> Iterator[None]:
+        """Reuse one SQLite transaction across existing store operations."""
+
+        if self._atomic_connection is not None:
+            raise RuntimeError("nested workspace transactions are not supported")
+        connection = self._open_connection()
+        self._atomic_connection = connection
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            yield
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            self._atomic_connection = None
+            connection.close()
+
+    def _open_connection(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.database_path)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        return connection
+
+    def backup_to(self, destination_path: Path) -> None:
+        """Create a consistent SQLite snapshot, including committed WAL data."""
+
+        if destination_path.exists():
+            raise FileExistsError(destination_path)
+        with self.connection() as source:
+            destination = sqlite3.connect(destination_path)
+            try:
+                source.backup(destination)
+                destination.commit()
+            finally:
+                destination.close()
 
     def _initialize(self) -> None:
         with self.connection() as connection:

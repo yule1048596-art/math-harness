@@ -91,6 +91,29 @@ class ExtractionStatus(StrEnum):
     ERROR = "error"
 
 
+class ImportFileFormat(StrEnum):
+    AUTO = "auto"
+    JSON = "json"
+    JSONL = "jsonl"
+
+
+class ImportReviewPolicy(StrEnum):
+    PENDING = "pending"
+    PRESERVE = "preserve"
+
+
+class ImportExtractorPolicy(StrEnum):
+    RULES = "rules"
+    CONFIGURED = "configured"
+
+
+class BulkImportItemStatus(StrEnum):
+    READY = "ready"
+    DUPLICATE = "duplicate"
+    INVALID = "invalid"
+    IMPORTED = "imported"
+
+
 class GenerationStatus(StrEnum):
     SUCCESS = "success"
     FALLBACK = "fallback"
@@ -461,6 +484,50 @@ class MethodExtractionResult(BaseModel):
 class IngestionResult(BaseModel):
     example: ProblemExample
     learned_methods: list[MethodCard]
+
+
+class BulkExampleImportRequest(BaseModel):
+    """Text corpus submitted for validation or one atomic import."""
+
+    content: str = Field(min_length=1, max_length=5_000_000)
+    file_format: ImportFileFormat = ImportFileFormat.AUTO
+    review_policy: ImportReviewPolicy = ImportReviewPolicy.PENDING
+    extractor_policy: ImportExtractorPolicy = ImportExtractorPolicy.RULES
+    commit: bool = False
+    source_name: str = Field(default="import", min_length=1, max_length=255)
+
+
+class BulkImportItemResult(BaseModel):
+    index: int = Field(ge=1)
+    status: BulkImportItemStatus
+    problem_preview: str = Field(default="", max_length=240)
+    fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    verification: VerificationReport | None = None
+    method_keys: list[str] = Field(default_factory=list, max_length=50)
+    example_id: str | None = None
+    errors: list[str] = Field(default_factory=list, max_length=20)
+
+
+class BulkExampleImportResult(BaseModel):
+    source_name: str
+    detected_format: ImportFileFormat
+    commit_requested: bool
+    committed: bool
+    can_commit: bool
+    total_count: int = Field(ge=0, le=500)
+    ready_count: int = Field(ge=0, le=500)
+    duplicate_count: int = Field(ge=0, le=500)
+    invalid_count: int = Field(ge=0, le=500)
+    imported_count: int = Field(ge=0, le=500)
+    items: list[BulkImportItemResult] = Field(default_factory=list, max_length=500)
+
+
+class WorkspaceRestoreResult(BaseModel):
+    workspace: Workspace
+    source_workspace_id: str
+    source_app_version: str
+    archive_format_version: int = Field(ge=1)
+    restored_record_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class MethodSearchRequest(BaseModel):

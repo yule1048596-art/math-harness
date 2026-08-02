@@ -39,6 +39,116 @@ public struct WorkspaceCreateRequest: Codable, Equatable, Sendable {
   }
 }
 
+public enum ImportReviewPolicy: String, Codable, CaseIterable, Identifiable, Sendable {
+  case pending
+  case preserve
+
+  public var id: String { rawValue }
+}
+
+public enum ImportExtractorPolicy: String, Codable, CaseIterable, Identifiable, Sendable {
+  case rules
+  case configured
+
+  public var id: String { rawValue }
+}
+
+public struct BulkExampleImportRequest: Codable, Equatable, Sendable {
+  public let content: String
+  public let fileFormat: String
+  public let reviewPolicy: ImportReviewPolicy
+  public let extractorPolicy: ImportExtractorPolicy
+  public let commit: Bool
+  public let sourceName: String
+
+  enum CodingKeys: String, CodingKey {
+    case content, commit
+    case fileFormat = "file_format"
+    case reviewPolicy = "review_policy"
+    case extractorPolicy = "extractor_policy"
+    case sourceName = "source_name"
+  }
+
+  public init(
+    content: String,
+    fileFormat: String = "auto",
+    reviewPolicy: ImportReviewPolicy = .pending,
+    extractorPolicy: ImportExtractorPolicy = .rules,
+    commit: Bool = false,
+    sourceName: String
+  ) {
+    self.content = content
+    self.fileFormat = fileFormat
+    self.reviewPolicy = reviewPolicy
+    self.extractorPolicy = extractorPolicy
+    self.commit = commit
+    self.sourceName = sourceName
+  }
+}
+
+public struct BulkImportItemResult: Codable, Equatable, Identifiable, Sendable {
+  public var id: Int { index }
+
+  public let index: Int
+  public let status: String
+  public let problemPreview: String
+  public let fingerprint: String?
+  public let verification: VerificationReport?
+  public let methodKeys: [String]
+  public let exampleID: String?
+  public let errors: [String]
+
+  enum CodingKeys: String, CodingKey {
+    case index, status, fingerprint, verification, errors
+    case problemPreview = "problem_preview"
+    case methodKeys = "method_keys"
+    case exampleID = "example_id"
+  }
+}
+
+public struct BulkExampleImportResult: Codable, Equatable, Sendable {
+  public let sourceName: String
+  public let detectedFormat: String
+  public let commitRequested: Bool
+  public let committed: Bool
+  public let canCommit: Bool
+  public let totalCount: Int
+  public let readyCount: Int
+  public let duplicateCount: Int
+  public let invalidCount: Int
+  public let importedCount: Int
+  public let items: [BulkImportItemResult]
+
+  enum CodingKeys: String, CodingKey {
+    case items, committed
+    case sourceName = "source_name"
+    case detectedFormat = "detected_format"
+    case commitRequested = "commit_requested"
+    case canCommit = "can_commit"
+    case totalCount = "total_count"
+    case readyCount = "ready_count"
+    case duplicateCount = "duplicate_count"
+    case invalidCount = "invalid_count"
+    case importedCount = "imported_count"
+  }
+}
+
+public struct WorkspaceRestoreResult: Codable, Equatable, Sendable {
+  public let workspace: Workspace
+  public let sourceWorkspaceID: String
+  public let sourceAppVersion: String
+  public let archiveFormatVersion: Int
+  public let restoredRecordCounts: [String: Int]
+
+  enum CodingKeys: String, CodingKey {
+    case workspace
+    case sourceWorkspaceID = "source_workspace_id"
+    case sourceAppVersion = "source_app_version"
+    case archiveFormatVersion = "archive_format_version"
+    case restoredRecordCounts = "restored_record_counts"
+  }
+}
+
 public enum VerificationMode: String, Codable, CaseIterable, Identifiable, Sendable {
   case asymptoticExpansion = "asymptotic_expansion"
   case asymptoticEquivalence = "asymptotic_equivalence"

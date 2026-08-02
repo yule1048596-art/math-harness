@@ -1,8 +1,7 @@
 # Math Harness for macOS
 
-v0.8.0 在原生 macOS 客户端中加入自然语言目标确认与可修订知识草稿。SwiftUI 负责
-工作区、数学对话、目标建议稿、验证状态、知识草稿编辑/复核和方法卡审阅；现有
-Python/SymPy 服务继续作为独立子进程运行。
+v0.9.0 在原生 macOS 客户端中加入题库批量导入、工作区完整备份和安全恢复。SwiftUI
+继续负责工作区、数学对话、知识复核与数据操作；Python/SymPy 服务作为独立子进程运行。
 
 ## 开发运行
 
@@ -36,7 +35,7 @@ swift run --package-path macos/MathHarnessApp MathHarnessCoreChecks
 
 ```bash
 ./scripts/build_macos_app.sh
-ditto -x -k "dist/Math-Harness-0.8.0-macOS-arm64.zip" /tmp/math-harness-alpha
+ditto -x -k "dist/Math-Harness-0.9.0-macOS-arm64.zip" /tmp/math-harness-beta
 open "/tmp/math-harness-alpha/Math Harness.app"
 ```
 
@@ -70,7 +69,18 @@ export MATH_HARNESS_NOTARY_PROFILE="math-harness-notary"
 分发构建不会启用它。沙箱版还需要给嵌入的 Python helper 配置继承权限并完成商店审核，
 不能只给主 App 打开沙箱开关。
 
-## v0.8.0 Alpha 边界
+## v0.9.0 数据操作
+
+- 工具栏“数据”菜单可以选择 JSON/JSONL 题库。App 先显示总数、可导入数、重复数与逐项
+  错误；只有整批合法时才能确认，确认后的数据库写入使用一个 SQLite 事务。
+- 单批最多 500 题、5 MB。默认把所有题放入待复核区，并使用免费本地规则提炼方法。
+  “保留 reviewed 标记”与“当前提炼器”均为显式选项；后者可能为每道新题产生一次模型请求。
+- 工作区备份扩展名为 `.mathharness`，包含一致性 SQLite 快照、应用版本、记录数与 SHA-256
+  清单。恢复前会验证 ZIP 结构、大小、校验和、SQLite 完整性、外键和工作区隔离。
+- 恢复始终创建名称带“（恢复）”的新工作区并重绑全部内部引用，不覆盖原工作区。
+  备份包不包含 MiMo API Key；密钥仍只存在 macOS Keychain。
+
+## 当前 Beta 边界
 
 - 支持工作区创建/切换、历史求解、自然语言目标建议与人工确认、对话自动记忆、例题草稿
   编辑/重新校验、例题与方法草稿复核，以及方法卡查看/废弃。只有独立验证通过的当前

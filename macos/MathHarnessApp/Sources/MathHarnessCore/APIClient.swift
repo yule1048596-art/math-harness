@@ -21,6 +21,9 @@ public enum APIClientError: Error, LocalizedError, Equatable, Sendable {
 }
 
 public actor APIClient {
+  public static let workspaceArchiveMediaType =
+    "application/vnd.math-harness.workspace+zip"
+
   private let baseURL: URL
   private let bearerToken: String?
   private let session: URLSession
@@ -48,6 +51,42 @@ public actor APIClient {
 
   public func createWorkspace(_ request: WorkspaceCreateRequest) async throws -> Workspace {
     try await send(path: "workspaces", method: "POST", body: request)
+  }
+
+  public func bulkImportExamples(
+    workspaceID: String,
+    request: BulkExampleImportRequest
+  ) async throws -> BulkExampleImportResult {
+    try await send(
+      path: "workspaces/\(workspaceID)/example-imports",
+      method: "POST",
+      body: request
+    )
+  }
+
+  public func exportWorkspaceBackup(workspaceID: String) async throws -> Data {
+    try await sendRaw(
+      path: "workspaces/\(workspaceID)/backup",
+      method: "GET",
+      body: nil,
+      accept: Self.workspaceArchiveMediaType,
+      contentType: nil
+    )
+  }
+
+  public func restoreWorkspaceBackup(_ archive: Data) async throws -> WorkspaceRestoreResult {
+    let data = try await sendRaw(
+      path: "workspace-restores",
+      method: "POST",
+      body: archive,
+      accept: "application/json",
+      contentType: Self.workspaceArchiveMediaType
+    )
+    do {
+      return try JSONDecoder().decode(WorkspaceRestoreResult.self, from: data)
+    } catch {
+      throw APIClientError.decoding(error.localizedDescription)
+    }
   }
 
   public func listAttempts(workspaceID: String) async throws -> [SolutionAttempt] {
@@ -163,13 +202,35 @@ public actor APIClient {
     method: String,
     body: Data?
   ) async throws -> Response {
+    let data = try await sendRaw(
+      path: path,
+      method: method,
+      body: body,
+      accept: "application/json",
+      contentType: body == nil ? nil : "application/json"
+    )
+
+    do {
+      return try JSONDecoder().decode(Response.self, from: data)
+    } catch {
+      throw APIClientError.decoding(error.localizedDescription)
+    }
+  }
+
+  private func sendRaw(
+    path: String,
+    method: String,
+    body: Data?,
+    accept: String,
+    contentType: String?
+  ) async throws -> Data {
     let url = baseURL.appendingPathComponent(path)
     var request = URLRequest(url: url, timeoutInterval: timeout)
     request.httpMethod = method
     request.httpBody = body
-    request.setValue("application/json", forHTTPHeaderField: "Accept")
-    if body != nil {
-      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue(accept, forHTTPHeaderField: "Accept")
+    if let contentType {
+      request.setValue(contentType, forHTTPHeaderField: "Content-Type")
     }
     if let bearerToken {
       request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
@@ -192,10 +253,6 @@ public actor APIClient {
       throw APIClientError.http(status: httpResponse.statusCode, detail: detail)
     }
 
-    do {
-      return try JSONDecoder().decode(Response.self, from: data)
-    } catch {
-      throw APIClientError.decoding(error.localizedDescription)
-    }
+    return data
   }
 }
