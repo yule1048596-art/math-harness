@@ -8,6 +8,8 @@
     <string>Math Harness</string>
     <key>CFBundleExecutable</key>
     <string>MathHarnessApp</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>com.yule.mathharness</string>
     <key>CFBundleInfoDictionaryVersion</key>
@@ -17,9 +19,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.12.0</string>
+    <string>0.12.1</string>
     <key>CFBundleVersion</key>
-    <string>11</string>
+    <string>12</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.education</string>
     <key>LSMinimumSystemVersion</key>

@@ -58,9 +58,16 @@ SWIFT_BIN_DIR="$(swift build \
     --configuration release \
     --show-bin-path)"
 
+print "Rendering app icon…"
+ICONSET="$BUILD_ROOT/AppIcon.iconset"
+rm -rf "$ICONSET"
+swift "$SCRIPT_DIR/generate_app_icon.swift" "$ICONSET" >/dev/null
+iconutil --convert icns --output "$BUILD_ROOT/AppIcon.icns" "$ICONSET"
+
 ditto "$SWIFT_BIN_DIR/MathHarnessApp" "$APP_CONTENTS/MacOS/MathHarnessApp"
 ditto "$BACKEND_DIST/math-harness-server" "$APP_CONTENTS/Resources/backend"
 ditto "$PACKAGE_ROOT/Resources/Info.plist" "$APP_CONTENTS/Info.plist"
+ditto "$BUILD_ROOT/AppIcon.icns" "$APP_CONTENTS/Resources/AppIcon.icns"
 chmod 755 "$APP_CONTENTS/MacOS/MathHarnessApp" \
     "$APP_CONTENTS/Resources/backend/math-harness-server"
 xattr -cr "$APP_BUNDLE"
