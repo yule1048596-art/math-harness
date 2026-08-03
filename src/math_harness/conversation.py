@@ -5,6 +5,11 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from math_harness.models import ConversationMessage, MemoryItem, MethodMatch, Workspace
+from math_harness.provider_config import (
+    ROLE_CONVERSATION,
+    resolve_role,
+    role_is_configured,
+)
 
 
 @dataclass(frozen=True)
@@ -134,6 +139,22 @@ class ExtractiveConversationSummarizer:
 
 
 def build_conversation_responder_from_env() -> ConversationResponderProtocol:
+    # 新配置优先；未配置时下面的逐变量路径保持原样，一个字都不改。
+    if role_is_configured(ROLE_CONVERSATION):
+        resolved = resolve_role(ROLE_CONVERSATION)
+        if resolved is None:
+            return OfflineConversationResponder()
+        from math_harness.providers.openai_chat import OpenAIConversationResponder
+
+        return OpenAIConversationResponder(
+            model=resolved.model,
+            reasoning_effort=resolved.reasoning_effort,
+            timeout_seconds=resolved.timeout_seconds,
+            api_key=resolved.api_key,
+            base_url=resolved.base_url,
+            provider_name=resolved.provider_name,
+        )
+
     configured = os.getenv("MATH_HARNESS_CONVERSATION_PROVIDER", "auto")
     provider = configured.strip().lower()
     if provider == "auto":

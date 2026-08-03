@@ -16,6 +16,11 @@ from math_harness.models import (
     MemoryItem,
     MemoryKind,
 )
+from math_harness.provider_config import (
+    ROLE_MEMORY_EXTRACTOR,
+    resolve_role,
+    role_is_configured,
+)
 
 MEMORY_PROMPT_VERSION = "soft-memory-extractor-v1"
 MAX_MEMORY_OUTPUT_TOKENS = 1_000
@@ -329,6 +334,22 @@ class OpenAIMemoryExtractor:
 
 
 def build_memory_extractor_from_env() -> MemoryExtractorProtocol:
+    # 新配置优先；未配置时下面的逐变量路径保持原样，一个字都不改。
+    if role_is_configured(ROLE_MEMORY_EXTRACTOR):
+        resolved = resolve_role(ROLE_MEMORY_EXTRACTOR)
+        # 没有密钥就退回停用，而不是让每一轮对话后台报错。
+        if resolved is None or not resolved.api_key:
+            return DisabledMemoryExtractor()
+        return OpenAIMemoryExtractor(
+            model=resolved.model,
+            reasoning_effort=resolved.reasoning_effort,
+            api_key=resolved.api_key,
+            base_url=resolved.base_url,
+            provider_name=resolved.provider_name,
+            structured_output_mode=resolved.structured_output_mode,
+            timeout_seconds=resolved.timeout_seconds,
+        )
+
     provider = os.getenv("MATH_HARNESS_MEMORY_EXTRACTOR", "auto").strip().lower()
     if provider == "auto":
         provider = (

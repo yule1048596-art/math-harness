@@ -316,6 +316,12 @@ public actor APIClient {
     )
   }
 
+  public func testProvider(_ request: ProviderTestRequest) async throws
+    -> ProviderTestResult
+  {
+    try await send(path: "/providers/test", method: "POST", body: request)
+  }
+
   private func send<Response: Decodable & Sendable>(
     path: String,
     method: String

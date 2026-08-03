@@ -1109,6 +1109,34 @@ class SolveEvaluationRun(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
+    # provider 配置解析失败时把原因带出来，设置界面才能告诉用户哪里写坏了；
+    # 配置正常时为 None。
+    provider_config_error: str | None = None
+
+
+class ProviderTestRequest(BaseModel):
+    """连接测试入参。密钥只用于本次请求，不落盘、不进日志、不回显。"""
+
+    base_url: str = Field(min_length=1, max_length=500)
+    model: str = Field(min_length=1, max_length=200)
+    api_key: str | None = Field(default=None, max_length=500)
+    timeout_seconds: float = Field(default=20.0, gt=0, le=120)
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped.startswith(("http://", "https://")):
+            raise ValueError("base_url must start with http:// or https://")
+        return stripped.rstrip("/")
+
+
+class ProviderTestResult(BaseModel):
+    ok: bool
+    duration_ms: int = Field(ge=0)
+    model: str | None = None
+    sample: str | None = Field(default=None, max_length=200)
+    error: str | None = Field(default=None, max_length=400)
 
 
 class ErrorResponse(BaseModel):

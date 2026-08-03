@@ -3,10 +3,59 @@ import Foundation
 public struct HealthResponse: Codable, Equatable, Sendable {
   public let status: String
   public let version: String
+  /// provider 配置解析失败时的原因；正常时为 nil。
+  public let providerConfigError: String?
 
-  public init(status: String, version: String) {
+  enum CodingKeys: String, CodingKey {
+    case status, version
+    case providerConfigError = "provider_config_error"
+  }
+
+  public init(status: String, version: String, providerConfigError: String? = nil) {
     self.status = status
     self.version = version
+    self.providerConfigError = providerConfigError
+  }
+}
+
+/// 连接测试入参。密钥只用于这一次请求，后端不落盘、不记日志、不回显。
+public struct ProviderTestRequest: Codable, Sendable {
+  public let baseURL: String
+  public let model: String
+  public let apiKey: String?
+  public let timeoutSeconds: Double
+
+  enum CodingKeys: String, CodingKey {
+    case baseURL = "base_url"
+    case model
+    case apiKey = "api_key"
+    case timeoutSeconds = "timeout_seconds"
+  }
+
+  public init(
+    baseURL: String,
+    model: String,
+    apiKey: String?,
+    timeoutSeconds: Double = 20
+  ) {
+    self.baseURL = baseURL
+    self.model = model
+    self.apiKey = apiKey
+    self.timeoutSeconds = timeoutSeconds
+  }
+}
+
+public struct ProviderTestResult: Codable, Sendable {
+  public let ok: Bool
+  public let durationMs: Int
+  public let model: String?
+  public let sample: String?
+  public let error: String?
+
+  enum CodingKeys: String, CodingKey {
+    case ok
+    case durationMs = "duration_ms"
+    case model, sample, error
   }
 }
 

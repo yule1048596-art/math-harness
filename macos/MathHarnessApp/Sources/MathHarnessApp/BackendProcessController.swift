@@ -59,7 +59,7 @@ final class BackendProcessController {
     }
 
     let fileManager = FileManager.default
-    let dataRoot = try applicationSupportDirectory()
+    let dataRoot = try Self.applicationSupportDirectory()
     try fileManager.createDirectory(at: dataRoot, withIntermediateDirectories: true)
 
     let runtimeDirectory = fileManager.temporaryDirectory
@@ -103,32 +103,28 @@ final class BackendProcessController {
     var childEnvironment = environment
     childEnvironment["MATH_HARNESS_LOCAL_TOKEN"] = token
     childEnvironment["MATH_HARNESS_DATA_DIR"] = dataRoot.path
-    childEnvironment["MATH_HARNESS_METHOD_EXTRACTOR"] =
-      AppSettings.solverProvider == .mimo && AppSettings.mimoMethodExtraction
-      ? "mimo" : "rules"
-    childEnvironment["MATH_HARNESS_TARGET_DRAFTER"] =
-      AppSettings.solverProvider == .mimo ? "mimo" : "rules"
-    childEnvironment["MATH_HARNESS_SOLVER"] = AppSettings.solverProvider.rawValue
-    childEnvironment["MATH_HARNESS_CONVERSATION_PROVIDER"] =
-      AppSettings.solverProvider == .mimo ? "mimo" : "offline"
-    childEnvironment["MATH_HARNESS_MEMORY_EXTRACTOR"] =
-      AppSettings.solverProvider == .mimo ? "mimo" : "disabled"
     childEnvironment["MATH_HARNESS_ENV_FILE"] =
       runtimeDirectory
       .appendingPathComponent("no-local-env").path
-    if AppSettings.solverProvider == .mimo {
-      guard let apiKey = try KeychainStore.readMiMoAPIKey(), !apiKey.isEmpty else {
-        throw BackendLaunchError.missingMiMoAPIKey
+    childEnvironment["MATH_HARNESS_VERIFICATION_REPAIR"] =
+      AppSettings.verificationRepair ? "true" : "false"
+    childEnvironment["MATH_HARNESS_VERIFICATION_FALLBACK"] =
+      AppSettings.verificationFallback ? "true" : "false"
+
+    // provider 档案与角色绑定。密钥各走一个变量，只在子进程环境里存在——
+    // 档案 JSON 本身不含密钥，所以可以安全落 UserDefaults。
+    let settings = AppSettings.providerSettings
+    if !settings.profiles.isEmpty {
+      childEnvironment[ProviderEnvironment.profilesKey] =
+        try ProviderEnvironment.encodedProfiles(settings.profiles)
+      childEnvironment[ProviderEnvironment.rolesKey] =
+        try ProviderEnvironment.encodedRoles(settings.resolvedRoles())
+      for profile in settings.profiles {
+        guard let key = try KeychainStore.readAPIKey(forProfile: profile.id),
+          !key.isEmpty
+        else { continue }
+        childEnvironment[ProviderEnvironment.keyEnvName(for: profile.id)] = key
       }
-      childEnvironment["MIMO_API_KEY"] = apiKey
-      childEnvironment["MATH_HARNESS_MIMO_BASE_URL"] = AppSettings.mimoBaseURL
-      childEnvironment["MATH_HARNESS_MIMO_MODEL"] = AppSettings.mimoModel
-      childEnvironment["MATH_HARNESS_MIMO_SOLVER_REASONING_EFFORT"] = "none"
-      childEnvironment["MATH_HARNESS_MIMO_CHAT_REASONING_EFFORT"] = "none"
-      childEnvironment["MATH_HARNESS_MIMO_MEMORY_MODEL"] = AppSettings.mimoModel
-      childEnvironment["MATH_HARNESS_MIMO_MEMORY_REASONING_EFFORT"] = "none"
-      childEnvironment["MATH_HARNESS_VERIFICATION_REPAIR"] = "true"
-      childEnvironment["MATH_HARNESS_VERIFICATION_FALLBACK"] = "true"
     }
     process.environment = childEnvironment
 
@@ -194,7 +190,7 @@ final class BackendProcessController {
     readyFile = nil
   }
 
-  private func applicationSupportDirectory() throws -> URL {
+  static func applicationSupportDirectory() throws -> URL {
     let base = try FileManager.default.url(
       for: .applicationSupportDirectory,
       in: .userDomainMask,
@@ -207,7 +203,7 @@ final class BackendProcessController {
   }
 
   private func backendLogURL() throws -> URL {
-    let directory = try applicationSupportDirectory()
+    let directory = try Self.applicationSupportDirectory()
       .appendingPathComponent("Logs", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     return directory.appendingPathComponent("backend.log")

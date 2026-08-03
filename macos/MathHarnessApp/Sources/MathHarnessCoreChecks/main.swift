@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.11.0"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.12.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.11.0", "ready version")
+require(ready.version == "0.12.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -202,5 +202,90 @@ let reviewObject = try JSONSerialization.jsonObject(with: reviewData) as? [Strin
 require(reviewObject?["decision"] as? String == "approve", "review decision")
 require(reviewObject?["expected_revision"] as? Int == 1, "review revision lock")
 require(reviewObject?["reviewer_note"] as? String == "checked", "review note")
+
+// --- Provider 档案与角色绑定 ---
+
+// 密钥环境变量名的生成规则必须与 Python 侧 provider_config.key_env_name 逐字一致，
+// 否则后端读不到密钥。Python 侧有同名断言。
+require(
+  ProviderEnvironment.keyEnvName(for: "deepseek-1")
+    == "MATH_HARNESS_PROVIDER_KEY__DEEPSEEK_1",
+  "key env name for dashed id"
+)
+require(
+  ProviderEnvironment.keyEnvName(for: "a.b-c") == "MATH_HARNESS_PROVIDER_KEY__A_B_C",
+  "key env name sanitization"
+)
+require(
+  ProviderEnvironment.keychainAccount(for: "abc") == "provider-key-abc",
+  "keychain account naming"
+)
+
+// 档案 JSON 键名必须与 Python 侧一致，且绝不含密钥。
+let profile = ProviderPreset.deepseek.makeProfile(id: "deepseek-1")
+let profileData = try JSONEncoder().encode(profile)
+let profileObject = try JSONSerialization.jsonObject(with: profileData) as? [String: Any]
+require(
+  profileObject?["base_url"] as? String == "https://api.deepseek.com/v1", "profile base_url key")
+require(profileObject?["default_model"] as? String == "deepseek-chat", "profile default_model key")
+require(
+  profileObject?["structured_output_mode"] as? String == "json_schema",
+  "profile structured mode key"
+)
+require(profileObject?["timeout_seconds"] != nil, "profile timeout key")
+require(profileObject?["max_output_tokens"] != nil, "profile max tokens key")
+require(profileObject?["api_key"] == nil, "profile must never carry a key")
+
+let decodedProfile = try JSONDecoder().decode(ProviderProfile.self, from: profileData)
+require(decodedProfile == profile, "profile round trip")
+
+// MiMo 的 Responses API 只保证 JSON Object，预设必须替用户选对。
+require(ProviderPreset.mimo.structuredOutputMode == .jsonObject, "mimo uses json object")
+require(ProviderPreset.openai.structuredOutputMode == .jsonSchema, "openai uses json schema")
+require(!ProviderPreset.ollama.requiresAPIKey, "local ollama needs no key")
+
+// 角色绑定 JSON。
+let bindingData = try JSONEncoder().encode(
+  RoleBinding(profile: "deepseek-1", model: "deepseek-reasoner", reasoningEffort: "high")
+)
+let bindingObject = try JSONSerialization.jsonObject(with: bindingData) as? [String: Any]
+require(bindingObject?["profile"] as? String == "deepseek-1", "binding profile key")
+require(bindingObject?["reasoning_effort"] as? String == "high", "binding effort key")
+
+// 简单档必须展开成全部五个角色。
+let simple = ProviderSettings(
+  profiles: [profile],
+  useSimpleMode: true,
+  simpleProfileID: "deepseek-1"
+)
+let simpleRoles = simple.resolvedRoles()
+require(simpleRoles.count == ModelRole.allCases.count, "simple mode covers every role")
+require(
+  ModelRole.allCases.allSatisfy { simpleRoles[$0.rawValue]?.profile == "deepseek-1" },
+  "simple mode binds every role to one profile"
+)
+
+// 没有可用档案时全部退回离线，App 仍能离线工作。
+let empty = ProviderSettings(profiles: [], useSimpleMode: true, simpleProfileID: nil)
+require(
+  empty.resolvedRoles().values.allSatisfy(\.isOffline),
+  "empty settings fall back to offline"
+)
+
+// 指向已删除档案的绑定必须退回离线，而不是把无效 ID 发给后端。
+let dangling = ProviderSettings(
+  profiles: [profile],
+  roles: [
+    ModelRole.solver.rawValue: RoleBinding(profile: "deleted-profile"),
+    ModelRole.conversation.rawValue: RoleBinding(profile: "deepseek-1"),
+  ],
+  useSimpleMode: false
+)
+let danglingRoles = dangling.resolvedRoles()
+require(danglingRoles[ModelRole.solver.rawValue]?.isOffline == true, "dangling binding falls back")
+require(
+  danglingRoles[ModelRole.conversation.rawValue]?.profile == "deepseek-1",
+  "valid binding survives"
+)
 
 print("MathHarnessCore checks passed")

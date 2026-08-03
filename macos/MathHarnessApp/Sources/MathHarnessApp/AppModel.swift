@@ -9,6 +9,12 @@ enum BackendPhase: Equatable {
   case failed(message: String)
 }
 
+/// 连接测试的结果：请求本身是否打通，以及打通后后端的判定。
+enum ProbeOutcome {
+  case completed(ProviderTestResult)
+  case transportFailure(String)
+}
+
 @MainActor
 final class AppModel: ObservableObject {
   @Published private(set) var backendPhase: BackendPhase = .idle
@@ -108,6 +114,18 @@ final class AppModel: ObservableObject {
     memoryPollingTask?.cancel()
     memoryPollingTask = nil
     await start()
+  }
+
+  /// 连接测试。密钥只随这一次请求发给本地后端，不写入任何持久存储。
+  func testProvider(_ request: ProviderTestRequest) async -> ProbeOutcome {
+    guard let api else {
+      return .transportFailure("数学引擎尚未就绪，请稍候重试。")
+    }
+    do {
+      return .completed(try await api.testProvider(request))
+    } catch {
+      return .transportFailure(error.localizedDescription)
+    }
   }
 
   func refreshWorkspaces() async {

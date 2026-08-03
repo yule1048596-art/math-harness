@@ -12,6 +12,11 @@ from math_harness.models import (
     SolveMathTarget,
     VerificationMode,
 )
+from math_harness.provider_config import (
+    ROLE_TARGET_DRAFTER,
+    resolve_role,
+    role_is_configured,
+)
 
 
 class TargetDrafterProtocol(Protocol):
@@ -263,6 +268,27 @@ class FallbackTargetDrafter:
 
 
 def build_target_drafter_from_env() -> TargetDrafterProtocol:
+    # 新配置优先；未配置时下面的逐变量路径保持原样，一个字都不改。
+    if role_is_configured(ROLE_TARGET_DRAFTER):
+        resolved = resolve_role(ROLE_TARGET_DRAFTER)
+        if resolved is None:
+            return RuleBasedTargetDrafter()
+        from math_harness.providers.openai_target import OpenAIStructuredTargetDrafter
+
+        return FallbackTargetDrafter(
+            OpenAIStructuredTargetDrafter(
+                model=resolved.model,
+                reasoning_effort=resolved.reasoning_effort,
+                max_output_tokens=min(resolved.max_output_tokens, 4_000),
+                timeout_seconds=resolved.timeout_seconds,
+                api_key=resolved.api_key,
+                base_url=resolved.base_url,
+                provider_name=resolved.provider_name,
+                structured_output_mode=resolved.structured_output_mode,
+                json_object_retries=resolved.json_object_retries,
+            )
+        )
+
     configured_provider = os.getenv("MATH_HARNESS_TARGET_DRAFTER")
     if configured_provider is None:
         solver_provider = os.getenv("MATH_HARNESS_SOLVER", "sympy").strip().lower()

@@ -56,6 +56,8 @@ from math_harness.models import (
     MethodStatusUpdate,
     MethodVersion,
     ProblemExample,
+    ProviderTestRequest,
+    ProviderTestResult,
     SolutionAttempt,
     SolutionCorrection,
     SolveEvaluationRequest,
@@ -67,6 +69,8 @@ from math_harness.models import (
     WorkspaceRestoreResult,
 )
 from math_harness.portability import ARCHIVE_MEDIA_TYPE, MAX_ARCHIVE_BYTES
+from math_harness.provider_config import provider_config_error
+from math_harness.provider_probe import probe_provider
 from math_harness.service import MathHarnessService
 
 
@@ -126,7 +130,16 @@ def create_app(
 
     @app.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
-        return HealthResponse(status="ok", version=__version__)
+        return HealthResponse(
+            status="ok",
+            version=__version__,
+            provider_config_error=provider_config_error(),
+        )
+
+    @app.post("/providers/test", response_model=ProviderTestResult)
+    def test_provider(request: ProviderTestRequest) -> ProviderTestResult:
+        # 密钥只用于本次探测：不写库、不记日志、不出现在返回值里。
+        return probe_provider(request)
 
     @app.post("/workspaces", response_model=Workspace, status_code=201)
     def create_workspace(request: WorkspaceCreate) -> Workspace:

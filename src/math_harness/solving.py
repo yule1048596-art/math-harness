@@ -21,6 +21,11 @@ from math_harness.models import (
     VerificationMode,
     VerificationReport,
 )
+from math_harness.provider_config import (
+    ROLE_SOLVER,
+    resolve_role,
+    role_is_configured,
+)
 from math_harness.verifier import SolutionVerifier
 
 
@@ -563,6 +568,34 @@ class FallbackSolutionGenerator:
 
 
 def build_solution_generator_from_env() -> SolutionGeneratorProtocol:
+    # 新配置优先；未配置时下面的逐变量路径保持原样，一个字都不改。
+    if role_is_configured(ROLE_SOLVER):
+        resolved = resolve_role(ROLE_SOLVER)
+        if resolved is None:
+            return OfflineSympySolutionGenerator()
+        from math_harness.providers.openai_solver import OpenAISolutionGenerator
+
+        return FallbackSolutionGenerator(
+            OpenAISolutionGenerator(
+                model=resolved.model,
+                reasoning_effort=resolved.reasoning_effort,
+                timeout_seconds=resolved.timeout_seconds,
+                api_key=resolved.api_key,
+                base_url=resolved.base_url,
+                provider_name=resolved.provider_name,
+                structured_output_mode=resolved.structured_output_mode,
+                json_object_retries=resolved.json_object_retries,
+            ),
+            verification_repair_enabled=_boolean_env(
+                "MATH_HARNESS_VERIFICATION_REPAIR",
+                True,
+            ),
+            verification_fallback_enabled=_boolean_env(
+                "MATH_HARNESS_VERIFICATION_FALLBACK",
+                True,
+            ),
+        )
+
     provider = os.getenv("MATH_HARNESS_SOLVER", "sympy").strip().lower()
     if provider == "sympy":
         return OfflineSympySolutionGenerator()

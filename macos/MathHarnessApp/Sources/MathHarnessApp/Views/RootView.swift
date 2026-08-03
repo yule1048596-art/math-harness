@@ -80,6 +80,13 @@ struct RootView: View {
           .help("导入题库、备份或恢复工作区")
           .disabled(model.isDataOperationInProgress)
         }
+
+        // 刻意放在工作区判断之外：首次启动还没有任何工作区时，恰恰是最需要
+        // 配置模型服务的时刻，把入口挡在工作区后面是本末倒置。
+        SettingsLink {
+          Label("设置", systemImage: "gearshape")
+        }
+        .help("模型服务、角色分配与通用设置（⌘,）")
       }
     }
     .sheet(isPresented: $showingCreateWorkspace) {
