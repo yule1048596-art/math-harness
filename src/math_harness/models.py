@@ -194,6 +194,23 @@ class ConversationCreate(BaseModel):
         return " ".join(value.split())
 
 
+class ConversationStatus(StrEnum):
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class ConversationRename(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("conversation title cannot be blank")
+        return normalized
+
+
 class Conversation(BaseModel):
     id: str
     workspace_id: str
@@ -201,6 +218,7 @@ class Conversation(BaseModel):
     summary: str = ""
     summary_through_ordinal: int = Field(default=0, ge=0)
     message_count: int = Field(default=0, ge=0)
+    status: ConversationStatus = ConversationStatus.ACTIVE
     # 这个对话选定的模型服务；为空表示跟随全局设置。
     provider: ProviderOverride | None = None
     created_at: datetime

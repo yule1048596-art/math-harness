@@ -57,6 +57,7 @@ from math_harness.models import (
     ConversationMessage,
     ConversationMessageKind,
     ConversationRole,
+    ConversationStatus,
     ConversationTurnRequest,
     ConversationTurnResult,
     EvaluationCaseResult,
@@ -263,6 +264,30 @@ class MathHarnessService:
             self.target_drafter,
             build_target_drafter_from_resolved,
             override,
+        )
+
+    def rename_conversation(
+        self, workspace_id: str, conversation_id: str, title: str
+    ) -> Conversation:
+        return self.workspaces.store(workspace_id).rename_conversation(
+            conversation_id, title
+        )
+
+    def set_conversation_status(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        status: ConversationStatus,
+    ) -> Conversation:
+        return self.workspaces.store(workspace_id).set_conversation_status(
+            conversation_id, status
+        )
+
+    def search_conversation_messages(
+        self, workspace_id: str, query: str, limit: int = 50
+    ) -> list[ConversationMessage]:
+        return self.workspaces.store(workspace_id).search_conversation_messages(
+            query, limit
         )
 
     def set_conversation_provider(

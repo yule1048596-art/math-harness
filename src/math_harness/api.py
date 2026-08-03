@@ -22,6 +22,8 @@ from math_harness.models import (
     ConversationCaptureResult,
     ConversationCreate,
     ConversationMessage,
+    ConversationRename,
+    ConversationStatus,
     ConversationTurnRequest,
     ConversationTurnResult,
     EvaluationRequest,
@@ -173,6 +175,17 @@ def create_app(
         return service.list_conversations(workspace_id)
 
     @app.get(
+        "/workspaces/{workspace_id}/conversations/search",
+        response_model=list[ConversationMessage],
+    )
+    def search_conversation_messages(
+        workspace_id: str,
+        q: str = Query(min_length=1, max_length=500),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> list[ConversationMessage]:
+        return service.search_conversation_messages(workspace_id, q, limit)
+
+    @app.get(
         "/workspaces/{workspace_id}/conversations/{conversation_id}",
         response_model=Conversation,
     )
@@ -191,6 +204,28 @@ def create_app(
         conversation_id: str,
     ) -> list[ConversationMessage]:
         return service.list_conversation_messages(workspace_id, conversation_id)
+
+    @app.patch(
+        "/workspaces/{workspace_id}/conversations/{conversation_id}",
+        response_model=Conversation,
+    )
+    def rename_conversation(
+        workspace_id: str,
+        conversation_id: str,
+        request: ConversationRename,
+    ) -> Conversation:
+        return service.rename_conversation(workspace_id, conversation_id, request.title)
+
+    @app.put(
+        "/workspaces/{workspace_id}/conversations/{conversation_id}/status",
+        response_model=Conversation,
+    )
+    def set_conversation_status(
+        workspace_id: str,
+        conversation_id: str,
+        status: ConversationStatus,
+    ) -> Conversation:
+        return service.set_conversation_status(workspace_id, conversation_id, status)
 
     @app.put(
         "/workspaces/{workspace_id}/conversations/{conversation_id}/provider",

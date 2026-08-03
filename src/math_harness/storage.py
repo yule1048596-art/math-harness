@@ -21,6 +21,7 @@ from math_harness.models import (
     ConversationMessage,
     ConversationMessageKind,
     ConversationRole,
+    ConversationStatus,
     EvaluationRun,
     ExampleVersion,
     KnowledgeStatus,
@@ -602,6 +603,13 @@ class WorkspaceStore:
                     ON solve_evaluation_runs(workspace_id, created_at);
                 """
             )
+            # 归档不删除：与人工纠正、方法卡版本快照同一条审计原则。
+            self._ensure_column(
+                connection,
+                "conversations",
+                "status",
+                "TEXT NOT NULL DEFAULT 'active'",
+            )
             # 每个对话记住自己的模型选择，切换后新回合继续用它。
             self._ensure_column(
                 connection, "conversations", "provider_profile_id", "TEXT"
@@ -825,6 +833,76 @@ class WorkspaceStore:
         if not normalized:
             return fallback
         return normalized if len(normalized) <= 42 else normalized[:41] + "…"
+
+    def rename_conversation(self, conversation_id: str, title: str) -> Conversation:
+        # 归一化放在存储层：service 直调时也要生效，不能只靠请求模型的校验器。
+        normalized = " ".join(title.split())
+        if not normalized:
+            raise ValueError("conversation title cannot be blank")
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE conversations SET title = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    normalized,
+                    utc_now().isoformat(),
+                    conversation_id,
+                    self.workspace_id,
+                ),
+            )
+        return self.get_conversation(conversation_id)
+
+    def set_conversation_status(
+        self, conversation_id: str, status: ConversationStatus
+    ) -> Conversation:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE conversations SET status = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    status.value,
+                    utc_now().isoformat(),
+                    conversation_id,
+                    self.workspace_id,
+                ),
+            )
+        return self.get_conversation(conversation_id)
+
+    def search_conversation_messages(
+        self,
+        query: str,
+        limit: int = 50,
+    ) -> list[ConversationMessage]:
+        """按子串搜索本工作区的会话消息。
+
+        这里刻意不上 FTS5：记忆模块那套靠三个触发器维护，而 `portability` 会逐字校验
+        触发器 SQL 做防篡改，多一套就多一处会让备份失效的耦合。中文子串匹配用 LIKE
+        本来就比 n-gram 更准，个人工作区几千条消息也远没到需要 bm25 排序的量级。
+        """
+
+        normalized = " ".join(query.split())
+        if not normalized:
+            return []
+        # `%` 和 `_` 是 LIKE 的通配符；用户搜它们时应当按字面处理。
+        escaped = (
+            normalized.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM conversation_messages
+                WHERE workspace_id = ? AND content LIKE ? ESCAPE '\\'
+                ORDER BY created_at DESC, ordinal DESC
+                LIMIT ?
+                """,
+                (self.workspace_id, pattern, max(1, min(limit, 200))),
+            ).fetchall()
+        return [self._row_to_conversation_message(row) for row in rows]
 
     def set_conversation_provider(
         self,
@@ -1084,6 +1162,7 @@ class WorkspaceStore:
             summary=row["summary"],
             summary_through_ordinal=int(row["summary_through_ordinal"]),
             message_count=int(row["message_count"]),
+            status=ConversationStatus(row["status"]),
             provider=(
                 ProviderOverride(
                     profile_id=row["provider_profile_id"], model=row["model"]
