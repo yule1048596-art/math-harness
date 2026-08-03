@@ -979,15 +979,26 @@ class WorkspaceStore:
             )
         return self._row_to_conversation(row)
 
-    def list_conversations(self) -> list[Conversation]:
+    def list_conversations(self, include_archived: bool = False) -> list[Conversation]:
+        """默认只列出活跃对话。
+
+        归档如果不把对话从列表里拿掉，这个动作在界面上就等于什么都没做。数据仍在，
+        `include_archived=True` 随时能取回。
+        """
+
+        clauses = ["workspace_id = ?"]
+        parameters: list[object] = [self.workspace_id]
+        if not include_archived:
+            clauses.append("status <> ?")
+            parameters.append(ConversationStatus.ARCHIVED.value)
         with self.connection() as connection:
             rows = connection.execute(
-                """
+                f"""
                 SELECT * FROM conversations
-                WHERE workspace_id = ?
+                WHERE {" AND ".join(clauses)}
                 ORDER BY updated_at DESC, id DESC
                 """,
-                (self.workspace_id,),
+                parameters,
             ).fetchall()
         return [self._row_to_conversation(row) for row in rows]
 

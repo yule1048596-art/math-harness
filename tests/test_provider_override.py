@@ -221,6 +221,38 @@ def test_provider_endpoint_round_trips(tmp_path, configured):
     assert response.json()["provider"]["profile_id"] == "strong"
 
 
+def test_clearing_the_provider_accepts_an_empty_object(tmp_path, configured):
+    """客户端清空时发的就是空对象，此前会被判 422——「跟随全局设置」整个是坏的。"""
+
+    client = TestClient(create_app(tmp_path))
+    workspace = client.post("/workspaces", json={"name": "清空"}).json()
+    conversation = client.post(
+        f"/workspaces/{workspace['id']}/conversations", json={"title": ""}
+    ).json()
+    path = f"/workspaces/{workspace['id']}/conversations/{conversation['id']}/provider"
+    client.put(path, json={"profile_id": "strong"})
+
+    response = client.put(path, json={})
+
+    assert response.status_code == 200
+    assert response.json()["provider"] is None
+
+
+def test_clearing_the_provider_accepts_no_body(tmp_path, configured):
+    client = TestClient(create_app(tmp_path))
+    workspace = client.post("/workspaces", json={"name": "无 body"}).json()
+    conversation = client.post(
+        f"/workspaces/{workspace['id']}/conversations", json={"title": ""}
+    ).json()
+    path = f"/workspaces/{workspace['id']}/conversations/{conversation['id']}/provider"
+    client.put(path, json={"profile_id": "strong"})
+
+    response = client.put(path)
+
+    assert response.status_code == 200
+    assert response.json()["provider"] is None
+
+
 def test_conversation_provider_never_carries_a_key(tmp_path, configured):
     service = MathHarnessService(tmp_path)
     workspace = service.create_workspace(WorkspaceCreate(name="密钥"))

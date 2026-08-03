@@ -18,6 +18,7 @@ from math_harness.errors import (
 from math_harness.models import (
     BulkExampleImportRequest,
     BulkExampleImportResult,
+    ClearableProviderOverride,
     Conversation,
     ConversationCaptureResult,
     ConversationCreate,
@@ -171,8 +172,11 @@ def create_app(
         "/workspaces/{workspace_id}/conversations",
         response_model=list[Conversation],
     )
-    def list_conversations(workspace_id: str) -> list[Conversation]:
-        return service.list_conversations(workspace_id)
+    def list_conversations(
+        workspace_id: str,
+        include_archived: bool = False,
+    ) -> list[Conversation]:
+        return service.list_conversations(workspace_id, include_archived)
 
     @app.get(
         "/workspaces/{workspace_id}/conversations/search",
@@ -234,9 +238,18 @@ def create_app(
     def set_conversation_provider(
         workspace_id: str,
         conversation_id: str,
-        request: ProviderOverride | None = None,
+        request: ClearableProviderOverride | None = None,
     ) -> Conversation:
-        return service.set_conversation_provider(workspace_id, conversation_id, request)
+        # 清空（回到跟随全局设置）时客户端发的是空对象，此前会因缺 profile_id 被判
+        # 422——菜单里的「跟随全局设置」整个是坏的。空对象与不带 body 一律视为清空。
+        override = (
+            ProviderOverride(profile_id=request.profile_id, model=request.model)
+            if request is not None and request.profile_id
+            else None
+        )
+        return service.set_conversation_provider(
+            workspace_id, conversation_id, override
+        )
 
     @app.post(
         "/workspaces/{workspace_id}/conversations/{conversation_id}/turns",

@@ -738,8 +738,10 @@ class MathHarnessService:
     ) -> Conversation:
         return self.workspaces.store(workspace_id).get_conversation(conversation_id)
 
-    def list_conversations(self, workspace_id: str) -> list[Conversation]:
-        return self.workspaces.store(workspace_id).list_conversations()
+    def list_conversations(
+        self, workspace_id: str, include_archived: bool = False
+    ) -> list[Conversation]:
+        return self.workspaces.store(workspace_id).list_conversations(include_archived)
 
     def list_conversation_messages(
         self,

@@ -347,7 +347,8 @@ public actor APIClient {
   ) async throws -> Conversation {
     let path = "/workspaces/\(workspaceID)/conversations/\(conversationID)/provider"
     guard let provider else {
-      return try await send(path: path, method: "PUT", body: [String: String]())
+      // 清空即「跟随全局设置」。后端把空对象和不带 body 都当作清空。
+      return try await send(path: path, method: "PUT")
     }
     return try await send(path: path, method: "PUT", body: provider)
   }

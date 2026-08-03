@@ -169,13 +169,17 @@ final class AppModel: ObservableObject {
     else { return }
     let next: ConversationStatus = conversation.status == .archived ? .active : .archived
     do {
-      replaceConversation(
-        try await api.setConversationStatus(
-          workspaceID: workspaceID,
-          conversationID: conversation.id,
-          status: next
-        )
+      _ = try await api.setConversationStatus(
+        workspaceID: workspaceID,
+        conversationID: conversation.id,
+        status: next
       )
+      // 归档后列表不再包含它，所以要重新拉取而不是原地替换；当前选中的那个被归档
+      // 时还得切走，否则界面会停在一个已经不在列表里的对话上。
+      conversations = try await api.listConversations(workspaceID: workspaceID)
+      if !conversations.contains(where: { $0.id == selectedConversationID }) {
+        selectConversation(conversations.first?.id)
+      }
     } catch {
       errorMessage = error.localizedDescription
     }

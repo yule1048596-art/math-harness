@@ -114,6 +114,24 @@ def test_server_reported_error_comes_back_as_text():
     assert "错误" in client.call_tool("t", {})
 
 
+def test_sse_framed_response_is_parsed():
+    """请求头声明了接受 SSE，就得认得它——此前只按纯 JSON 解析。"""
+
+    def sse(request, timeout=None):
+        body = (
+            'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"tools":[]}}\n\n'
+        )
+        return _FakeResponse(body.encode("utf-8"))
+
+    assert MCPClient(opener=sse).initialize() == {"tools": []}
+
+
+def test_plain_json_still_parses():
+    client = MCPClient(opener=_opener([{"result": {"ok": True}}]))
+
+    assert client.initialize() == {"ok": True}
+
+
 def test_transport_failure_raises_mcp_error():
     client = MCPClient(opener=_opener([OSError("boom")]))
 

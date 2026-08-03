@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any
 
 from math_harness.tools.mcp_client import MCPClient, MCPError
@@ -79,8 +80,6 @@ class ToolSession:
 
     def execute(self, name: str, raw_arguments: str | dict[str, Any]) -> str:
         """执行一次调用并记录。预算耗尽或失败都返回给模型看的文本，不抛异常。"""
-
-        from time import perf_counter
 
         if self.calls_used >= self.max_tool_calls:
             return "工具调用次数已达上限，请基于现有信息作答。"

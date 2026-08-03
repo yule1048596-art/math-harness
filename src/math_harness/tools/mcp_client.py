@@ -27,6 +27,25 @@ class MCPError(RuntimeError):
     """MCP 传输或协议层失败。调用方应当降级，而不是让整条求解路径崩掉。"""
 
 
+def _extract_json(body: str) -> str:
+    """从响应体里取出 JSON，兼容 SSE 帧。
+
+    请求头里声明了 `Accept: application/json, text/event-stream`，服务器据此完全
+    可以回 SSE。此前只按纯 JSON 解析，等于声明了一种自己不认的格式；Wolfram 目前
+    回纯 JSON，所以这条路一直没被走到。
+    """
+
+    stripped = body.strip()
+    if not stripped.startswith("event:") and not stripped.startswith("data:"):
+        return stripped
+    payloads = [
+        line[len("data:") :].strip()
+        for line in stripped.splitlines()
+        if line.startswith("data:")
+    ]
+    return payloads[-1] if payloads else stripped
+
+
 @dataclass(frozen=True)
 class MCPTool:
     name: str
@@ -94,7 +113,7 @@ class MCPClient:
             raise MCPError(f"{exc.__class__.__name__}: {exc}") from exc
 
         try:
-            decoded = json.loads(body)
+            decoded = json.loads(_extract_json(body))
         except json.JSONDecodeError as exc:
             raise MCPError(f"MCP response was not JSON: {exc}") from exc
         if "error" in decoded:

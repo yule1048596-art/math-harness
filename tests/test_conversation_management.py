@@ -75,6 +75,44 @@ def test_conversations_start_active(workspace_with_history):
     assert conversation.status is ConversationStatus.ACTIVE
 
 
+def test_archived_conversations_drop_out_of_the_list(workspace_with_history):
+    """归档如果不把对话从列表里拿掉，这个动作在界面上就等于什么都没做。"""
+
+    service, workspace, conversation = workspace_with_history
+    service.set_conversation_status(
+        workspace.id, conversation.id, ConversationStatus.ARCHIVED
+    )
+
+    listed = service.list_conversations(workspace.id)
+
+    assert all(item.id != conversation.id for item in listed)
+
+
+def test_archived_conversations_are_retrievable_on_demand(workspace_with_history):
+    service, workspace, conversation = workspace_with_history
+    service.set_conversation_status(
+        workspace.id, conversation.id, ConversationStatus.ARCHIVED
+    )
+
+    listed = service.list_conversations(workspace.id, include_archived=True)
+
+    assert any(item.id == conversation.id for item in listed)
+
+
+def test_restoring_puts_the_conversation_back_in_the_list(workspace_with_history):
+    service, workspace, conversation = workspace_with_history
+    service.set_conversation_status(
+        workspace.id, conversation.id, ConversationStatus.ARCHIVED
+    )
+    service.set_conversation_status(
+        workspace.id, conversation.id, ConversationStatus.ACTIVE
+    )
+
+    assert any(
+        item.id == conversation.id for item in service.list_conversations(workspace.id)
+    )
+
+
 def test_archiving_never_deletes_messages(workspace_with_history):
     """归档不删除——与人工纠正、方法卡版本快照同一条审计原则。"""
 

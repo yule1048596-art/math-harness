@@ -255,6 +255,17 @@ class ProviderOverride(BaseModel):
     model: str | None = Field(default=None, max_length=200)
 
 
+class ClearableProviderOverride(BaseModel):
+    """接口入参：所有字段可省略，用来表达「清空，回到跟随全局设置」。
+
+    `ProviderOverride` 要求 `profile_id`，客户端清空时发的空对象会被判 422。这个
+    宽松版本只用在入口，落库前仍然转回 `ProviderOverride`。
+    """
+
+    profile_id: str | None = Field(default=None, max_length=64)
+    model: str | None = Field(default=None, max_length=200)
+
+
 class ConversationTurnRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
     # 不填时按对话自己记住的选择，再退回全局设置。
