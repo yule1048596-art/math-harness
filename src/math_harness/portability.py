@@ -44,6 +44,70 @@ _REQUIRED_TABLES = {
 _WORKSPACE_TABLES = _REQUIRED_TABLES | {
     "conversations",
     "conversation_messages",
+    "memory_items",
+    "memory_extraction_jobs",
+    "conversation_memory_cursors",
+    "memory_settings",
+}
+_MEMORY_TABLES = {
+    "memory_items",
+    "memory_extraction_jobs",
+    "conversation_memory_cursors",
+    "memory_settings",
+}
+_MEMORY_FTS_TABLES = {
+    "memory_items_fts",
+    "memory_items_fts_data",
+    "memory_items_fts_idx",
+    "memory_items_fts_docsize",
+    "memory_items_fts_config",
+}
+_MEMORY_TRIGGERS = {"memory_items_ai", "memory_items_ad", "memory_items_au"}
+
+
+def _normalize_schema_sql(value: str | None) -> str:
+    return " ".join((value or "").split()).casefold()
+
+
+_MEMORY_FTS_SQL = _normalize_schema_sql(
+    """
+    CREATE VIRTUAL TABLE memory_items_fts USING fts5(
+        content,
+        search_text,
+        content='memory_items',
+        content_rowid='rowid',
+        tokenize='unicode61 remove_diacritics 2'
+    )
+    """
+)
+_MEMORY_TRIGGER_SQL = {
+    "memory_items_ai": _normalize_schema_sql(
+        """
+        CREATE TRIGGER memory_items_ai AFTER INSERT ON memory_items BEGIN
+            INSERT INTO memory_items_fts(rowid, content, search_text)
+            VALUES (new.rowid, new.content, new.search_text);
+        END
+        """
+    ),
+    "memory_items_ad": _normalize_schema_sql(
+        """
+        CREATE TRIGGER memory_items_ad AFTER DELETE ON memory_items BEGIN
+            INSERT INTO memory_items_fts(memory_items_fts, rowid, content, search_text)
+            VALUES ('delete', old.rowid, old.content, old.search_text);
+        END
+        """
+    ),
+    "memory_items_au": _normalize_schema_sql(
+        """
+        CREATE TRIGGER memory_items_au
+        AFTER UPDATE OF content, search_text ON memory_items BEGIN
+            INSERT INTO memory_items_fts(memory_items_fts, rowid, content, search_text)
+            VALUES ('delete', old.rowid, old.content, old.search_text);
+            INSERT INTO memory_items_fts(rowid, content, search_text)
+            VALUES (new.rowid, new.content, new.search_text);
+        END
+        """
+    ),
 }
 _REQUIRED_INDEXES = {
     "idx_evaluation_runs_workspace",
@@ -57,6 +121,18 @@ _REQUIRED_INDEXES = {
 _WORKSPACE_INDEXES = _REQUIRED_INDEXES | {
     "idx_conversations_workspace",
     "idx_conversation_messages_conversation",
+    "idx_memory_items_workspace",
+    "idx_memory_items_fingerprint",
+    "idx_memory_jobs_workspace",
+    "idx_memory_jobs_conversation",
+    "idx_memory_cursors_workspace",
+}
+_MEMORY_INDEXES = {
+    "idx_memory_items_workspace",
+    "idx_memory_items_fingerprint",
+    "idx_memory_jobs_workspace",
+    "idx_memory_jobs_conversation",
+    "idx_memory_cursors_workspace",
 }
 _TABLE_COLUMNS = {
     "examples": {
@@ -181,6 +257,55 @@ _TABLE_COLUMNS = {
         "verification_status",
         "method_keys_json",
         "created_at",
+    },
+    "memory_items": {
+        "id",
+        "workspace_id",
+        "kind",
+        "content",
+        "normalized_fingerprint",
+        "search_text",
+        "tags_json",
+        "status",
+        "pinned",
+        "source",
+        "conversation_id",
+        "source_message_id",
+        "evidence",
+        "supersedes_id",
+        "created_at",
+        "updated_at",
+    },
+    "memory_extraction_jobs": {
+        "id",
+        "workspace_id",
+        "conversation_id",
+        "from_ordinal",
+        "through_ordinal",
+        "source_revision",
+        "status",
+        "attempts",
+        "provider",
+        "model",
+        "extracted_count",
+        "input_tokens",
+        "output_tokens",
+        "duration_ms",
+        "error",
+        "created_at",
+        "started_at",
+        "completed_at",
+    },
+    "conversation_memory_cursors": {
+        "conversation_id",
+        "workspace_id",
+        "through_ordinal",
+        "updated_at",
+    },
+    "memory_settings": {
+        "workspace_id",
+        "automatic_extraction_enabled",
+        "updated_at",
     },
 }
 
@@ -366,19 +491,20 @@ def _validate_database(
         schema_rows = connection.execute(
             "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
         ).fetchall()
-        if any(row["type"] in {"trigger", "view"} for row in schema_rows):
-            raise InvalidPortableData(
-                "workspace database cannot contain triggers or views"
-            )
+        if any(row["type"] == "view" for row in schema_rows):
+            raise InvalidPortableData("workspace database cannot contain views")
         unsupported_objects = {
-            row["name"] for row in schema_rows if row["type"] not in {"table", "index"}
+            row["name"]
+            for row in schema_rows
+            if row["type"] not in {"table", "index", "trigger"}
         }
         if unsupported_objects:
             raise InvalidPortableData(
                 "workspace database contains unsupported schema objects: "
                 + ", ".join(sorted(unsupported_objects))
             )
-        tables = {row["name"] for row in schema_rows if row["type"] == "table"}
+        all_tables = {row["name"] for row in schema_rows if row["type"] == "table"}
+        tables = all_tables - _MEMORY_FTS_TABLES
         unknown_tables = tables - _WORKSPACE_TABLES
         missing_tables = _REQUIRED_TABLES - tables
         if unknown_tables:
@@ -391,9 +517,32 @@ def _validate_database(
                 "workspace database is missing required tables: "
                 + ", ".join(sorted(missing_tables))
             )
+        memory_present = bool(tables & _MEMORY_TABLES)
+        if memory_present and not _MEMORY_TABLES <= tables:
+            raise InvalidPortableData(
+                "workspace database has an incomplete memory schema"
+            )
+        fts_present = all_tables & _MEMORY_FTS_TABLES
+        if memory_present and fts_present != _MEMORY_FTS_TABLES:
+            raise InvalidPortableData(
+                "workspace database has an incomplete memory FTS index"
+            )
+        if not memory_present and fts_present:
+            raise InvalidPortableData(
+                "workspace database has an orphaned memory FTS index"
+            )
+        truly_unknown_tables = all_tables - _WORKSPACE_TABLES - _MEMORY_FTS_TABLES
+        if truly_unknown_tables:
+            raise InvalidPortableData(
+                "workspace database contains unsupported tables: "
+                + ", ".join(sorted(truly_unknown_tables))
+            )
         indexes = {row["name"] for row in schema_rows if row["type"] == "index"}
         unknown_indexes = indexes - _WORKSPACE_INDEXES
-        missing_indexes = _REQUIRED_INDEXES - indexes
+        required_indexes = _REQUIRED_INDEXES | (
+            _MEMORY_INDEXES if memory_present else set()
+        )
+        missing_indexes = required_indexes - indexes
         if unknown_indexes or missing_indexes:
             details = []
             if unknown_indexes:
@@ -405,10 +554,41 @@ def _validate_database(
                 + "; ".join(details)
                 + ")"
             )
+        triggers = {row["name"] for row in schema_rows if row["type"] == "trigger"}
+        if triggers - _MEMORY_TRIGGERS:
+            raise InvalidPortableData(
+                "workspace database contains unsupported triggers or views: "
+                + ", ".join(sorted(triggers - _MEMORY_TRIGGERS))
+            )
+        if memory_present and triggers != _MEMORY_TRIGGERS:
+            raise InvalidPortableData(
+                "workspace database has incomplete memory triggers"
+            )
+        if not memory_present and triggers:
+            raise InvalidPortableData("workspace database has orphaned memory triggers")
+        for row in schema_rows:
+            if row["type"] != "trigger" or row["name"] not in _MEMORY_TRIGGER_SQL:
+                continue
+            if _normalize_schema_sql(row["sql"]) != _MEMORY_TRIGGER_SQL[row["name"]]:
+                raise InvalidPortableData(
+                    f"workspace database has unsupported trigger definition: {row['name']}"
+                )
         for row in schema_rows:
             sql = (row["sql"] or "").lstrip().upper()
-            if sql.startswith("CREATE VIRTUAL TABLE"):
-                raise InvalidPortableData("virtual tables are not allowed in backups")
+            if (
+                sql.startswith("CREATE VIRTUAL TABLE")
+                and row["name"] != "memory_items_fts"
+            ):
+                raise InvalidPortableData(
+                    "unsupported virtual table in workspace backup"
+                )
+            if (
+                row["name"] == "memory_items_fts"
+                and _normalize_schema_sql(row["sql"]) != _MEMORY_FTS_SQL
+            ):
+                raise InvalidPortableData(
+                    "workspace database has unsupported memory FTS definition"
+                )
 
         counts: dict[str, int] = {}
         for table in sorted(tables):

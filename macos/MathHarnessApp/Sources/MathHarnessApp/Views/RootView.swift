@@ -3,9 +3,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct RootView: View {
+  private enum InspectorPane: Equatable {
+    case knowledge
+    case memory
+  }
+
   @EnvironmentObject private var model: AppModel
   @State private var showingCreateWorkspace = false
-  @State private var showingKnowledge = true
+  @State private var inspectorPane: InspectorPane? = .knowledge
   @State private var importDraft: CorpusImportDraft?
   @State private var noticeMessage: String?
 
@@ -16,9 +21,23 @@ struct RootView: View {
     } detail: {
       detail
     }
-    .inspector(isPresented: $showingKnowledge) {
-      KnowledgeInspectorView()
-        .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
+    .inspector(
+      isPresented: Binding(
+        get: { inspectorPane != nil },
+        set: { if !$0 { inspectorPane = nil } }
+      )
+    ) {
+      Group {
+        switch inspectorPane {
+        case .knowledge:
+          KnowledgeInspectorView()
+        case .memory:
+          MemoryInspectorView()
+        case nil:
+          EmptyView()
+        }
+      }
+      .inspectorColumnWidth(min: 280, ideal: 340, max: 460)
     }
     .toolbar {
       ToolbarItemGroup(placement: .primaryAction) {
@@ -31,11 +50,18 @@ struct RootView: View {
           .help("刷新当前工作区")
 
           Button {
-            showingKnowledge.toggle()
+            inspectorPane = inspectorPane == .knowledge ? nil : .knowledge
           } label: {
             Label("知识库", systemImage: "books.vertical")
           }
-          .help(showingKnowledge ? "隐藏知识库" : "显示知识库")
+          .help(inspectorPane == .knowledge ? "隐藏知识库" : "显示知识库")
+
+          Button {
+            inspectorPane = inspectorPane == .memory ? nil : .memory
+          } label: {
+            Label("记忆", systemImage: "brain.head.profile")
+          }
+          .help(inspectorPane == .memory ? "隐藏记忆工坊" : "显示记忆工坊")
 
           Menu {
             Button("导入题库……", systemImage: "square.and.arrow.down.on.square") {

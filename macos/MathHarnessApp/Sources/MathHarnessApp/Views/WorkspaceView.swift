@@ -73,12 +73,19 @@ struct WorkspaceView: View {
       Label("\(model.methods.count) 张方法卡", systemImage: "books.vertical")
         .font(.caption)
         .foregroundStyle(.secondary)
+      Label("\(activeMemoryCount) 条记忆", systemImage: "brain.head.profile")
+        .font(.caption)
+        .foregroundStyle(.secondary)
       Label("\(model.messages.count) 条消息", systemImage: "text.bubble")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
     .padding(.horizontal, 18)
     .frame(minHeight: 58)
+  }
+
+  private var activeMemoryCount: Int {
+    model.memories.count { $0.status == .active }
   }
 }
 
@@ -295,6 +302,16 @@ private struct ConversationComposer: View {
             .font(.caption)
             .foregroundStyle(.secondary)
         }
+      }
+
+      if let activity = model.memoryActivityMessage {
+        HStack(spacing: 6) {
+          Image(systemName: "brain.head.profile")
+          Text(activity)
+          Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
       }
 
       TextEditor(text: $message)

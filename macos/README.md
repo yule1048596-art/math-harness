@@ -1,8 +1,8 @@
 # Math Harness for macOS
 
-v0.10.0 把原生 macOS 客户端升级为持久数学对话 App：每个工作区可建立多个独立会话，
-普通聊天和带 SymPy 独立验算的数学求解共用一条时间线。SwiftUI 负责对话、知识复核与
-数据操作；Python/SymPy 服务作为独立子进程运行。
+v0.11.0 在持久数学对话上增加了工作区级“记忆工坊”：用户画像、学习目标、
+讲解偏好和专题背景可在同一工作区的新对话中继续使用。普通聊天和带 SymPy
+独立验算的求解共用一条时间线；Python/SymPy 服务作为独立子进程运行。
 
 ## 开发运行
 
@@ -36,7 +36,7 @@ swift run --package-path macos/MathHarnessApp MathHarnessCoreChecks
 
 ```bash
 ./scripts/build_macos_app.sh
-ditto -x -k "dist/Math-Harness-0.10.0-macOS-arm64.zip" /tmp/math-harness-beta
+ditto -x -k "dist/Math-Harness-0.11.0-macOS-arm64.zip" /tmp/math-harness-beta
 open "/tmp/math-harness-beta/Math Harness.app"
 ```
 
@@ -70,13 +70,17 @@ export MATH_HARNESS_NOTARY_PROFILE="math-harness-notary"
 分发构建不会启用它。沙箱版还需要给嵌入的 Python helper 配置继承权限并完成商店审核，
 不能只给主 App 打开沙箱开关。
 
-## v0.10.0 对话内核
+## v0.11.0 记忆工坊
 
 - 同一工作区可以创建和切换多个持久对话；不同工作区的消息、摘要和知识继续物理隔离。
 - “普通聊天”直接调用已配置的 MiMo；离线模式会诚实提示能力边界，同时仍保存消息。
 - “验算求解”把候选解、验证状态、求解记录和待审核知识草稿关联到同一个对话回合。
-- 模型上下文由滚动摘要、近期消息和已人工晋级的方法卡组成；普通聊天不会直接污染可信知识。
-- 打开旧数据库时，既有求解记录会一次性包装为可阅读的历史会话。工作区备份包含会话数据。
+- 助手消息落库后只持久化后台任务，记忆模型的延迟或失败不阻塞对话响应。
+- 提取器只读新增用户原文；候选需通过原文证据、敏感信息和数学内容检查。
+- 记忆页支持搜索、分类、置顶、编辑、归档、恢复、来源会话跳转、健康状态和显式历史回填。
+- 软记忆使用 SQLite FTS5 和中文 2/3 字符 n-gram；每轮注入不超过 3,000 字符。
+- 软记忆只调整交流方式，不能代替验证器、方法卡或数学事实。
+- 旧对话不会在升级时自动发给模型；历史回填必须二次确认。
 
 ## 数据操作
 
@@ -104,10 +108,9 @@ export MATH_HARNESS_NOTARY_PROFILE="math-harness-notary"
 - 现有 CLI `.math_harness/` 数据不会自动迁移；App 使用 Application Support 中的新数据
   根目录。正式迁移工具将在稳定版前补齐。
 - 数学表达式暂以可选择的等宽文本展示；离线 LaTeX 排版留到后续版本。
-- 对话回复尚未流式显示；摘要是本地确定性抽取，不是跨会话语义记忆或后台自主学习。
+- 对话回复尚未流式显示；跨对话记忆只覆盖用户背景与偏好，不是模型权重微调。
 - 打包脚本当前构建本机架构。首个公开 macOS 构建以 Apple Silicon 为目标，Universal 2
   和自动更新在后续版本处理。
-- 自动目标整理和自动记忆当前都是同步请求：MiMo 目标建议使用一次请求，启用 MiMo 方法
-  提炼时在求解后再增加一次；失败会退回本地规则且不会破坏已经完成的求解。
+- 自动目标整理仍是前台请求；软记忆提取已改为可恢复的后台任务，最多重试三次。
 - 对话记忆会让 App 新建的数据自然进入复核队列；旧 CLI `.math_harness/` 数据仍不会
   自动搬入 Application Support。

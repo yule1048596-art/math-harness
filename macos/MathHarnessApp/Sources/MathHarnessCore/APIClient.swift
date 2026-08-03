@@ -93,6 +93,111 @@ public actor APIClient {
     )
   }
 
+  public func listMemories(
+    workspaceID: String,
+    query: String? = nil,
+    kind: MemoryKind? = nil,
+    status: MemoryStatus = .active
+  ) async throws -> [MemoryItem] {
+    var components = URLComponents()
+    components.queryItems = [
+      query.map { URLQueryItem(name: "q", value: $0) },
+      kind.map { URLQueryItem(name: "kind", value: $0.rawValue) },
+      URLQueryItem(name: "status", value: status.rawValue),
+      URLQueryItem(name: "limit", value: "500"),
+    ].compactMap { $0 }
+    let queryString = components.percentEncodedQuery.map { "?\($0)" } ?? ""
+    return try await send(
+      path: "workspaces/\(workspaceID)/memories\(queryString)",
+      method: "GET"
+    )
+  }
+
+  public func createMemory(
+    workspaceID: String,
+    request: MemoryCreateRequest
+  ) async throws -> MemoryItem {
+    try await send(
+      path: "workspaces/\(workspaceID)/memories",
+      method: "POST",
+      body: request
+    )
+  }
+
+  public func updateMemory(
+    workspaceID: String,
+    memoryID: String,
+    request: MemoryUpdateRequest
+  ) async throws -> MemoryItem {
+    try await send(
+      path: "workspaces/\(workspaceID)/memories/\(memoryID)",
+      method: "PATCH",
+      body: request
+    )
+  }
+
+  public func archiveMemory(
+    workspaceID: String,
+    memoryID: String
+  ) async throws -> MemoryItem {
+    try await send(
+      path: "workspaces/\(workspaceID)/memories/\(memoryID)",
+      method: "DELETE"
+    )
+  }
+
+  public func getMemorySettings(workspaceID: String) async throws -> MemorySettings {
+    try await send(
+      path: "workspaces/\(workspaceID)/memory-settings",
+      method: "GET"
+    )
+  }
+
+  public func updateMemorySettings(
+    workspaceID: String,
+    enabled: Bool
+  ) async throws -> MemorySettings {
+    try await send(
+      path: "workspaces/\(workspaceID)/memory-settings",
+      method: "PUT",
+      body: MemorySettingsUpdateRequest(automaticExtractionEnabled: enabled)
+    )
+  }
+
+  public func getMemoryHealth(workspaceID: String) async throws -> MemoryHealth {
+    try await send(
+      path: "workspaces/\(workspaceID)/memory-health",
+      method: "GET"
+    )
+  }
+
+  public func getMemoryJob(
+    workspaceID: String,
+    jobID: String
+  ) async throws -> MemoryExtractionJob {
+    try await send(
+      path: "workspaces/\(workspaceID)/memory-jobs/\(jobID)",
+      method: "GET"
+    )
+  }
+
+  public func enqueueMemoryExtraction(
+    workspaceID: String,
+    conversationID: String
+  ) async throws -> MemoryExtractionJob {
+    try await send(
+      path: "workspaces/\(workspaceID)/conversations/\(conversationID)/memory-extractions",
+      method: "POST"
+    )
+  }
+
+  public func backfillMemories(workspaceID: String) async throws -> MemoryBackfillResult {
+    try await send(
+      path: "workspaces/\(workspaceID)/memory-backfills",
+      method: "POST"
+    )
+  }
+
   public func bulkImportExamples(
     workspaceID: String,
     request: BulkExampleImportRequest
@@ -264,7 +369,7 @@ public actor APIClient {
     accept: String,
     contentType: String?
   ) async throws -> Data {
-    let url = baseURL.appendingPathComponent(path)
+    let url = requestURL(for: path)
     var request = URLRequest(url: url, timeoutInterval: timeout)
     request.httpMethod = method
     request.httpBody = body
@@ -294,5 +399,14 @@ public actor APIClient {
     }
 
     return data
+  }
+
+  private func requestURL(for path: String) -> URL {
+    let parts = path.split(separator: "?", maxSplits: 1, omittingEmptySubsequences: false)
+    let url = baseURL.appendingPathComponent(String(parts[0]))
+    guard parts.count == 2 else { return url }
+    var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+    components?.percentEncodedQuery = String(parts[1])
+    return components?.url ?? url
   }
 }

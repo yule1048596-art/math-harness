@@ -16,6 +16,8 @@ from math_harness.models import (
     ConversationTurnRequest,
     ExampleCreate,
     MathPayload,
+    MemoryCreate,
+    MemoryKind,
     SolveRequest,
     WorkspaceCreate,
 )
@@ -71,6 +73,15 @@ def _populated_service(tmp_path):
         conversation.id,
         ConversationTurnRequest(message="记住我们正在研究根式抵消。"),
     )
+    service.create_memory(
+        workspace.id,
+        MemoryCreate(
+            kind=MemoryKind.TOPIC_CONTEXT,
+            content="当前专题是根式抵消的渐进估计",
+            tags=["根式", "渐进估计"],
+            pinned=True,
+        ),
+    )
     return service, workspace, attempt
 
 
@@ -108,6 +119,11 @@ def test_backup_restore_round_trip_rebinds_every_workspace_reference(tmp_path):
     messages = service.list_conversation_messages(target.id, conversations[0].id)
     assert len(messages) == 2
     assert all(message.workspace_id == target.id for message in messages)
+    memories = service.list_memories(target.id)
+    assert len(memories) == 1
+    assert memories[0].workspace_id == target.id
+    assert memories[0].content == "当前专题是根式抵消的渐进估计"
+    assert memories[0].pinned is True
 
     # Restoring creates a copy and cannot mutate the source workspace.
     assert service.get_workspace(source.id).name == "渐进估计"
@@ -132,6 +148,9 @@ def test_archive_manifest_matches_database_digest_and_counts(tmp_path):
     assert manifest["database"]["sha256"] == hashlib.sha256(database).hexdigest()
     assert manifest["database"]["size"] == len(database)
     assert manifest["database"]["record_counts"]["examples"] >= 2
+    assert manifest["database"]["record_counts"]["memory_items"] == 1
+    assert manifest["database"]["record_counts"]["memory_settings"] == 1
+    assert manifest["database"]["record_counts"]["conversation_memory_cursors"] == 1
 
 
 def test_restore_accepts_v09_archive_and_backfills_attempt_conversation(tmp_path):
@@ -145,6 +164,14 @@ def test_restore_accepts_v09_archive_and_backfills_attempt_conversation(tmp_path
     database_path.write_bytes(database)
     connection = sqlite3.connect(database_path)
     try:
+        connection.execute("DROP TABLE memory_items_fts")
+        for table in (
+            "memory_extraction_jobs",
+            "conversation_memory_cursors",
+            "memory_settings",
+            "memory_items",
+        ):
+            connection.execute(f"DROP TABLE {table}")
         connection.execute("DROP TABLE conversation_messages")
         connection.execute("DROP TABLE conversations")
         connection.execute("PRAGMA user_version = 0")
@@ -155,8 +182,15 @@ def test_restore_accepts_v09_archive_and_backfills_attempt_conversation(tmp_path
     manifest["app_version"] = "0.9.0"
     manifest["database"]["sha256"] = hashlib.sha256(legacy_database).hexdigest()
     manifest["database"]["size"] = len(legacy_database)
-    manifest["database"]["record_counts"].pop("conversation_messages", None)
-    manifest["database"]["record_counts"].pop("conversations", None)
+    for table in (
+        "conversation_messages",
+        "conversations",
+        "memory_extraction_jobs",
+        "conversation_memory_cursors",
+        "memory_settings",
+        "memory_items",
+    ):
+        manifest["database"]["record_counts"].pop(table, None)
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w") as archive:
         archive.writestr(MANIFEST_NAME, json.dumps(manifest))
@@ -217,6 +251,38 @@ def test_restore_rejects_triggers_even_with_updated_checksum(tmp_path):
         archive.writestr(DATABASE_NAME, tampered)
 
     with pytest.raises(InvalidPortableData, match="triggers or views"):
+        service.restore_workspace_backup(output.getvalue())
+
+
+def test_restore_rejects_tampered_known_memory_trigger(tmp_path):
+    service, workspace, _ = _populated_service(tmp_path)
+    original = service.export_workspace_backup(workspace.id)
+    with zipfile.ZipFile(io.BytesIO(original)) as archive:
+        manifest = json.loads(archive.read(MANIFEST_NAME))
+        database = archive.read(DATABASE_NAME)
+    database_path = tmp_path / "tampered-memory-trigger.sqlite3"
+    database_path.write_bytes(database)
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("DROP TRIGGER memory_items_ai")
+        connection.execute(
+            """
+            CREATE TRIGGER memory_items_ai AFTER INSERT ON memory_items
+            BEGIN DELETE FROM examples; END
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    tampered = database_path.read_bytes()
+    manifest["database"]["sha256"] = hashlib.sha256(tampered).hexdigest()
+    manifest["database"]["size"] = len(tampered)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(MANIFEST_NAME, json.dumps(manifest))
+        archive.writestr(DATABASE_NAME, tampered)
+
+    with pytest.raises(InvalidPortableData, match="trigger definition"):
         service.restore_workspace_backup(output.getvalue())
 
 

@@ -20,6 +20,11 @@ final class AppModel: ObservableObject {
   @Published private(set) var attempts: [SolutionAttempt] = []
   @Published private(set) var examples: [ProblemExample] = []
   @Published private(set) var methods: [MethodCard] = []
+  @Published private(set) var memories: [MemoryItem] = []
+  @Published private(set) var memorySettings: MemorySettings?
+  @Published private(set) var memoryHealth: MemoryHealth?
+  @Published private(set) var memoryActivityMessage: String?
+  @Published private(set) var isMemoryOperationInProgress = false
   @Published private(set) var isSolving = false
   @Published private(set) var isDraftingTarget = false
   @Published private(set) var isRefreshing = false
@@ -32,6 +37,7 @@ final class AppModel: ObservableObject {
 
   private let backend = BackendProcessController()
   private var api: APIClient?
+  private var memoryPollingTask: Task<Void, Never>?
 
   var selectedWorkspace: Workspace? {
     workspaces.first { $0.id == selectedWorkspaceID }
@@ -80,6 +86,8 @@ final class AppModel: ObservableObject {
   }
 
   func stopBackend() {
+    memoryPollingTask?.cancel()
+    memoryPollingTask = nil
     backend.stop()
   }
 
@@ -93,6 +101,12 @@ final class AppModel: ObservableObject {
     attempts = []
     examples = []
     methods = []
+    memories = []
+    memorySettings = nil
+    memoryHealth = nil
+    memoryActivityMessage = nil
+    memoryPollingTask?.cancel()
+    memoryPollingTask = nil
     await start()
   }
 
@@ -121,6 +135,11 @@ final class AppModel: ObservableObject {
     selectedWorkspaceID = workspaceID
     selectedConversationID = nil
     messages = []
+    memories = []
+    memorySettings = nil
+    memoryHealth = nil
+    memoryActivityMessage = nil
+    memoryPollingTask?.cancel()
     Task { await refreshSelectedWorkspace() }
   }
 
@@ -294,6 +313,10 @@ final class AppModel: ObservableObject {
         attempts.append(attempt)
         attempts.sort { $0.createdAt < $1.createdAt }
       }
+      if let memoryJob = result.memoryJob {
+        memoryActivityMessage = "正在后台整理长期记忆……"
+        startMemoryMonitoring(workspaceID: workspaceID, jobIDs: [memoryJob.id])
+      }
 
       if mathTarget != nil {
         do {
@@ -318,6 +341,116 @@ final class AppModel: ObservableObject {
     } catch {
       errorMessage = error.localizedDescription
       return false
+    }
+  }
+
+  func createMemory(
+    content: String,
+    kind: MemoryKind,
+    tags: [String],
+    pinned: Bool
+  ) async -> Bool {
+    guard let api, let workspaceID = selectedWorkspaceID else { return false }
+    isMemoryOperationInProgress = true
+    defer { isMemoryOperationInProgress = false }
+    do {
+      _ = try await api.createMemory(
+        workspaceID: workspaceID,
+        request: MemoryCreateRequest(
+          content: content,
+          kind: kind,
+          tags: tags,
+          pinned: pinned
+        )
+      )
+      await refreshMemoryState(workspaceID: workspaceID)
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
+    }
+  }
+
+  func updateMemory(_ memory: MemoryItem, request: MemoryUpdateRequest) async -> Bool {
+    guard let api, let workspaceID = selectedWorkspaceID else { return false }
+    isMemoryOperationInProgress = true
+    defer { isMemoryOperationInProgress = false }
+    do {
+      _ = try await api.updateMemory(
+        workspaceID: workspaceID,
+        memoryID: memory.id,
+        request: request
+      )
+      await refreshMemoryState(workspaceID: workspaceID)
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
+    }
+  }
+
+  func archiveMemory(_ memory: MemoryItem) async {
+    guard let api, let workspaceID = selectedWorkspaceID else { return }
+    isMemoryOperationInProgress = true
+    defer { isMemoryOperationInProgress = false }
+    do {
+      _ = try await api.archiveMemory(workspaceID: workspaceID, memoryID: memory.id)
+      await refreshMemoryState(workspaceID: workspaceID)
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  func setAutomaticMemoryEnabled(_ enabled: Bool) async {
+    guard let api, let workspaceID = selectedWorkspaceID else { return }
+    do {
+      memorySettings = try await api.updateMemorySettings(
+        workspaceID: workspaceID,
+        enabled: enabled
+      )
+      memoryHealth = try await api.getMemoryHealth(workspaceID: workspaceID)
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  func backfillMemories() async -> Int? {
+    guard let api, let workspaceID = selectedWorkspaceID else { return nil }
+    isMemoryOperationInProgress = true
+    defer { isMemoryOperationInProgress = false }
+    do {
+      let result = try await api.backfillMemories(workspaceID: workspaceID)
+      if !result.queuedJobs.isEmpty {
+        memoryActivityMessage = "正在整理 \(result.queuedJobs.count) 个历史会话……"
+        startMemoryMonitoring(
+          workspaceID: workspaceID,
+          jobIDs: result.queuedJobs.map(\.id)
+        )
+      } else {
+        memoryActivityMessage = "没有需要整理的历史对话。"
+      }
+      return result.queuedJobs.count
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  func retrySelectedConversationMemory() async {
+    guard
+      let api,
+      let workspaceID = selectedWorkspaceID,
+      let conversationID = selectedConversationID
+    else { return }
+    do {
+      let job = try await api.enqueueMemoryExtraction(
+        workspaceID: workspaceID,
+        conversationID: conversationID
+      )
+      memoryActivityMessage = "正在重新整理当前会话……"
+      startMemoryMonitoring(workspaceID: workspaceID, jobIDs: [job.id])
+    } catch {
+      errorMessage = error.localizedDescription
     }
   }
 
@@ -470,6 +603,9 @@ final class AppModel: ObservableObject {
       attempts = []
       examples = []
       methods = []
+      memories = []
+      memorySettings = nil
+      memoryHealth = nil
       return
     }
     do {
@@ -496,6 +632,7 @@ final class AppModel: ObservableObject {
       self.attempts = attempts.sorted { $0.createdAt < $1.createdAt }
       self.examples = examples
       self.methods = methods
+      await refreshMemoryState(workspaceID: workspaceID)
       await refreshSelectedConversation()
     } catch {
       errorMessage = error.localizedDescription
@@ -523,6 +660,78 @@ final class AppModel: ObservableObject {
       messages = loaded.sorted { $0.ordinal < $1.ordinal }
     } catch {
       errorMessage = error.localizedDescription
+    }
+  }
+
+  func refreshMemoryState() async {
+    guard let workspaceID = selectedWorkspaceID else { return }
+    await refreshMemoryState(workspaceID: workspaceID)
+  }
+
+  private func refreshMemoryState(workspaceID: String) async {
+    guard let api else { return }
+    do {
+      async let active = api.listMemories(workspaceID: workspaceID, status: .active)
+      async let archived = api.listMemories(workspaceID: workspaceID, status: .archived)
+      async let superseded = api.listMemories(workspaceID: workspaceID, status: .superseded)
+      async let settings = api.getMemorySettings(workspaceID: workspaceID)
+      async let health = api.getMemoryHealth(workspaceID: workspaceID)
+      let loaded = try await (active, archived, superseded, settings, health)
+      guard workspaceID == selectedWorkspaceID else { return }
+      memories = (loaded.0 + loaded.1 + loaded.2).sorted { lhs, rhs in
+        if lhs.pinned != rhs.pinned { return lhs.pinned && !rhs.pinned }
+        return lhs.updatedAt > rhs.updatedAt
+      }
+      memorySettings = loaded.3
+      memoryHealth = loaded.4
+    } catch {
+      guard workspaceID == selectedWorkspaceID else { return }
+      errorMessage = "记忆状态刷新失败：\(error.localizedDescription)"
+    }
+  }
+
+  private func startMemoryMonitoring(workspaceID: String, jobIDs: [String] = []) {
+    memoryPollingTask?.cancel()
+    memoryPollingTask = Task { [weak self] in
+      guard let self, let api = self.api else { return }
+      let trackedJobIDs = Array(Set(jobIDs))
+      for _ in 0..<180 {
+        if Task.isCancelled { return }
+        do {
+          try await Task<Never, Never>.sleep(for: .seconds(1))
+          let health = try await api.getMemoryHealth(workspaceID: workspaceID)
+          guard workspaceID == self.selectedWorkspaceID else { return }
+          self.memoryHealth = health
+          if health.queuedCount == 0 && health.runningCount == 0 {
+            var trackedJobs: [MemoryExtractionJob] = []
+            for jobID in trackedJobIDs {
+              trackedJobs.append(
+                try await api.getMemoryJob(workspaceID: workspaceID, jobID: jobID)
+              )
+            }
+            await self.refreshMemoryState(workspaceID: workspaceID)
+            let failed = health.failedCount > 0 || trackedJobs.contains { $0.status == "failed" }
+            let extractedCount = trackedJobs.reduce(0) { $0 + $1.extractedCount }
+            if failed {
+              self.memoryActivityMessage = "记忆整理失败，可在记忆面板中重试。"
+            } else if extractedCount > 0 {
+              self.memoryActivityMessage = "已记住 \(extractedCount) 条长期信息。"
+            } else {
+              self.memoryActivityMessage = "整理完成，未发现新的长期信息。"
+            }
+            return
+          }
+        } catch is CancellationError {
+          return
+        } catch {
+          guard workspaceID == self.selectedWorkspaceID else { return }
+          self.memoryActivityMessage = "暂时无法读取记忆任务状态。"
+          return
+        }
+      }
+      if workspaceID == self.selectedWorkspaceID {
+        self.memoryActivityMessage = "记忆仍在后台处理中。"
+      }
     }
   }
 
