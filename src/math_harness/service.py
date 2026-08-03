@@ -4,7 +4,8 @@ import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from threading import RLock
+from threading import Event, RLock, Thread
+from time import perf_counter
 
 from math_harness.bulk_import import (
     ParsedImportItem,
@@ -27,6 +28,17 @@ from math_harness.errors import InvalidKnowledgeState
 from math_harness.extraction import (
     MethodExtractorProtocol,
     build_method_extractor_from_env,
+)
+from math_harness.memory import (
+    MemoryExtractionResult,
+    MemoryExtractorProtocol,
+    build_memory_extractor_from_env,
+    candidate_is_grounded,
+    contains_memory_control_instruction,
+    contains_sensitive_memory,
+    looks_like_untrusted_math_claim,
+    looks_like_untrusted_math_text,
+    memory_source_revision,
 )
 from math_harness.methods import MethodExtractor
 from math_harness.models import (
@@ -67,6 +79,18 @@ from math_harness.models import (
     MathPayload,
     MathTargetDraftRequest,
     MathTargetDraftResult,
+    MemoryBackfillResult,
+    MemoryCreate,
+    MemoryExtractionJob,
+    MemoryHealth,
+    MemoryItem,
+    MemoryJobStatus,
+    MemoryKind,
+    MemorySettings,
+    MemorySettingsUpdate,
+    MemorySource,
+    MemoryStatus,
+    MemoryUpdate,
     MergeProposalStatus,
     MethodCard,
     MethodExtractionResult,
@@ -129,6 +153,10 @@ _CONVERSATION_SUMMARY_TRIGGER = 16
 _CONVERSATION_SUMMARY_RETAIN = 8
 
 
+class _StaleMemoryRevision(Exception):
+    """Signal a source-prefix change without consuming the retry budget."""
+
+
 class MathHarnessService:
     def __init__(
         self,
@@ -141,6 +169,7 @@ class MathHarnessService:
         target_drafter: TargetDrafterProtocol | None = None,
         conversation_responder: ConversationResponderProtocol | None = None,
         conversation_summarizer: ExtractiveConversationSummarizer | None = None,
+        memory_extractor: MemoryExtractorProtocol | None = None,
     ) -> None:
         load_local_environment()
         self.workspaces = WorkspaceManager(data_root)
@@ -156,7 +185,11 @@ class MathHarnessService:
         self.conversation_summarizer = (
             conversation_summarizer or ExtractiveConversationSummarizer()
         )
+        self.memory_extractor = memory_extractor or build_memory_extractor_from_env()
         self._knowledge_lock = RLock()
+        self._memory_wakeup = Event()
+        self._memory_stop = Event()
+        self._memory_thread: Thread | None = None
 
     def create_workspace(self, request: WorkspaceCreate) -> Workspace:
         return self.workspaces.create(request)
@@ -166,6 +199,405 @@ class MathHarnessService:
 
     def list_workspaces(self) -> list[Workspace]:
         return self.workspaces.list()
+
+    def start_background_workers(self) -> None:
+        if self._memory_thread is not None and self._memory_thread.is_alive():
+            return
+        for workspace in self.workspaces.list():
+            self.workspaces.store(workspace.id).recover_running_memory_jobs()
+        self._memory_stop.clear()
+        self._memory_thread = Thread(
+            target=self._memory_worker_loop,
+            daemon=True,
+            name="math-harness-memory",
+        )
+        self._memory_thread.start()
+        self._memory_wakeup.set()
+
+    def stop_background_workers(self) -> None:
+        self._memory_stop.set()
+        self._memory_wakeup.set()
+        thread = self._memory_thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+        self._memory_thread = None
+
+    def _memory_worker_loop(self) -> None:
+        while not self._memory_stop.is_set():
+            worked = self.process_memory_jobs_once()
+            if worked:
+                continue
+            self._memory_wakeup.wait(timeout=0.5)
+            self._memory_wakeup.clear()
+
+    def process_memory_jobs_once(self) -> bool:
+        if not self.memory_extractor.available:
+            return False
+        for workspace in self.workspaces.list():
+            store = self.workspaces.store(workspace.id)
+            job = store.claim_next_memory_job()
+            if job is None:
+                continue
+            self._process_memory_job(store, job)
+            return True
+        return False
+
+    def list_memories(
+        self,
+        workspace_id: str,
+        *,
+        query: str | None = None,
+        kind: MemoryKind | None = None,
+        status: MemoryStatus | None = MemoryStatus.ACTIVE,
+        limit: int = 100,
+    ) -> list[MemoryItem]:
+        return self.workspaces.store(workspace_id).list_memories(
+            query=query,
+            kind=kind,
+            status=status,
+            limit=limit,
+        )
+
+    def create_memory(self, workspace_id: str, request: MemoryCreate) -> MemoryItem:
+        store = self.workspaces.store(workspace_id)
+        with store.atomic():
+            memory, created = store.create_memory_item(
+                kind=request.kind,
+                content=request.content,
+                tags=request.tags,
+                pinned=request.pinned,
+                source=MemorySource.MANUAL,
+            )
+            store.record_learning_event(
+                "memory_created" if created else "memory_duplicate_ignored",
+                memory.id,
+                {"kind": memory.kind.value, "source": memory.source.value},
+            )
+        return memory
+
+    def update_memory(
+        self,
+        workspace_id: str,
+        memory_id: str,
+        request: MemoryUpdate,
+    ) -> MemoryItem:
+        store = self.workspaces.store(workspace_id)
+        with store.atomic():
+            before = store.get_memory(memory_id)
+            updated = store.update_memory_item(
+                memory_id,
+                content=request.content,
+                kind=request.kind,
+                tags=request.tags,
+                pinned=request.pinned,
+                status=request.status,
+            )
+            event_type = "memory_updated"
+            if (
+                before.status is MemoryStatus.ARCHIVED
+                and updated.status is MemoryStatus.ACTIVE
+            ):
+                event_type = "memory_restored"
+            elif (
+                before.status is MemoryStatus.ACTIVE
+                and updated.status is MemoryStatus.ARCHIVED
+            ):
+                event_type = "memory_archived"
+            store.record_learning_event(
+                event_type,
+                memory_id,
+                {
+                    "before": before.model_dump(mode="json"),
+                    "after": updated.model_dump(mode="json"),
+                },
+            )
+        return updated
+
+    def archive_memory(self, workspace_id: str, memory_id: str) -> MemoryItem:
+        store = self.workspaces.store(workspace_id)
+        with store.atomic():
+            before = store.get_memory(memory_id)
+            archived = store.archive_memory(memory_id)
+            store.record_learning_event(
+                "memory_archived",
+                memory_id,
+                {"previous_status": before.status.value},
+            )
+        return archived
+
+    def get_memory_settings(self, workspace_id: str) -> MemorySettings:
+        return self.workspaces.store(workspace_id).get_memory_settings()
+
+    def update_memory_settings(
+        self,
+        workspace_id: str,
+        request: MemorySettingsUpdate,
+    ) -> MemorySettings:
+        store = self.workspaces.store(workspace_id)
+        with store.atomic():
+            settings = store.update_memory_settings(
+                request.automatic_extraction_enabled
+            )
+            store.record_learning_event(
+                "memory_settings_updated",
+                workspace_id,
+                {
+                    "automatic_extraction_enabled": (
+                        settings.automatic_extraction_enabled
+                    )
+                },
+            )
+        if settings.automatic_extraction_enabled:
+            self._memory_wakeup.set()
+        return settings
+
+    def get_memory_health(self, workspace_id: str) -> MemoryHealth:
+        return self.workspaces.store(workspace_id).memory_health(
+            extractor_available=self.memory_extractor.available
+        )
+
+    def get_memory_job(
+        self,
+        workspace_id: str,
+        job_id: str,
+    ) -> MemoryExtractionJob:
+        return self.workspaces.store(workspace_id).get_memory_job(job_id)
+
+    def enqueue_memory_extraction(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        *,
+        from_ordinal: int | None = None,
+    ) -> MemoryExtractionJob:
+        if not self.memory_extractor.available:
+            raise InvalidKnowledgeState(
+                "automatic memory requires a configured MiMo or OpenAI model"
+            )
+        store = self.workspaces.store(workspace_id)
+        conversation = store.get_conversation(conversation_id)
+        messages = store.list_conversation_messages(conversation_id)
+        revision = memory_source_revision(messages, conversation.message_count)
+        job = store.enqueue_memory_job(
+            conversation_id,
+            from_ordinal=from_ordinal,
+            through_ordinal=conversation.message_count,
+            source_revision=revision,
+        )
+        if job is None:
+            raise InvalidKnowledgeState("conversation has no unprocessed messages")
+        self._memory_wakeup.set()
+        return job
+
+    def backfill_memories(self, workspace_id: str) -> MemoryBackfillResult:
+        if not self.memory_extractor.available:
+            raise InvalidKnowledgeState(
+                "memory backfill requires a configured MiMo or OpenAI model"
+            )
+        store = self.workspaces.store(workspace_id)
+        jobs: list[MemoryExtractionJob] = []
+        skipped = 0
+        for conversation in store.list_conversations():
+            if conversation.message_count == 0:
+                skipped += 1
+                continue
+            messages = store.list_conversation_messages(conversation.id)
+            revision = memory_source_revision(messages, conversation.message_count)
+            job = store.enqueue_memory_job(
+                conversation.id,
+                from_ordinal=0,
+                through_ordinal=conversation.message_count,
+                source_revision=revision,
+            )
+            if job is None:
+                skipped += 1
+            else:
+                jobs.append(job)
+        if jobs:
+            self._memory_wakeup.set()
+        return MemoryBackfillResult(
+            workspace_id=workspace_id,
+            queued_jobs=jobs,
+            skipped_conversation_count=skipped,
+        )
+
+    def _process_memory_job(
+        self,
+        store: WorkspaceStore,
+        job: MemoryExtractionJob,
+    ) -> None:
+        started = perf_counter()
+        try:
+            all_messages = store.list_conversation_messages(job.conversation_id)
+            current_revision = memory_source_revision(
+                all_messages,
+                job.through_ordinal,
+            )
+            if current_revision != job.source_revision:
+                raise _StaleMemoryRevision
+
+            source_messages = [
+                message
+                for message in all_messages
+                if job.from_ordinal < message.ordinal <= job.through_ordinal
+                and message.role is ConversationRole.USER
+            ]
+            existing = store.list_memories(
+                status=MemoryStatus.ACTIVE,
+                limit=30,
+            )
+            if source_messages:
+                result = self.memory_extractor.extract(source_messages, existing)
+            else:
+                result = MemoryExtractionResult(
+                    candidates=[],
+                    provider=self.memory_extractor.name,
+                    model=getattr(self.memory_extractor, "model", None),
+                    duration_ms=0,
+                )
+
+            messages_by_id = {message.id: message for message in source_messages}
+            existing_by_id = {memory.id: memory for memory in existing}
+            accepted = []
+            for candidate in result.candidates:
+                if not candidate_is_grounded(candidate, messages_by_id):
+                    continue
+                if contains_sensitive_memory(
+                    candidate.content
+                ) or contains_sensitive_memory(candidate.evidence):
+                    continue
+                if contains_memory_control_instruction(
+                    candidate.content
+                ) or contains_memory_control_instruction(candidate.evidence):
+                    continue
+                if looks_like_untrusted_math_claim(candidate):
+                    continue
+                if looks_like_untrusted_math_text(candidate.evidence):
+                    continue
+                if any(
+                    contains_sensitive_memory(tag)
+                    or contains_memory_control_instruction(tag)
+                    or looks_like_untrusted_math_text(tag)
+                    for tag in candidate.tags
+                ):
+                    continue
+                if candidate.replaces_memory_id:
+                    replaced = existing_by_id.get(candidate.replaces_memory_id)
+                    if replaced is None or replaced.kind is not candidate.kind:
+                        continue
+                accepted.append(candidate)
+
+            created_count = 0
+            with store.atomic():
+                latest_messages = store.list_conversation_messages(job.conversation_id)
+                latest_revision = memory_source_revision(
+                    latest_messages,
+                    job.through_ordinal,
+                )
+                if latest_revision != job.source_revision:
+                    raise _StaleMemoryRevision
+                for candidate in accepted:
+                    memory, created = store.create_memory_item(
+                        kind=candidate.kind,
+                        content=candidate.content,
+                        tags=candidate.tags,
+                        pinned=False,
+                        source=MemorySource.AUTOMATIC,
+                        conversation_id=job.conversation_id,
+                        source_message_id=candidate.source_message_id,
+                        evidence=candidate.evidence,
+                        supersedes_id=candidate.replaces_memory_id,
+                    )
+                    if not created:
+                        continue
+                    created_count += 1
+                    store.record_learning_event(
+                        "memory_extracted",
+                        memory.id,
+                        {
+                            "job_id": job.id,
+                            "kind": memory.kind.value,
+                            "source_message_id": memory.source_message_id,
+                            "supersedes_id": memory.supersedes_id,
+                        },
+                    )
+                store.update_memory_cursor(job.conversation_id, job.through_ordinal)
+                store.complete_memory_job(
+                    job.id,
+                    extracted_count=created_count,
+                    provider=result.provider,
+                    model=result.model,
+                    duration_ms=result.duration_ms,
+                    input_tokens=result.input_tokens,
+                    output_tokens=result.output_tokens,
+                )
+            store.record_learning_event(
+                "memory_extraction_completed",
+                job.id,
+                {
+                    "conversation_id": job.conversation_id,
+                    "through_ordinal": job.through_ordinal,
+                    "extracted_count": created_count,
+                },
+            )
+        except _StaleMemoryRevision:
+            store.mark_memory_job_stale(job.id)
+            conversation = store.get_conversation(job.conversation_id)
+            latest_messages = store.list_conversation_messages(job.conversation_id)
+            replacement_revision = memory_source_revision(
+                latest_messages,
+                conversation.message_count,
+            )
+            replacement = store.enqueue_memory_job(
+                job.conversation_id,
+                from_ordinal=job.from_ordinal,
+                through_ordinal=conversation.message_count,
+                source_revision=replacement_revision,
+            )
+            if replacement is not None:
+                self._memory_wakeup.set()
+        except Exception as exc:  # noqa: BLE001
+            failed = store.fail_memory_job(
+                job.id,
+                f"{exc.__class__.__name__}: {exc}",
+                provider=getattr(self.memory_extractor, "name", None),
+                model=getattr(self.memory_extractor, "model", None),
+                duration_ms=max(0, round((perf_counter() - started) * 1_000)),
+            )
+            if failed.status is MemoryJobStatus.FAILED:
+                store.record_learning_event(
+                    "memory_extraction_failed",
+                    job.id,
+                    {"error": failed.error or "unknown error"},
+                )
+            else:
+                self._memory_wakeup.set()
+
+    def _enqueue_turn_memory(
+        self,
+        store: WorkspaceStore,
+        conversation_id: str,
+        through_ordinal: int,
+    ) -> MemoryExtractionJob | None:
+        if (
+            not self.memory_extractor.available
+            or not store.get_memory_settings().automatic_extraction_enabled
+        ):
+            # Disabled periods are intentionally skipped. Enabling a model later
+            # must not silently upload older messages; explicit backfill remains
+            # available behind the App's confirmation dialog.
+            store.update_memory_cursor(conversation_id, through_ordinal)
+            return None
+        messages = store.list_conversation_messages(conversation_id)
+        revision = memory_source_revision(messages, through_ordinal)
+        job = store.enqueue_memory_job(
+            conversation_id,
+            through_ordinal=through_ordinal,
+            source_revision=revision,
+        )
+        if job is not None:
+            self._memory_wakeup.set()
+        return job
 
     def create_conversation(
         self,
@@ -275,6 +707,7 @@ class MathHarnessService:
             workspace_id,
             conversation_id,
             matches,
+            memory_query=request.message,
             excluding_turn_id=turn_id,
         )
         kind = (
@@ -345,6 +778,11 @@ class MathHarnessService:
         )
         summary_updated = self._compact_conversation(store, conversation_id)
         conversation = store.get_conversation(conversation_id)
+        memory_job = self._enqueue_turn_memory(
+            store,
+            conversation_id,
+            assistant_message.ordinal,
+        )
         store.record_learning_event(
             "conversation_turn_completed",
             turn_id,
@@ -357,6 +795,7 @@ class MathHarnessService:
                     verification_status.value if verification_status else None
                 ),
                 "summary_updated": summary_updated,
+                "memory_job_id": memory_job.id if memory_job else None,
             },
         )
         return ConversationTurnResult(
@@ -366,6 +805,7 @@ class MathHarnessService:
             attempt=attempt,
             knowledge_draft=knowledge_draft,
             summary_updated=summary_updated,
+            memory_job=memory_job,
         )
 
     def _build_conversation_context(
@@ -374,6 +814,7 @@ class MathHarnessService:
         conversation_id: str,
         matches: list[MethodMatch],
         *,
+        memory_query: str,
         excluding_turn_id: str | None = None,
     ) -> ConversationContext:
         workspace = self.workspaces.get(workspace_id)
@@ -392,6 +833,7 @@ class MathHarnessService:
             summary=conversation.summary,
             recent_messages=messages[-_CONVERSATION_CONTEXT_MESSAGES:],
             trusted_methods=matches,
+            soft_memories=store.select_memory_context(memory_query),
         )
 
     def _generate_chat_response(
@@ -468,7 +910,11 @@ class MathHarnessService:
 
     def restore_workspace_backup(self, payload: bytes) -> WorkspaceRestoreResult:
         with self._knowledge_lock:
-            return restore_workspace_archive(self.workspaces, payload)
+            result = restore_workspace_archive(self.workspaces, payload)
+            store = self.workspaces.store(result.workspace.id)
+            if store.recover_running_memory_jobs() > 0:
+                self._memory_wakeup.set()
+            return result
 
     def draft_math_target(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, Query, Request
@@ -36,6 +37,16 @@ from math_harness.models import (
     LearningEvent,
     MathTargetDraftRequest,
     MathTargetDraftResult,
+    MemoryBackfillResult,
+    MemoryCreate,
+    MemoryExtractionJob,
+    MemoryHealth,
+    MemoryItem,
+    MemoryKind,
+    MemorySettings,
+    MemorySettingsUpdate,
+    MemoryStatus,
+    MemoryUpdate,
     MergeProposalStatus,
     MergeScanRequest,
     MethodCard,
@@ -67,10 +78,20 @@ def create_app(
     root = data_root or os.getenv("MATH_HARNESS_DATA_DIR", ".math_harness")
     token = local_token or os.getenv("MATH_HARNESS_LOCAL_TOKEN")
     service = MathHarnessService(root)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        service.start_background_workers()
+        try:
+            yield
+        finally:
+            service.stop_background_workers()
+
     app = FastAPI(
         title="Math Harness",
         version=__version__,
         description="工作区隔离、可验证、可成长的数学 AI harness 原型。",
+        lifespan=lifespan,
     )
     app.state.service = service
 
@@ -172,6 +193,101 @@ def create_app(
             conversation_id,
             request,
         )
+
+    @app.get(
+        "/workspaces/{workspace_id}/memories",
+        response_model=list[MemoryItem],
+    )
+    def list_memories(
+        workspace_id: str,
+        q: str | None = Query(default=None, max_length=500),
+        kind: MemoryKind | None = None,
+        status: MemoryStatus | None = MemoryStatus.ACTIVE,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> list[MemoryItem]:
+        return service.list_memories(
+            workspace_id,
+            query=q,
+            kind=kind,
+            status=status,
+            limit=limit,
+        )
+
+    @app.post(
+        "/workspaces/{workspace_id}/memories",
+        response_model=MemoryItem,
+        status_code=201,
+    )
+    def create_memory(workspace_id: str, request: MemoryCreate) -> MemoryItem:
+        return service.create_memory(workspace_id, request)
+
+    @app.patch(
+        "/workspaces/{workspace_id}/memories/{memory_id}",
+        response_model=MemoryItem,
+    )
+    def update_memory(
+        workspace_id: str,
+        memory_id: str,
+        request: MemoryUpdate,
+    ) -> MemoryItem:
+        return service.update_memory(workspace_id, memory_id, request)
+
+    @app.delete(
+        "/workspaces/{workspace_id}/memories/{memory_id}",
+        response_model=MemoryItem,
+    )
+    def archive_memory(workspace_id: str, memory_id: str) -> MemoryItem:
+        return service.archive_memory(workspace_id, memory_id)
+
+    @app.get(
+        "/workspaces/{workspace_id}/memory-settings",
+        response_model=MemorySettings,
+    )
+    def get_memory_settings(workspace_id: str) -> MemorySettings:
+        return service.get_memory_settings(workspace_id)
+
+    @app.put(
+        "/workspaces/{workspace_id}/memory-settings",
+        response_model=MemorySettings,
+    )
+    def update_memory_settings(
+        workspace_id: str,
+        request: MemorySettingsUpdate,
+    ) -> MemorySettings:
+        return service.update_memory_settings(workspace_id, request)
+
+    @app.get(
+        "/workspaces/{workspace_id}/memory-health",
+        response_model=MemoryHealth,
+    )
+    def get_memory_health(workspace_id: str) -> MemoryHealth:
+        return service.get_memory_health(workspace_id)
+
+    @app.get(
+        "/workspaces/{workspace_id}/memory-jobs/{job_id}",
+        response_model=MemoryExtractionJob,
+    )
+    def get_memory_job(workspace_id: str, job_id: str) -> MemoryExtractionJob:
+        return service.get_memory_job(workspace_id, job_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/conversations/{conversation_id}/memory-extractions",
+        response_model=MemoryExtractionJob,
+        status_code=202,
+    )
+    def enqueue_memory_extraction(
+        workspace_id: str,
+        conversation_id: str,
+    ) -> MemoryExtractionJob:
+        return service.enqueue_memory_extraction(workspace_id, conversation_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/memory-backfills",
+        response_model=MemoryBackfillResult,
+        status_code=202,
+    )
+    def backfill_memories(workspace_id: str) -> MemoryBackfillResult:
+        return service.backfill_memories(workspace_id)
 
     @app.get("/workspaces/{workspace_id}/backup")
     def export_workspace_backup(workspace_id: str) -> Response:

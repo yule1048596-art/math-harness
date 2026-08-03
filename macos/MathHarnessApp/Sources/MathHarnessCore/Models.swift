@@ -130,6 +130,189 @@ public struct ConversationTurnRequest: Codable, Equatable, Sendable {
   }
 }
 
+public enum MemoryKind: String, Codable, CaseIterable, Identifiable, Sendable {
+  case profile
+  case learningGoal = "learning_goal"
+  case explanationPreference = "explanation_preference"
+  case topicContext = "topic_context"
+  case manualNote = "manual_note"
+
+  public var id: String { rawValue }
+}
+
+public enum MemoryStatus: String, Codable, CaseIterable, Identifiable, Sendable {
+  case active
+  case superseded
+  case archived
+
+  public var id: String { rawValue }
+}
+
+public struct MemoryItem: Codable, Identifiable, Equatable, Sendable {
+  public let id: String
+  public let workspaceID: String
+  public let kind: MemoryKind
+  public let content: String
+  public let tags: [String]
+  public let status: MemoryStatus
+  public let pinned: Bool
+  public let source: String
+  public let conversationID: String?
+  public let sourceMessageID: String?
+  public let evidence: String?
+  public let supersedesID: String?
+  public let createdAt: String
+  public let updatedAt: String
+
+  enum CodingKeys: String, CodingKey {
+    case id, kind, content, tags, status, pinned, source, evidence
+    case workspaceID = "workspace_id"
+    case conversationID = "conversation_id"
+    case sourceMessageID = "source_message_id"
+    case supersedesID = "supersedes_id"
+    case createdAt = "created_at"
+    case updatedAt = "updated_at"
+  }
+}
+
+public struct MemoryCreateRequest: Codable, Equatable, Sendable {
+  public let content: String
+  public let kind: MemoryKind
+  public let tags: [String]
+  public let pinned: Bool
+
+  public init(
+    content: String,
+    kind: MemoryKind = .manualNote,
+    tags: [String] = [],
+    pinned: Bool = false
+  ) {
+    self.content = content
+    self.kind = kind
+    self.tags = tags
+    self.pinned = pinned
+  }
+}
+
+public struct MemoryUpdateRequest: Codable, Equatable, Sendable {
+  public let content: String?
+  public let kind: MemoryKind?
+  public let tags: [String]?
+  public let pinned: Bool?
+  public let status: MemoryStatus?
+
+  public init(
+    content: String? = nil,
+    kind: MemoryKind? = nil,
+    tags: [String]? = nil,
+    pinned: Bool? = nil,
+    status: MemoryStatus? = nil
+  ) {
+    self.content = content
+    self.kind = kind
+    self.tags = tags
+    self.pinned = pinned
+    self.status = status
+  }
+}
+
+public struct MemorySettings: Codable, Equatable, Sendable {
+  public let workspaceID: String
+  public let automaticExtractionEnabled: Bool
+  public let updatedAt: String
+
+  enum CodingKeys: String, CodingKey {
+    case workspaceID = "workspace_id"
+    case automaticExtractionEnabled = "automatic_extraction_enabled"
+    case updatedAt = "updated_at"
+  }
+}
+
+public struct MemorySettingsUpdateRequest: Codable, Equatable, Sendable {
+  public let automaticExtractionEnabled: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case automaticExtractionEnabled = "automatic_extraction_enabled"
+  }
+
+  public init(automaticExtractionEnabled: Bool) {
+    self.automaticExtractionEnabled = automaticExtractionEnabled
+  }
+}
+
+public struct MemoryExtractionJob: Codable, Identifiable, Equatable, Sendable {
+  public let id: String
+  public let workspaceID: String
+  public let conversationID: String
+  public let fromOrdinal: Int
+  public let throughOrdinal: Int
+  public let sourceRevision: String
+  public let status: String
+  public let attempts: Int
+  public let provider: String?
+  public let model: String?
+  public let extractedCount: Int
+  public let inputTokens: Int?
+  public let outputTokens: Int?
+  public let durationMS: Int
+  public let error: String?
+  public let createdAt: String
+  public let startedAt: String?
+  public let completedAt: String?
+
+  enum CodingKeys: String, CodingKey {
+    case id, status, attempts, provider, model, error
+    case workspaceID = "workspace_id"
+    case conversationID = "conversation_id"
+    case fromOrdinal = "from_ordinal"
+    case throughOrdinal = "through_ordinal"
+    case sourceRevision = "source_revision"
+    case extractedCount = "extracted_count"
+    case inputTokens = "input_tokens"
+    case outputTokens = "output_tokens"
+    case durationMS = "duration_ms"
+    case createdAt = "created_at"
+    case startedAt = "started_at"
+    case completedAt = "completed_at"
+  }
+}
+
+public struct MemoryHealth: Codable, Equatable, Sendable {
+  public let workspaceID: String
+  public let automaticExtractionEnabled: Bool
+  public let extractorAvailable: Bool
+  public let queuedCount: Int
+  public let runningCount: Int
+  public let failedCount: Int
+  public let lastSuccessAt: String?
+  public let lastErrorAt: String?
+  public let lastError: String?
+
+  enum CodingKeys: String, CodingKey {
+    case workspaceID = "workspace_id"
+    case automaticExtractionEnabled = "automatic_extraction_enabled"
+    case extractorAvailable = "extractor_available"
+    case queuedCount = "queued_count"
+    case runningCount = "running_count"
+    case failedCount = "failed_count"
+    case lastSuccessAt = "last_success_at"
+    case lastErrorAt = "last_error_at"
+    case lastError = "last_error"
+  }
+}
+
+public struct MemoryBackfillResult: Codable, Equatable, Sendable {
+  public let workspaceID: String
+  public let queuedJobs: [MemoryExtractionJob]
+  public let skippedConversationCount: Int
+
+  enum CodingKeys: String, CodingKey {
+    case workspaceID = "workspace_id"
+    case queuedJobs = "queued_jobs"
+    case skippedConversationCount = "skipped_conversation_count"
+  }
+}
+
 public enum ImportReviewPolicy: String, Codable, CaseIterable, Identifiable, Sendable {
   case pending
   case preserve
@@ -570,6 +753,7 @@ public struct ConversationTurnResult: Codable, Equatable, Sendable {
   public let attempt: SolutionAttempt?
   public let knowledgeDraft: ProblemExample?
   public let summaryUpdated: Bool
+  public let memoryJob: MemoryExtractionJob?
 
   enum CodingKeys: String, CodingKey {
     case conversation, attempt
@@ -577,6 +761,7 @@ public struct ConversationTurnResult: Codable, Equatable, Sendable {
     case assistantMessage = "assistant_message"
     case knowledgeDraft = "knowledge_draft"
     case summaryUpdated = "summary_updated"
+    case memoryJob = "memory_job"
   }
 }
 

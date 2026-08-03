@@ -137,6 +137,34 @@ class ConversationMessageKind(StrEnum):
     SOLVE = "solve"
 
 
+class MemoryKind(StrEnum):
+    PROFILE = "profile"
+    LEARNING_GOAL = "learning_goal"
+    EXPLANATION_PREFERENCE = "explanation_preference"
+    TOPIC_CONTEXT = "topic_context"
+    MANUAL_NOTE = "manual_note"
+
+
+class MemoryStatus(StrEnum):
+    ACTIVE = "active"
+    SUPERSEDED = "superseded"
+    ARCHIVED = "archived"
+
+
+class MemorySource(StrEnum):
+    AUTOMATIC = "automatic"
+    MANUAL = "manual"
+    USER_EDIT = "user_edit"
+
+
+class MemoryJobStatus(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    STALE = "stale"
+
+
 class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=1000)
@@ -222,6 +250,130 @@ class ConversationTurnRequest(BaseModel):
                 normalized.append(tag)
                 seen.add(tag)
         return normalized
+
+
+class MemoryCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=2_000)
+    kind: MemoryKind = MemoryKind.MANUAL_NOTE
+    tags: list[str] = Field(default_factory=list, max_length=12)
+    pinned: bool = False
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("memory content cannot be blank")
+        return normalized
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_memory_tags(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            tag = " ".join(value.strip().lower().split())[:80]
+            if tag and tag not in seen:
+                normalized.append(tag)
+                seen.add(tag)
+        return normalized
+
+
+class MemoryUpdate(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=2_000)
+    kind: MemoryKind | None = None
+    tags: list[str] | None = Field(default=None, max_length=12)
+    pinned: bool | None = None
+    status: MemoryStatus | None = None
+
+    @field_validator("content")
+    @classmethod
+    def normalize_optional_content(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("memory content cannot be blank")
+        return normalized
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_optional_tags(cls, values: list[str] | None) -> list[str] | None:
+        if values is None:
+            return None
+        return MemoryCreate.normalize_memory_tags(values)
+
+    @model_validator(mode="after")
+    def require_change(self) -> MemoryUpdate:
+        if not self.model_fields_set:
+            raise ValueError("memory update must change at least one field")
+        return self
+
+
+class MemoryItem(BaseModel):
+    id: str
+    workspace_id: str
+    kind: MemoryKind
+    content: str
+    tags: list[str] = Field(default_factory=list)
+    status: MemoryStatus = MemoryStatus.ACTIVE
+    pinned: bool = False
+    source: MemorySource
+    conversation_id: str | None = None
+    source_message_id: str | None = None
+    evidence: str | None = None
+    supersedes_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class MemorySettings(BaseModel):
+    workspace_id: str
+    automatic_extraction_enabled: bool = True
+    updated_at: datetime
+
+
+class MemorySettingsUpdate(BaseModel):
+    automatic_extraction_enabled: bool
+
+
+class MemoryExtractionJob(BaseModel):
+    id: str
+    workspace_id: str
+    conversation_id: str
+    from_ordinal: int = Field(ge=0)
+    through_ordinal: int = Field(ge=0)
+    source_revision: str
+    status: MemoryJobStatus
+    attempts: int = Field(default=0, ge=0, le=3)
+    provider: str | None = None
+    model: str | None = None
+    extracted_count: int = Field(default=0, ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    duration_ms: int = Field(default=0, ge=0)
+    error: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class MemoryHealth(BaseModel):
+    workspace_id: str
+    automatic_extraction_enabled: bool
+    extractor_available: bool
+    queued_count: int = Field(ge=0)
+    running_count: int = Field(ge=0)
+    failed_count: int = Field(ge=0)
+    last_success_at: datetime | None = None
+    last_error_at: datetime | None = None
+    last_error: str | None = None
+
+
+class MemoryBackfillResult(BaseModel):
+    workspace_id: str
+    queued_jobs: list[MemoryExtractionJob]
+    skipped_conversation_count: int = Field(ge=0)
 
 
 _SYMBOL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -792,6 +944,7 @@ class ConversationTurnResult(BaseModel):
     attempt: SolutionAttempt | None = None
     knowledge_draft: ProblemExample | None = None
     summary_updated: bool = False
+    memory_job: MemoryExtractionJob | None = None
 
 
 class SolutionCorrection(BaseModel):

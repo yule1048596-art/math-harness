@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
-from math_harness.models import ConversationMessage, MethodMatch, Workspace
+from math_harness.models import ConversationMessage, MemoryItem, MethodMatch, Workspace
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,7 @@ class ConversationContext:
     summary: str
     recent_messages: list[ConversationMessage]
     trusted_methods: list[MethodMatch]
+    soft_memories: list[MemoryItem] = field(default_factory=list)
 
     def model_payload(self) -> dict[str, object]:
         return {
@@ -23,6 +24,14 @@ class ConversationContext:
                 "description": self.workspace.description,
             },
             "conversation_summary": self.summary or None,
+            "soft_workspace_memory": [
+                {
+                    "kind": memory.kind.value,
+                    "content": memory.content,
+                    "pinned": memory.pinned,
+                }
+                for memory in self.soft_memories
+            ],
             "recent_messages": [
                 {"role": message.role.value, "content": message.content}
                 for message in self.recent_messages

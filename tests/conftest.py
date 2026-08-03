@@ -11,6 +11,7 @@ from math_harness.models import ExampleCreate, MathPayload
 # monkeypatch.
 os.environ["MATH_HARNESS_METHOD_EXTRACTOR"] = "rules"
 os.environ["MATH_HARNESS_SOLVER"] = "sympy"
+os.environ["MATH_HARNESS_MEMORY_EXTRACTOR"] = "disabled"
 
 
 @pytest.fixture

@@ -10,6 +10,11 @@ from pathlib import Path
 
 from math_harness.dedup import MergeCandidate, card_to_draft
 from math_harness.errors import InvalidKnowledgeState, RecordNotFound, WorkspaceNotFound
+from math_harness.memory import (
+    build_memory_fts_query,
+    build_memory_search_text,
+    memory_fingerprint,
+)
 from math_harness.merging import merge_method_content, sanitize_method_draft
 from math_harness.models import (
     Conversation,
@@ -20,6 +25,14 @@ from math_harness.models import (
     ExampleVersion,
     KnowledgeStatus,
     LearningEvent,
+    MemoryExtractionJob,
+    MemoryHealth,
+    MemoryItem,
+    MemoryJobStatus,
+    MemoryKind,
+    MemorySettings,
+    MemorySource,
+    MemoryStatus,
     MergeProposalStatus,
     MethodCard,
     MethodDraft,
@@ -438,6 +451,131 @@ class WorkspaceStore:
                         workspace_id, conversation_id, ordinal
                     );
 
+                CREATE TABLE IF NOT EXISTS memory_items (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    normalized_fingerprint TEXT NOT NULL,
+                    search_text TEXT NOT NULL,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    status TEXT NOT NULL,
+                    pinned INTEGER NOT NULL DEFAULT 0,
+                    source TEXT NOT NULL,
+                    conversation_id TEXT,
+                    source_message_id TEXT,
+                    evidence TEXT,
+                    supersedes_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(id) ON DELETE SET NULL,
+                    FOREIGN KEY (source_message_id)
+                        REFERENCES conversation_messages(id) ON DELETE SET NULL,
+                    FOREIGN KEY (supersedes_id)
+                        REFERENCES memory_items(id) ON DELETE SET NULL,
+                    CHECK (workspace_id <> ''),
+                    CHECK (kind IN (
+                        'profile', 'learning_goal', 'explanation_preference',
+                        'topic_context', 'manual_note'
+                    )),
+                    CHECK (status IN ('active', 'superseded', 'archived')),
+                    CHECK (source IN ('automatic', 'manual', 'user_edit')),
+                    CHECK (pinned IN (0, 1))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_memory_items_workspace
+                    ON memory_items(workspace_id, status, pinned, updated_at);
+
+                CREATE INDEX IF NOT EXISTS idx_memory_items_fingerprint
+                    ON memory_items(workspace_id, normalized_fingerprint, status);
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts USING fts5(
+                    content,
+                    search_text,
+                    content='memory_items',
+                    content_rowid='rowid',
+                    tokenize='unicode61 remove_diacritics 2'
+                );
+
+                CREATE TRIGGER IF NOT EXISTS memory_items_ai AFTER INSERT ON memory_items BEGIN
+                    INSERT INTO memory_items_fts(rowid, content, search_text)
+                    VALUES (new.rowid, new.content, new.search_text);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS memory_items_ad AFTER DELETE ON memory_items BEGIN
+                    INSERT INTO memory_items_fts(memory_items_fts, rowid, content, search_text)
+                    VALUES ('delete', old.rowid, old.content, old.search_text);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS memory_items_au
+                AFTER UPDATE OF content, search_text ON memory_items BEGIN
+                    INSERT INTO memory_items_fts(memory_items_fts, rowid, content, search_text)
+                    VALUES ('delete', old.rowid, old.content, old.search_text);
+                    INSERT INTO memory_items_fts(rowid, content, search_text)
+                    VALUES (new.rowid, new.content, new.search_text);
+                END;
+
+                CREATE TABLE IF NOT EXISTS memory_extraction_jobs (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    from_ordinal INTEGER NOT NULL,
+                    through_ordinal INTEGER NOT NULL,
+                    source_revision TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    provider TEXT,
+                    model TEXT,
+                    extracted_count INTEGER NOT NULL DEFAULT 0,
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(id) ON DELETE CASCADE,
+                    CHECK (workspace_id <> ''),
+                    CHECK (from_ordinal >= 0),
+                    CHECK (through_ordinal >= from_ordinal),
+                    CHECK (status IN (
+                        'queued', 'running', 'succeeded', 'failed', 'stale'
+                    )),
+                    CHECK (attempts BETWEEN 0 AND 3)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_memory_jobs_workspace
+                    ON memory_extraction_jobs(workspace_id, status, created_at);
+
+                CREATE INDEX IF NOT EXISTS idx_memory_jobs_conversation
+                    ON memory_extraction_jobs(
+                        workspace_id, conversation_id, through_ordinal
+                    );
+
+                CREATE TABLE IF NOT EXISTS conversation_memory_cursors (
+                    conversation_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    through_ordinal INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(id) ON DELETE CASCADE,
+                    CHECK (workspace_id <> ''),
+                    CHECK (through_ordinal >= 0)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_memory_cursors_workspace
+                    ON conversation_memory_cursors(workspace_id, updated_at);
+
+                CREATE TABLE IF NOT EXISTS memory_settings (
+                    workspace_id TEXT PRIMARY KEY,
+                    automatic_extraction_enabled INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL,
+                    CHECK (workspace_id <> ''),
+                    CHECK (automatic_extraction_enabled IN (0, 1))
+                );
+
                 CREATE TABLE IF NOT EXISTS attempt_methods (
                     workspace_id TEXT NOT NULL,
                     attempt_id TEXT NOT NULL,
@@ -517,6 +655,7 @@ class WorkspaceStore:
                 "TEXT NOT NULL DEFAULT '{}'",
             )
             self._backfill_legacy_conversation(connection)
+            self._migrate_memory_foundry(connection)
 
     @staticmethod
     def _ensure_column(
@@ -635,6 +774,33 @@ class WorkspaceStore:
                 )
         connection.execute("PRAGMA user_version = 10")
 
+    def _migrate_memory_foundry(self, connection: sqlite3.Connection) -> None:
+        """Seed v0.11 cursors without silently uploading existing transcripts."""
+
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 11:
+            return
+        now = utc_now().isoformat()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO conversation_memory_cursors (
+                conversation_id, workspace_id, through_ordinal, updated_at
+            )
+            SELECT id, workspace_id, message_count, ?
+            FROM conversations
+            WHERE workspace_id = ?
+            """,
+            (now, self.workspace_id),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO memory_settings (
+                workspace_id, automatic_extraction_enabled, updated_at
+            ) VALUES (?, 1, ?)
+            """,
+            (self.workspace_id, now),
+        )
+        connection.execute("PRAGMA user_version = 11")
+
     @staticmethod
     def _legacy_attempt_text(attempt: SolutionAttempt) -> str:
         if attempt.candidate is None:
@@ -674,6 +840,18 @@ class WorkspaceStore:
                     conversation.message_count,
                     conversation.created_at.isoformat(),
                     conversation.updated_at.isoformat(),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO conversation_memory_cursors (
+                    conversation_id, workspace_id, through_ordinal, updated_at
+                ) VALUES (?, ?, 0, ?)
+                """,
+                (
+                    conversation.id,
+                    conversation.workspace_id,
+                    conversation.created_at.isoformat(),
                 ),
             )
         return conversation
@@ -902,6 +1080,704 @@ class WorkspaceStore:
             ),
             method_keys=json.loads(row["method_keys_json"] or "[]"),
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    def get_memory_settings(self) -> MemorySettings:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM memory_settings WHERE workspace_id = ?",
+                (self.workspace_id,),
+            ).fetchone()
+        if row is None:
+            raise InvalidKnowledgeState("workspace memory settings are missing")
+        return MemorySettings(
+            workspace_id=row["workspace_id"],
+            automatic_extraction_enabled=bool(row["automatic_extraction_enabled"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def update_memory_settings(self, enabled: bool) -> MemorySettings:
+        now = utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO memory_settings (
+                    workspace_id, automatic_extraction_enabled, updated_at
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(workspace_id) DO UPDATE SET
+                    automatic_extraction_enabled = excluded.automatic_extraction_enabled,
+                    updated_at = excluded.updated_at
+                """,
+                (self.workspace_id, 1 if enabled else 0, now.isoformat()),
+            )
+        return self.get_memory_settings()
+
+    def create_memory_item(
+        self,
+        *,
+        kind: MemoryKind,
+        content: str,
+        tags: list[str],
+        pinned: bool,
+        source: MemorySource,
+        conversation_id: str | None = None,
+        source_message_id: str | None = None,
+        evidence: str | None = None,
+        supersedes_id: str | None = None,
+    ) -> tuple[MemoryItem, bool]:
+        fingerprint = memory_fingerprint(kind, content)
+        existing = self.find_active_memory_by_fingerprint(fingerprint)
+        if existing is not None:
+            return existing, False
+
+        now = utc_now()
+        memory = MemoryItem(
+            id=str(uuid.uuid4()),
+            workspace_id=self.workspace_id,
+            kind=kind,
+            content=content,
+            tags=tags,
+            status=MemoryStatus.ACTIVE,
+            pinned=pinned,
+            source=source,
+            conversation_id=conversation_id,
+            source_message_id=source_message_id,
+            evidence=evidence,
+            supersedes_id=supersedes_id,
+            created_at=now,
+            updated_at=now,
+        )
+        with self.connection() as connection:
+            if supersedes_id is not None:
+                replaced = connection.execute(
+                    """
+                    SELECT kind, status FROM memory_items
+                    WHERE id = ? AND workspace_id = ?
+                    """,
+                    (supersedes_id, self.workspace_id),
+                ).fetchone()
+                if replaced is None:
+                    raise RecordNotFound(
+                        f"memory not found in workspace: {supersedes_id}"
+                    )
+                if replaced["kind"] != kind.value:
+                    raise InvalidKnowledgeState(
+                        "automatic memory can only replace the same memory kind"
+                    )
+                if replaced["status"] != MemoryStatus.ACTIVE.value:
+                    raise InvalidKnowledgeState("replacement memory is not active")
+                connection.execute(
+                    """
+                    UPDATE memory_items
+                    SET status = ?, updated_at = ?
+                    WHERE id = ? AND workspace_id = ?
+                    """,
+                    (
+                        MemoryStatus.SUPERSEDED.value,
+                        now.isoformat(),
+                        supersedes_id,
+                        self.workspace_id,
+                    ),
+                )
+            connection.execute(
+                """
+                INSERT INTO memory_items (
+                    id, workspace_id, kind, content, normalized_fingerprint,
+                    search_text, tags_json, status, pinned, source,
+                    conversation_id, source_message_id, evidence, supersedes_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory.id,
+                    memory.workspace_id,
+                    memory.kind.value,
+                    memory.content,
+                    fingerprint,
+                    build_memory_search_text(memory.content, memory.tags),
+                    _dump(memory.tags),
+                    memory.status.value,
+                    1 if memory.pinned else 0,
+                    memory.source.value,
+                    memory.conversation_id,
+                    memory.source_message_id,
+                    memory.evidence,
+                    memory.supersedes_id,
+                    memory.created_at.isoformat(),
+                    memory.updated_at.isoformat(),
+                ),
+            )
+        return memory, True
+
+    def find_active_memory_by_fingerprint(self, fingerprint: str) -> MemoryItem | None:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM memory_items
+                WHERE workspace_id = ? AND normalized_fingerprint = ? AND status = ?
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (self.workspace_id, fingerprint, MemoryStatus.ACTIVE.value),
+            ).fetchone()
+        return self._row_to_memory(row) if row else None
+
+    def get_memory(self, memory_id: str) -> MemoryItem:
+        with self.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM memory_items WHERE id = ? AND workspace_id = ?",
+                (memory_id, self.workspace_id),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"memory not found in workspace: {memory_id}")
+        return self._row_to_memory(row)
+
+    def list_memories(
+        self,
+        *,
+        query: str | None = None,
+        kind: MemoryKind | None = None,
+        status: MemoryStatus | None = MemoryStatus.ACTIVE,
+        limit: int = 100,
+    ) -> list[MemoryItem]:
+        limit = max(1, min(limit, 500))
+        clauses = ["m.workspace_id = ?"]
+        params: list[object] = [self.workspace_id]
+        if kind is not None:
+            clauses.append("m.kind = ?")
+            params.append(kind.value)
+        if status is not None:
+            clauses.append("m.status = ?")
+            params.append(status.value)
+        fts_query = build_memory_fts_query(query or "") if query else ""
+        if fts_query:
+            sql = f"""
+                SELECT m.*, bm25(memory_items_fts) AS relevance
+                FROM memory_items_fts
+                JOIN memory_items m ON m.rowid = memory_items_fts.rowid
+                WHERE memory_items_fts MATCH ? AND {" AND ".join(clauses)}
+                ORDER BY m.pinned DESC, relevance, m.updated_at DESC
+                LIMIT ?
+            """
+            params = [fts_query, *params, limit]
+        else:
+            sql = f"""
+                SELECT m.* FROM memory_items m
+                WHERE {" AND ".join(clauses)}
+                ORDER BY m.pinned DESC, m.updated_at DESC, m.id DESC
+                LIMIT ?
+            """
+            params.append(limit)
+        try:
+            with self.connection() as connection:
+                rows = connection.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            if not query:
+                raise
+            like_clauses = [*clauses, "m.content LIKE '%' || ? || '%'"]
+            with self.connection() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT m.* FROM memory_items m
+                    WHERE {" AND ".join(like_clauses)}
+                    ORDER BY m.pinned DESC, m.updated_at DESC LIMIT ?
+                    """,
+                    [*params[1:-1], query, limit],
+                ).fetchall()
+        return [self._row_to_memory(row) for row in rows]
+
+    def select_memory_context(
+        self,
+        query: str,
+        *,
+        max_characters: int = 3_000,
+    ) -> list[MemoryItem]:
+        active = self.list_memories(status=MemoryStatus.ACTIVE, limit=500)
+        pinned = [item for item in active if item.pinned][:8]
+        seen = {item.id for item in pinned}
+        global_items = [
+            item
+            for item in active
+            if item.id not in seen
+            and item.kind in {MemoryKind.PROFILE, MemoryKind.EXPLANATION_PREFERENCE}
+        ][:6]
+        seen.update(item.id for item in global_items)
+        relevant = [
+            item
+            for item in self.list_memories(
+                query=query,
+                status=MemoryStatus.ACTIVE,
+                limit=30,
+            )
+            if item.id not in seen
+            and item.kind in {MemoryKind.LEARNING_GOAL, MemoryKind.TOPIC_CONTEXT}
+        ][:8]
+        selected: list[MemoryItem] = []
+        used = 0
+        for item in [*pinned, *global_items, *relevant]:
+            cost = len(item.content) + len(item.kind.value) + 6
+            if used + cost > max_characters:
+                continue
+            selected.append(item)
+            used += cost
+        return selected
+
+    def update_memory_item(
+        self,
+        memory_id: str,
+        *,
+        content: str | None = None,
+        kind: MemoryKind | None = None,
+        tags: list[str] | None = None,
+        pinned: bool | None = None,
+        status: MemoryStatus | None = None,
+    ) -> MemoryItem:
+        current = self.get_memory(memory_id)
+        if current.status is MemoryStatus.SUPERSEDED:
+            raise InvalidKnowledgeState(
+                "superseded memory versions are immutable and cannot be restored"
+            )
+        next_kind = kind or current.kind
+        next_content = content if content is not None else current.content
+        next_tags = tags if tags is not None else current.tags
+        next_status = status or current.status
+        if next_status is MemoryStatus.SUPERSEDED:
+            raise InvalidKnowledgeState(
+                "superseded status is reserved for automatic replacement"
+            )
+        next_pinned = pinned if pinned is not None else current.pinned
+        if next_status is not MemoryStatus.ACTIVE:
+            next_pinned = False
+        fingerprint = memory_fingerprint(next_kind, next_content)
+        duplicate = self.find_active_memory_by_fingerprint(fingerprint)
+        if (
+            duplicate is not None
+            and duplicate.id != memory_id
+            and next_status is MemoryStatus.ACTIVE
+        ):
+            raise InvalidKnowledgeState("an equivalent active memory already exists")
+        edited = content is not None or kind is not None or tags is not None
+        now = utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE memory_items
+                SET kind = ?, content = ?, normalized_fingerprint = ?, search_text = ?,
+                    tags_json = ?, status = ?, pinned = ?, source = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    next_kind.value,
+                    next_content,
+                    fingerprint,
+                    build_memory_search_text(next_content, next_tags),
+                    _dump(next_tags),
+                    next_status.value,
+                    1 if next_pinned else 0,
+                    MemorySource.USER_EDIT.value if edited else current.source.value,
+                    now.isoformat(),
+                    memory_id,
+                    self.workspace_id,
+                ),
+            )
+        return self.get_memory(memory_id)
+
+    def archive_memory(self, memory_id: str) -> MemoryItem:
+        current = self.get_memory(memory_id)
+        if current.status is MemoryStatus.SUPERSEDED:
+            raise InvalidKnowledgeState(
+                "superseded memory versions are immutable and cannot be archived"
+            )
+        now = utc_now()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE memory_items
+                SET status = ?, pinned = 0, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    MemoryStatus.ARCHIVED.value,
+                    now.isoformat(),
+                    memory_id,
+                    self.workspace_id,
+                ),
+            )
+        return self.get_memory(memory_id)
+
+    def get_memory_cursor(self, conversation_id: str) -> int:
+        self.get_conversation(conversation_id)
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT through_ordinal FROM conversation_memory_cursors
+                WHERE workspace_id = ? AND conversation_id = ?
+                """,
+                (self.workspace_id, conversation_id),
+            ).fetchone()
+        return int(row["through_ordinal"]) if row else 0
+
+    def update_memory_cursor(self, conversation_id: str, through_ordinal: int) -> None:
+        now = utc_now().isoformat()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_memory_cursors (
+                    conversation_id, workspace_id, through_ordinal, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET
+                    through_ordinal = MAX(through_ordinal, excluded.through_ordinal),
+                    updated_at = excluded.updated_at
+                """,
+                (conversation_id, self.workspace_id, through_ordinal, now),
+            )
+
+    def enqueue_memory_job(
+        self,
+        conversation_id: str,
+        *,
+        through_ordinal: int,
+        source_revision: str,
+        from_ordinal: int | None = None,
+    ) -> MemoryExtractionJob | None:
+        conversation = self.get_conversation(conversation_id)
+        if through_ordinal > conversation.message_count:
+            raise InvalidKnowledgeState("memory job exceeds conversation history")
+        start = (
+            self.get_memory_cursor(conversation_id)
+            if from_ordinal is None
+            else from_ordinal
+        )
+        if through_ordinal <= start:
+            return None
+        with self.connection() as connection:
+            exact = connection.execute(
+                """
+                SELECT * FROM memory_extraction_jobs
+                WHERE workspace_id = ? AND conversation_id = ?
+                  AND source_revision = ? AND from_ordinal = ? AND through_ordinal = ?
+                  AND status IN ('queued', 'running', 'succeeded')
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (
+                    self.workspace_id,
+                    conversation_id,
+                    source_revision,
+                    start,
+                    through_ordinal,
+                ),
+            ).fetchone()
+            if exact is not None:
+                if exact["status"] == MemoryJobStatus.SUCCEEDED.value:
+                    return None
+                return self._row_to_memory_job(exact)
+            queued = connection.execute(
+                """
+                SELECT * FROM memory_extraction_jobs
+                WHERE workspace_id = ? AND conversation_id = ? AND status = 'queued'
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (self.workspace_id, conversation_id),
+            ).fetchone()
+            if queued is not None:
+                connection.execute(
+                    """
+                    UPDATE memory_extraction_jobs
+                    SET from_ordinal = MIN(from_ordinal, ?), through_ordinal = ?,
+                        source_revision = ?, error = NULL
+                    WHERE id = ?
+                    """,
+                    (start, through_ordinal, source_revision, queued["id"]),
+                )
+                row = connection.execute(
+                    "SELECT * FROM memory_extraction_jobs WHERE id = ?",
+                    (queued["id"],),
+                ).fetchone()
+                return self._row_to_memory_job(row)
+            now = utc_now()
+            job = MemoryExtractionJob(
+                id=str(uuid.uuid4()),
+                workspace_id=self.workspace_id,
+                conversation_id=conversation_id,
+                from_ordinal=start,
+                through_ordinal=through_ordinal,
+                source_revision=source_revision,
+                status=MemoryJobStatus.QUEUED,
+                created_at=now,
+            )
+            connection.execute(
+                """
+                INSERT INTO memory_extraction_jobs (
+                    id, workspace_id, conversation_id, from_ordinal,
+                    through_ordinal, source_revision, status, attempts,
+                    extracted_count, duration_ms, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?)
+                """,
+                (
+                    job.id,
+                    job.workspace_id,
+                    job.conversation_id,
+                    job.from_ordinal,
+                    job.through_ordinal,
+                    job.source_revision,
+                    job.status.value,
+                    job.created_at.isoformat(),
+                ),
+            )
+        return job
+
+    def get_memory_job(self, job_id: str) -> MemoryExtractionJob:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM memory_extraction_jobs
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (job_id, self.workspace_id),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(f"memory job not found in workspace: {job_id}")
+        return self._row_to_memory_job(row)
+
+    def claim_next_memory_job(self) -> MemoryExtractionJob | None:
+        with self.atomic(), self.connection() as connection:
+            row = connection.execute(
+                """
+                    SELECT * FROM memory_extraction_jobs
+                    WHERE workspace_id = ? AND status = 'queued' AND attempts < 3
+                    ORDER BY created_at, id LIMIT 1
+                    """,
+                (self.workspace_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            now = utc_now().isoformat()
+            connection.execute(
+                """
+                    UPDATE memory_extraction_jobs
+                    SET status = 'running', attempts = attempts + 1,
+                        started_at = ?, completed_at = NULL
+                    WHERE id = ? AND status = 'queued'
+                    """,
+                (now, row["id"]),
+            )
+        return self.get_memory_job(row["id"])
+
+    def complete_memory_job(
+        self,
+        job_id: str,
+        *,
+        extracted_count: int,
+        provider: str,
+        model: str | None,
+        duration_ms: int,
+        input_tokens: int | None,
+        output_tokens: int | None,
+    ) -> MemoryExtractionJob:
+        now = utc_now().isoformat()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE memory_extraction_jobs
+                SET status = 'succeeded', extracted_count = ?, provider = ?, model = ?,
+                    duration_ms = ?, input_tokens = ?, output_tokens = ?, error = NULL,
+                    completed_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    extracted_count,
+                    provider,
+                    model,
+                    duration_ms,
+                    input_tokens,
+                    output_tokens,
+                    now,
+                    job_id,
+                    self.workspace_id,
+                ),
+            )
+        return self.get_memory_job(job_id)
+
+    def fail_memory_job(
+        self,
+        job_id: str,
+        error: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        duration_ms: int | None = None,
+    ) -> MemoryExtractionJob:
+        job = self.get_memory_job(job_id)
+        final = job.attempts >= 3
+        now = utc_now().isoformat()
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE memory_extraction_jobs
+                SET status = ?, provider = COALESCE(?, provider),
+                    model = COALESCE(?, model), duration_ms = COALESCE(?, duration_ms),
+                    error = ?, completed_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    MemoryJobStatus.FAILED.value
+                    if final
+                    else MemoryJobStatus.QUEUED.value,
+                    provider,
+                    model,
+                    duration_ms,
+                    error[:2_000],
+                    now if final else None,
+                    job_id,
+                    self.workspace_id,
+                ),
+            )
+        return self.get_memory_job(job_id)
+
+    def mark_memory_job_stale(self, job_id: str) -> MemoryExtractionJob:
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE memory_extraction_jobs
+                SET status = 'stale', error = 'conversation revision changed',
+                    completed_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (utc_now().isoformat(), job_id, self.workspace_id),
+            )
+        return self.get_memory_job(job_id)
+
+    def recover_running_memory_jobs(self) -> int:
+        with self.connection() as connection:
+            result = connection.execute(
+                """
+                UPDATE memory_extraction_jobs
+                SET status = 'queued', error = 'recovered after backend restart',
+                    started_at = NULL
+                WHERE workspace_id = ? AND status = 'running' AND attempts < 3
+                """,
+                (self.workspace_id,),
+            )
+            connection.execute(
+                """
+                UPDATE memory_extraction_jobs
+                SET status = 'failed', error = 'retry limit reached during restart',
+                    completed_at = ?
+                WHERE workspace_id = ? AND status = 'running' AND attempts >= 3
+                """,
+                (utc_now().isoformat(), self.workspace_id),
+            )
+        return int(result.rowcount)
+
+    def memory_health(self, *, extractor_available: bool) -> MemoryHealth:
+        settings = self.get_memory_settings()
+        with self.connection() as connection:
+            counts = {
+                row["status"]: int(row["count"])
+                for row in connection.execute(
+                    """
+                    SELECT status, COUNT(*) AS count FROM memory_extraction_jobs
+                    WHERE workspace_id = ? GROUP BY status
+                    """,
+                    (self.workspace_id,),
+                ).fetchall()
+            }
+            success = connection.execute(
+                """
+                SELECT completed_at FROM memory_extraction_jobs
+                WHERE workspace_id = ? AND status = 'succeeded'
+                ORDER BY completed_at DESC LIMIT 1
+                """,
+                (self.workspace_id,),
+            ).fetchone()
+            unresolved_failures = connection.execute(
+                """
+                SELECT failed.completed_at, failed.error
+                FROM memory_extraction_jobs AS failed
+                WHERE failed.workspace_id = ? AND failed.status = 'failed'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM memory_extraction_jobs AS newer
+                    WHERE newer.workspace_id = failed.workspace_id
+                      AND newer.conversation_id = failed.conversation_id
+                      AND newer.through_ordinal >= failed.through_ordinal
+                      AND (
+                        newer.created_at > failed.created_at
+                        OR (
+                          newer.created_at = failed.created_at
+                          AND newer.rowid > failed.rowid
+                        )
+                      )
+                  )
+                ORDER BY failed.completed_at DESC
+                """,
+                (self.workspace_id,),
+            ).fetchall()
+            failure = unresolved_failures[0] if unresolved_failures else None
+        return MemoryHealth(
+            workspace_id=self.workspace_id,
+            automatic_extraction_enabled=settings.automatic_extraction_enabled,
+            extractor_available=extractor_available,
+            queued_count=counts.get(MemoryJobStatus.QUEUED.value, 0),
+            running_count=counts.get(MemoryJobStatus.RUNNING.value, 0),
+            failed_count=len(unresolved_failures),
+            last_success_at=(
+                datetime.fromisoformat(success["completed_at"])
+                if success and success["completed_at"]
+                else None
+            ),
+            last_error_at=(
+                datetime.fromisoformat(failure["completed_at"])
+                if failure and failure["completed_at"]
+                else None
+            ),
+            last_error=failure["error"] if failure else None,
+        )
+
+    @staticmethod
+    def _row_to_memory(row: sqlite3.Row) -> MemoryItem:
+        return MemoryItem(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            kind=MemoryKind(row["kind"]),
+            content=row["content"],
+            tags=json.loads(row["tags_json"] or "[]"),
+            status=MemoryStatus(row["status"]),
+            pinned=bool(row["pinned"]),
+            source=MemorySource(row["source"]),
+            conversation_id=row["conversation_id"],
+            source_message_id=row["source_message_id"],
+            evidence=row["evidence"],
+            supersedes_id=row["supersedes_id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_memory_job(row: sqlite3.Row) -> MemoryExtractionJob:
+        return MemoryExtractionJob(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            conversation_id=row["conversation_id"],
+            from_ordinal=int(row["from_ordinal"]),
+            through_ordinal=int(row["through_ordinal"]),
+            source_revision=row["source_revision"],
+            status=MemoryJobStatus(row["status"]),
+            attempts=int(row["attempts"]),
+            provider=row["provider"],
+            model=row["model"],
+            extracted_count=int(row["extracted_count"]),
+            input_tokens=row["input_tokens"],
+            output_tokens=row["output_tokens"],
+            duration_ms=int(row["duration_ms"]),
+            error=row["error"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            started_at=(
+                datetime.fromisoformat(row["started_at"]) if row["started_at"] else None
+            ),
+            completed_at=(
+                datetime.fromisoformat(row["completed_at"])
+                if row["completed_at"]
+                else None
+            ),
         )
 
     def add_example(

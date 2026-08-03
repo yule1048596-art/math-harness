@@ -38,6 +38,7 @@ env \
     MATH_HARNESS_SOLVER="mimo" \
     MATH_HARNESS_CONVERSATION_PROVIDER="offline" \
     MATH_HARNESS_METHOD_EXTRACTOR="rules" \
+    MATH_HARNESS_MEMORY_EXTRACTOR="disabled" \
     MATH_HARNESS_TARGET_DRAFTER="mimo" \
     MIMO_API_KEY="bundle-test-placeholder" \
     MATH_HARNESS_MIMO_BASE_URL="http://127.0.0.1:9/v1" \
@@ -87,6 +88,25 @@ CHAT_TURN="$(curl -fsS \
 [[ "$(jq -r .assistant_message.kind <<<"$CHAT_TURN")" == "chat" ]]
 [[ "$(jq -r .assistant_message.provider <<<"$CHAT_TURN")" == "offline" ]]
 [[ "$(jq -r .conversation.message_count <<<"$CHAT_TURN")" == "2" ]]
+MEMORY="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"content":"用户偏好先讲直觉再展开细节","kind":"explanation_preference","tags":["中文偏好"],"pinned":true}' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/memories")"
+MEMORY_ID="$(jq -r .id <<<"$MEMORY")"
+[[ "$(jq -r .source <<<"$MEMORY")" == "manual" ]]
+[[ "$(jq -r .pinned <<<"$MEMORY")" == "true" ]]
+MEMORY_SEARCH="$(curl -fsS \
+    -G \
+    -H 'Authorization: Bearer integration-token' \
+    --data-urlencode 'q=直觉' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/memories")"
+[[ "$(jq -r 'length' <<<"$MEMORY_SEARCH")" == "1" ]]
+[[ "$(jq -r '.[0].id' <<<"$MEMORY_SEARCH")" == "$MEMORY_ID" ]]
+MEMORY_HEALTH="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/memory-health")"
+[[ "$(jq -r .extractor_available <<<"$MEMORY_HEALTH")" == "false" ]]
 IMPORT_LINE='{"problem":"展开 (x+1)^2","solution":"按二项式展开得到 x^2+2x+1。","tags":["代数"],"reviewed":true,"math_payload":{"expression":"(x+1)**2","expected":"x**2+2*x+1","variable":"x","point":"0","mode":"exact_equivalence"}}'
 IMPORT_PREVIEW_BODY="$(jq -nc \
     --arg content "$IMPORT_LINE" \
@@ -121,6 +141,7 @@ RESTORED_WORKSPACE_ID="$(jq -r .workspace.id <<<"$RESTORE")"
 [[ "$RESTORED_WORKSPACE_ID" != "$WORKSPACE_ID" ]]
 [[ "$(jq -r .source_workspace_id <<<"$RESTORE")" == "$WORKSPACE_ID" ]]
 [[ "$(jq -r .restored_record_counts.examples <<<"$RESTORE")" == "1" ]]
+[[ "$(jq -r .restored_record_counts.memory_items <<<"$RESTORE")" == "1" ]]
 RESTORED_CONVERSATIONS="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     "$BASE_URL/workspaces/$RESTORED_WORKSPACE_ID/conversations")"
@@ -129,6 +150,11 @@ RESTORED_MESSAGES="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     "$BASE_URL/workspaces/$RESTORED_WORKSPACE_ID/conversations/$CONVERSATION_ID/messages")"
 [[ "$(jq -r 'length' <<<"$RESTORED_MESSAGES")" == "2" ]]
+RESTORED_MEMORIES="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    "$BASE_URL/workspaces/$RESTORED_WORKSPACE_ID/memories")"
+[[ "$(jq -r 'length' <<<"$RESTORED_MEMORIES")" == "1" ]]
+[[ "$(jq -r '.[0].content' <<<"$RESTORED_MEMORIES")" == "用户偏好先讲直觉再展开细节" ]]
 TARGET_DRAFT="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     -H 'Content-Type: application/json' \
@@ -202,6 +228,7 @@ REVIEW="$(curl -fsS \
 print "health=$(jq -r '.status + " v" + .version' <<<"$HEALTH")"
 print "workspace=$(jq -r .name <<<"$WORKSPACE")"
 print "conversation=$(jq -r '.conversation.title + " → " + (.conversation.message_count | tostring) + " messages"' <<<"$SOLUTION_TURN")"
+print "memory=$(jq -r '.content + " → pinned=" + (.pinned | tostring)' <<<"$MEMORY")"
 print "bulk_import=$(jq -r '.ready_count | tostring' <<<"$IMPORT_PREVIEW") ready → $(jq -r '.imported_count | tostring' <<<"$IMPORT_COMMIT") imported"
 print "backup_restore=$(jq -r '.workspace.name' <<<"$RESTORE")"
 print "solve_status=$(jq -r .status <<<"$SOLUTION")"

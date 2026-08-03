@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.10.0"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.11.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.10.0", "ready version")
+require(ready.version == "0.11.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -74,6 +74,46 @@ let conversationMessage = try JSONDecoder().decode(
 require(conversationMessage.role == "assistant", "conversation message role")
 require(conversationMessage.verificationStatus == "verified", "conversation verification")
 require(conversationMessage.methodKeys == ["rationalization"], "conversation method keys")
+
+let memoryData = Data(
+  #"{"id":"memory-1","workspace_id":"ws-1","kind":"explanation_preference","content":"先讲直觉，再给严格证明","tags":["严谨"],"status":"active","pinned":true,"source":"automatic","conversation_id":"chat-1","source_message_id":"msg-user-1","evidence":"我喜欢先讲直觉","supersedes_id":null,"created_at":"2026-08-01T01:05:00Z","updated_at":"2026-08-01T01:05:00Z"}"#
+    .utf8
+)
+let memory = try JSONDecoder().decode(MemoryItem.self, from: memoryData)
+require(memory.kind == .explanationPreference, "memory kind")
+require(memory.status == .active, "memory status")
+require(memory.pinned, "memory pin")
+require(memory.conversationID == "chat-1", "memory source conversation")
+
+let memoryRequestData = try JSONEncoder().encode(
+  MemoryCreateRequest(
+    content: "专题是渐进估计",
+    kind: .topicContext,
+    tags: ["渐进"],
+    pinned: true
+  )
+)
+let memoryRequestObject =
+  try JSONSerialization.jsonObject(with: memoryRequestData) as? [String: Any]
+require(memoryRequestObject?["kind"] as? String == "topic_context", "memory kind encoding")
+require(memoryRequestObject?["pinned"] as? Bool == true, "memory pin encoding")
+
+let memoryJobData = Data(
+  #"{"id":"job-1","workspace_id":"ws-1","conversation_id":"chat-1","from_ordinal":0,"through_ordinal":2,"source_revision":"abc123","status":"succeeded","attempts":1,"provider":"xiaomi_mimo","model":"mimo-v2.5-pro","extracted_count":1,"input_tokens":42,"output_tokens":18,"duration_ms":320,"error":null,"created_at":"2026-08-01T01:05:00Z","started_at":"2026-08-01T01:05:01Z","completed_at":"2026-08-01T01:05:02Z"}"#
+    .utf8
+)
+let memoryJob = try JSONDecoder().decode(MemoryExtractionJob.self, from: memoryJobData)
+require(memoryJob.fromOrdinal == 0, "memory job start cursor")
+require(memoryJob.extractedCount == 1, "memory job extraction count")
+require(memoryJob.inputTokens == 42, "memory job usage")
+
+let memoryHealthData = Data(
+  #"{"workspace_id":"ws-1","automatic_extraction_enabled":true,"extractor_available":true,"queued_count":0,"running_count":0,"failed_count":0,"last_success_at":"2026-08-01T01:05:02Z","last_error_at":null,"last_error":null}"#
+    .utf8
+)
+let memoryHealth = try JSONDecoder().decode(MemoryHealth.self, from: memoryHealthData)
+require(memoryHealth.extractorAvailable, "memory extractor health")
+require(memoryHealth.failedCount == 0, "memory failure health")
 
 let turnRequestData = try JSONEncoder().encode(
   ConversationTurnRequest(
