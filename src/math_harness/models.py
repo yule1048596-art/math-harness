@@ -201,6 +201,8 @@ class Conversation(BaseModel):
     summary: str = ""
     summary_through_ordinal: int = Field(default=0, ge=0)
     message_count: int = Field(default=0, ge=0)
+    # 这个对话选定的模型服务；为空表示跟随全局设置。
+    provider: ProviderOverride | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -223,8 +225,22 @@ class ConversationMessage(BaseModel):
     created_at: datetime
 
 
+class ProviderOverride(BaseModel):
+    """单次请求（或一个对话）指定用哪个模型服务。
+
+    `profile_id` 指向设置里的 provider 档案；`model` 留空表示用该档案的默认模型。
+    档案后来被删除时解析会失败并静默退回默认 provider——引用旧档案的历史对话应当
+    继续可用。
+    """
+
+    profile_id: str = Field(min_length=1, max_length=64)
+    model: str | None = Field(default=None, max_length=200)
+
+
 class ConversationTurnRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
+    # 不填时按对话自己记住的选择，再退回全局设置。
+    provider: ProviderOverride | None = None
     turn_id: str | None = Field(default=None, min_length=1, max_length=120)
     tags: list[str] = Field(default_factory=list, max_length=30)
     top_k: int = Field(default=5, ge=1, le=20)

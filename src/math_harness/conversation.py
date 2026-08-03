@@ -7,6 +7,7 @@ from typing import Protocol
 from math_harness.models import ConversationMessage, MemoryItem, MethodMatch, Workspace
 from math_harness.provider_config import (
     ROLE_CONVERSATION,
+    ResolvedRole,
     resolve_role,
     role_is_configured,
 )
@@ -138,21 +139,33 @@ class ExtractiveConversationSummarizer:
         return "较早摘要已截断。\n" + combined[-(self.max_characters - 10) :]
 
 
+def build_conversation_responder_from_resolved(
+    resolved: ResolvedRole | None,
+) -> ConversationResponderProtocol:
+    """按已解析好的角色参数构造客户端。
+
+    env 路径与单次请求覆盖共用这一段，两条路走同样的构造逻辑。
+    """
+
+    if resolved is None:
+        return OfflineConversationResponder()
+    from math_harness.providers.openai_chat import OpenAIConversationResponder
+
+    return OpenAIConversationResponder(
+        model=resolved.model,
+        reasoning_effort=resolved.reasoning_effort,
+        timeout_seconds=resolved.timeout_seconds,
+        api_key=resolved.api_key,
+        base_url=resolved.base_url,
+        provider_name=resolved.provider_name,
+    )
+
+
 def build_conversation_responder_from_env() -> ConversationResponderProtocol:
     # 新配置优先；未配置时下面的逐变量路径保持原样，一个字都不改。
     if role_is_configured(ROLE_CONVERSATION):
-        resolved = resolve_role(ROLE_CONVERSATION)
-        if resolved is None:
-            return OfflineConversationResponder()
-        from math_harness.providers.openai_chat import OpenAIConversationResponder
-
-        return OpenAIConversationResponder(
-            model=resolved.model,
-            reasoning_effort=resolved.reasoning_effort,
-            timeout_seconds=resolved.timeout_seconds,
-            api_key=resolved.api_key,
-            base_url=resolved.base_url,
-            provider_name=resolved.provider_name,
+        return build_conversation_responder_from_resolved(
+            resolve_role(ROLE_CONVERSATION)
         )
 
     configured = os.getenv("MATH_HARNESS_CONVERSATION_PROVIDER", "auto")

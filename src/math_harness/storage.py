@@ -40,6 +40,7 @@ from math_harness.models import (
     MethodMergeProposal,
     MethodVersion,
     ProblemExample,
+    ProviderOverride,
     SolutionAttempt,
     SolutionAttemptStatus,
     SolveEvaluationRun,
@@ -601,6 +602,11 @@ class WorkspaceStore:
                     ON solve_evaluation_runs(workspace_id, created_at);
                 """
             )
+            # 每个对话记住自己的模型选择，切换后新回合继续用它。
+            self._ensure_column(
+                connection, "conversations", "provider_profile_id", "TEXT"
+            )
+            self._ensure_column(connection, "conversations", "model", "TEXT")
             self._ensure_column(connection, "examples", "extraction_json", "TEXT")
             self._ensure_column(
                 connection,
@@ -819,6 +825,30 @@ class WorkspaceStore:
         if not normalized:
             return fallback
         return normalized if len(normalized) <= 42 else normalized[:41] + "…"
+
+    def set_conversation_provider(
+        self,
+        conversation_id: str,
+        provider: ProviderOverride | None,
+    ) -> Conversation:
+        """记住这个对话选定的模型服务。传 None 表示回到跟随全局设置。"""
+
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE conversations
+                SET provider_profile_id = ?, model = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    provider.profile_id if provider else None,
+                    provider.model if provider else None,
+                    utc_now().isoformat(),
+                    conversation_id,
+                    self.workspace_id,
+                ),
+            )
+        return self.get_conversation(conversation_id)
 
     def add_conversation(self, conversation: Conversation) -> Conversation:
         self._assert_workspace(conversation.workspace_id)
@@ -1054,6 +1084,13 @@ class WorkspaceStore:
             summary=row["summary"],
             summary_through_ordinal=int(row["summary_through_ordinal"]),
             message_count=int(row["message_count"]),
+            provider=(
+                ProviderOverride(
+                    profile_id=row["provider_profile_id"], model=row["model"]
+                )
+                if row["provider_profile_id"]
+                else None
+            ),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

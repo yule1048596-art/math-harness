@@ -10,6 +10,7 @@ from math_harness.models import (
 )
 from math_harness.provider_config import (
     ROLE_METHOD_EXTRACTOR,
+    ResolvedRole,
     resolve_role,
     role_is_configured,
 )
@@ -60,26 +61,36 @@ class FallbackMethodExtractor:
             )
 
 
+def build_method_extractor_from_resolved(
+    resolved: ResolvedRole | None,
+) -> MethodExtractorProtocol:
+    """按已解析好的角色参数构造客户端。
+
+    env 路径与单次请求覆盖共用这一段，两条路走同样的构造逻辑。
+    """
+
+    if resolved is None:
+        return MethodExtractor()
+    from math_harness.providers.openai import OpenAIStructuredMethodExtractor
+
+    return FallbackMethodExtractor(
+        OpenAIStructuredMethodExtractor(
+            model=resolved.model,
+            reasoning_effort=resolved.reasoning_effort,
+            max_output_tokens=resolved.max_output_tokens,
+            api_key=resolved.api_key,
+            base_url=resolved.base_url,
+            provider_name=resolved.provider_name,
+            structured_output_mode=resolved.structured_output_mode,
+            json_object_retries=resolved.json_object_retries,
+        )
+    )
+
+
 def build_method_extractor_from_env() -> MethodExtractorProtocol:
     # 新配置优先；未配置时下面的逐变量路径保持原样，一个字都不改。
     if role_is_configured(ROLE_METHOD_EXTRACTOR):
-        resolved = resolve_role(ROLE_METHOD_EXTRACTOR)
-        if resolved is None:
-            return MethodExtractor()
-        from math_harness.providers.openai import OpenAIStructuredMethodExtractor
-
-        return FallbackMethodExtractor(
-            OpenAIStructuredMethodExtractor(
-                model=resolved.model,
-                reasoning_effort=resolved.reasoning_effort,
-                max_output_tokens=resolved.max_output_tokens,
-                api_key=resolved.api_key,
-                base_url=resolved.base_url,
-                provider_name=resolved.provider_name,
-                structured_output_mode=resolved.structured_output_mode,
-                json_object_retries=resolved.json_object_retries,
-            )
-        )
+        return build_method_extractor_from_resolved(resolve_role(ROLE_METHOD_EXTRACTOR))
 
     provider = os.getenv("MATH_HARNESS_METHOD_EXTRACTOR", "rules").strip().lower()
     if provider == "rules":

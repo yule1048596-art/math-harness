@@ -231,6 +231,43 @@ def resolve_role(role: str) -> ResolvedRole | None:
     return config.resolve(role)
 
 
+def resolve_override(
+    role: str,
+    profile_id: str,
+    model: str | None = None,
+) -> ResolvedRole | None:
+    """按显式指定的档案与模型解析角色，用于单次请求的临时覆盖。
+
+    与 `resolve_role` 的区别是不看角色绑定：调用方已经明确说了要用哪个档案。
+    档案不存在时返回 None，调用方回退到默认 provider——用户删掉一个档案后，引用它的
+    历史对话应当继续可用，而不是报错。
+    """
+
+    if profile_id.strip().lower() == OFFLINE_PROFILE:
+        return None
+    config = load_provider_config()
+    if config is None:
+        return None
+    profile = config.profiles.get(profile_id)
+    if profile is None:
+        return None
+    binding = config.roles.get(role)
+    return config.model_copy(
+        update={
+            "roles": {
+                **config.roles,
+                role: RoleBinding(
+                    profile=profile_id,
+                    model=model,
+                    reasoning_effort=(
+                        binding.reasoning_effort if binding else "medium"
+                    ),
+                ),
+            }
+        }
+    ).resolve(role)
+
+
 def role_is_configured(role: str) -> bool:
     """该角色是否由新配置接管（含显式绑定到离线）。"""
 

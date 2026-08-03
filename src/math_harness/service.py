@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, RLock, Thread
@@ -22,6 +23,7 @@ from math_harness.conversation import (
     ConversationResponderProtocol,
     ExtractiveConversationSummarizer,
     build_conversation_responder_from_env,
+    build_conversation_responder_from_resolved,
 )
 from math_harness.dedup import find_merge_candidates
 from math_harness.errors import InvalidKnowledgeState
@@ -100,6 +102,7 @@ from math_harness.models import (
     MethodStatusUpdate,
     MethodVersion,
     ProblemExample,
+    ProviderOverride,
     SolutionAttempt,
     SolutionAttemptStatus,
     SolutionCorrection,
@@ -126,16 +129,25 @@ from math_harness.portability import (
     create_workspace_archive,
     restore_workspace_archive,
 )
+from math_harness.provider_config import (
+    ROLE_CONVERSATION,
+    ROLE_SOLVER,
+    ROLE_TARGET_DRAFTER,
+    ResolvedRole,
+    resolve_override,
+)
 from math_harness.retrieval import MethodRetriever
 from math_harness.solving import (
     SolutionGeneratorProtocol,
     build_solution_generator_from_env,
+    build_solution_generator_from_resolved,
 )
 from math_harness.storage import WorkspaceManager, WorkspaceStore
 from math_harness.structure import extract_features
 from math_harness.target_drafting import (
     TargetDrafterProtocol,
     build_target_drafter_from_env,
+    build_target_drafter_from_resolved,
 )
 from math_harness.verifier import SolutionVerifier
 
@@ -186,10 +198,82 @@ class MathHarnessService:
             conversation_summarizer or ExtractiveConversationSummarizer()
         )
         self.memory_extractor = memory_extractor or build_memory_extractor_from_env()
+        # 单次请求覆盖出来的客户端缓存，键是 (角色, 档案, 模型)。
+        #
+        # 没有覆盖时一律返回上面那几个默认实例本身——不是等价对象，是同一个对象。
+        # 这样「不带覆盖时行为不变」是构造上成立的，不依赖两条路径碰巧一致。
+        self._override_clients: dict[tuple[str, str, str], object] = {}
+        self._override_lock = RLock()
         self._knowledge_lock = RLock()
         self._memory_wakeup = Event()
         self._memory_stop = Event()
         self._memory_thread: Thread | None = None
+
+    def _resolve_client(
+        self,
+        role: str,
+        default: object,
+        factory: Callable[[ResolvedRole | None], object],
+        override: ProviderOverride | None,
+    ) -> object:
+        """按角色取客户端；没有覆盖时返回默认实例本身。
+
+        档案已被删除时 `resolve_override` 返回 None，这里同样退回默认——引用了旧档案
+        的历史对话应当继续可用，而不是整条路径报错。
+        """
+
+        if override is None or not override.profile_id:
+            return default
+        resolved = resolve_override(role, override.profile_id, override.model)
+        if resolved is None:
+            return default
+        key = (role, resolved.profile_id, resolved.model)
+        with self._override_lock:
+            client = self._override_clients.get(key)
+            if client is None:
+                client = factory(resolved)
+                self._override_clients[key] = client
+            return client
+
+    def resolve_conversation_responder(
+        self, override: ProviderOverride | None = None
+    ) -> ConversationResponderProtocol:
+        return self._resolve_client(
+            ROLE_CONVERSATION,
+            self.conversation_responder,
+            build_conversation_responder_from_resolved,
+            override,
+        )
+
+    def resolve_solution_generator(
+        self, override: ProviderOverride | None = None
+    ) -> SolutionGeneratorProtocol:
+        return self._resolve_client(
+            ROLE_SOLVER,
+            self.generator,
+            build_solution_generator_from_resolved,
+            override,
+        )
+
+    def resolve_target_drafter(
+        self, override: ProviderOverride | None = None
+    ) -> TargetDrafterProtocol:
+        return self._resolve_client(
+            ROLE_TARGET_DRAFTER,
+            self.target_drafter,
+            build_target_drafter_from_resolved,
+            override,
+        )
+
+    def set_conversation_provider(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        provider: ProviderOverride | None,
+    ) -> Conversation:
+        return self.workspaces.store(workspace_id).set_conversation_provider(
+            conversation_id, provider
+        )
 
     def create_workspace(self, request: WorkspaceCreate) -> Workspace:
         return self.workspaces.create(request)
@@ -661,7 +745,9 @@ class MathHarnessService:
         request: ConversationTurnRequest,
     ) -> ConversationTurnResult:
         store = self.workspaces.store(workspace_id)
-        store.get_conversation(conversation_id)
+        conversation = store.get_conversation(conversation_id)
+        # 解析顺序：本次请求指定 > 这个对话记住的 > 全局设置。
+        effective_override = request.provider or conversation.provider
         turn_id = request.turn_id or str(uuid.uuid4())
         existing = store.get_conversation_turn_messages(conversation_id, turn_id)
         user_message = next(
@@ -756,6 +842,7 @@ class MathHarnessService:
                 context,
                 request.message,
                 request.max_output_tokens,
+                override=effective_override,
             )
             assistant_content = generation.content
             method_keys = [match.method.key for match in matches]
@@ -841,19 +928,13 @@ class MathHarnessService:
         context: ConversationContext,
         message: str,
         max_output_tokens: int,
+        override: ProviderOverride | None = None,
     ) -> ChatGeneration:
+        responder = self.resolve_conversation_responder(override)
         try:
-            return self.conversation_responder.respond(
-                context,
-                message,
-                max_output_tokens,
-            )
+            return responder.respond(context, message, max_output_tokens)
         except Exception as exc:  # noqa: BLE001
-            provider = getattr(
-                self.conversation_responder,
-                "name",
-                self.conversation_responder.__class__.__name__,
-            )
+            provider = getattr(responder, "name", responder.__class__.__name__)
             error = f"{exc.__class__.__name__}: {exc}"[:2_000]
             return ChatGeneration(
                 content=(
@@ -861,12 +942,8 @@ class MathHarnessService:
                     "请检查模型设置或网络后重新发送。"
                 ),
                 provider=provider,
-                model=getattr(self.conversation_responder, "model", None),
-                prompt_version=getattr(
-                    self.conversation_responder,
-                    "prompt_version",
-                    "unknown",
-                ),
+                model=getattr(responder, "model", None),
+                prompt_version=getattr(responder, "prompt_version", "unknown"),
                 error=error,
             )
 

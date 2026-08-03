@@ -56,6 +56,7 @@ from math_harness.models import (
     MethodStatusUpdate,
     MethodVersion,
     ProblemExample,
+    ProviderOverride,
     ProviderTestRequest,
     ProviderTestResult,
     SolutionAttempt,
@@ -190,6 +191,17 @@ def create_app(
         conversation_id: str,
     ) -> list[ConversationMessage]:
         return service.list_conversation_messages(workspace_id, conversation_id)
+
+    @app.put(
+        "/workspaces/{workspace_id}/conversations/{conversation_id}/provider",
+        response_model=Conversation,
+    )
+    def set_conversation_provider(
+        workspace_id: str,
+        conversation_id: str,
+        request: ProviderOverride | None = None,
+    ) -> Conversation:
+        return service.set_conversation_provider(workspace_id, conversation_id, request)
 
     @app.post(
         "/workspaces/{workspace_id}/conversations/{conversation_id}/turns",

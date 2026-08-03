@@ -238,6 +238,10 @@ _TABLE_COLUMNS = {
         "summary",
         "summary_through_ordinal",
         "message_count",
+        # 对话记住的模型选择。只是档案 ID 和模型名，**不含密钥**——密钥只在
+        # Keychain 里，备份文件不加密，任何进这里的列都要按公开数据对待。
+        "provider_profile_id",
+        "model",
         "created_at",
         "updated_at",
     },
