@@ -229,6 +229,56 @@ def _dominant_balance() -> tuple[FamilyInstance, ...]:
                 expected=f"exp({m}*x)",
             )
         )
+    # 以下三组补的是 v0.13 量出来的覆盖缺口：主导平衡此前从没见过「指数比多项式」、
+    # 「Gamma 比值」和「根式相加」这三类形状，导致 cross_family 切片上它的签名里
+    # 根本没有这些路径，任何打分调整都救不了。
+    for m in (2, 3, 4):
+        for p in (3, 5, 100):
+            instances.append(
+                FamilyInstance(
+                    problem=f"求 x→∞ 时 exp({m}x)/x^{p} 的渐进等价式。",
+                    expression=f"exp({m}*x)/x**{p}",
+                    expected=f"exp({m}*x)/x**{p}",
+                )
+            )
+    # Gamma 比值与根式相加的形状刻意与留出题错开：教的是「比值/求和该用主导平衡」
+    # 这个概念，而不是把考题背下来。先前用 gamma(n+k)/gamma(n) 和 sqrt(x^2+a)+
+    # sqrt(x^2+b) 时，两道 cross_family 留出题在路径上与训练完全相同，隔离测试直接
+    # 报错——那已经不是在测泛化了。
+    for k in (2, 3):
+        instances.append(
+            FamilyInstance(
+                problem=f"求 n→∞ 时 Gamma({k}n)/Gamma(n) 的渐进等价式。",
+                expression=f"gamma({k}*n)/gamma(n)",
+                expected=f"gamma({k}*n)/gamma(n)",
+                variable="n",
+            )
+        )
+    for k in (2, 3):
+        instances.append(
+            FamilyInstance(
+                problem=f"求 n→∞ 时 Gamma(n+{k})/(n*Gamma(n)) 的渐进等价式。",
+                expression=f"gamma(n + {k})/(n*gamma(n))",
+                expected=f"n**{k - 1}",
+                variable="n",
+            )
+        )
+    for a, b in ((2, 5), (3, 7), (1, 4)):
+        instances.append(
+            FamilyInstance(
+                problem=f"求 x→∞ 时 sqrt(x^2+{a}x) + sqrt(x^2+{b}x) 的渐进等价式。",
+                expression=f"sqrt(x**2+{a}*x) + sqrt(x**2+{b}*x)",
+                expected="2*x",
+            )
+        )
+    for a, b in ((4, 9), (1, 16)):
+        instances.append(
+            FamilyInstance(
+                problem=f"求 x→∞ 时 sqrt({a}x^2+x) + sqrt({b}x^2+x) 的渐进等价式。",
+                expression=f"sqrt({a}*x**2+x) + sqrt({b}*x**2+x)",
+                expected=f"{int(a**0.5) + int(b**0.5)}*x",
+            )
+        )
     return tuple(instances)
 
 

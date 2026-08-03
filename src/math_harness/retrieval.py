@@ -7,6 +7,7 @@ from math_harness.models import MethodCard, MethodMatch
 from math_harness.structure import (
     MethodSignature,
     StructuralFeatures,
+    path_background,
     path_idf,
     signature_score,
 )
@@ -50,6 +51,9 @@ class MethodRetriever:
         }
         # 路径 IDF 只对本次候选集有意义，现算一次给所有方法共用。
         idf = path_idf(list(signatures.values())) if use_structure else {}
+        # 背景分布把打分从似然折算成后验：一条路径若在所有方法里都常见，命中它
+        # 不构成证据。
+        background = path_background(list(signatures.values())) if use_structure else {}
 
         for method in methods:
             method_text = "\n".join(
@@ -71,7 +75,7 @@ class MethodRetriever:
             )
             history_score = history_volume * reliability
             structure_score = (
-                signature_score(signatures[method.id], features, idf)
+                signature_score(signatures[method.id], features, idf, background)
                 if use_structure
                 else 0.0
             )

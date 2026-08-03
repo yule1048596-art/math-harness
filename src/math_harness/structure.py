@@ -340,6 +340,45 @@ def path_idf(signatures: list[MethodSignature]) -> dict[str, float]:
     }
 
 
+def path_background(signatures: list[MethodSignature]) -> dict[str, float]:
+    """每条路径在全部方法上的平均条件概率。
+
+    这是把似然变成后验的分母。IDF 只看「有多少方法出现过这条路径」，看不出**强度**：
+    26 条训练样本全含根式的方法，`P(根式路径|它) ≈ 1.0`，于是任何带根式的查询都先
+    命中它——哪怕根式对这个方法根本不构成判别信息。v0.13 的 cross_family 切片量到的
+    正是这个偏差。
+
+    与 `path_idf` 在检索时同一处对候选方法集现算，成本可忽略。
+    """
+
+    totals: dict[str, float] = {}
+    counted = 0
+    for signature in signatures:
+        if signature.sample_count <= 0:
+            continue
+        counted += 1
+        for path, count in signature.paths.items():
+            totals[path] = totals.get(path, 0.0) + min(
+                count / signature.sample_count, 1.0
+            )
+    if counted == 0:
+        return {}
+    return {path: total / counted for path, total in totals.items()}
+
+
+def _posterior(likelihood: float, background: float) -> float:
+    """把 `P(特征|方法)` 折算成有界的后验式证据强度。
+
+    `likelihood == background` 时得 0.5，即「这条特征对区分方法没有信息」；远高于
+    背景才接近 1。背景缺失时退回原始似然，保持旧行为。
+    """
+
+    if background <= 0:
+        return likelihood
+    total = likelihood + background
+    return likelihood / total if total > 0 else 0.0
+
+
 def _conditional_hit_rate(
     counts: dict[str, int],
     items: list[str],
@@ -358,18 +397,25 @@ def _weighted_path_hit_rate(
     paths: list[str],
     sample_count: int,
     idf: dict[str, float],
+    background: dict[str, float] | None = None,
 ) -> float:
-    """查询路径在该方法卡历史里的 IDF 加权命中率。"""
+    """查询路径在该方法卡历史里的 IDF 加权命中强度。
+
+    背景分布存在时按后验折算，把「训练样本单一的方法通吃共享特征」这个偏差消掉；
+    缺失时退回原始条件命中率，保持旧行为。
+    """
 
     if not paths or sample_count <= 0:
         return 0.0
     weight_total = sum(idf.get(path, 1.0) for path in paths)
     if weight_total <= 0:
         return 0.0
-    hit = sum(
-        min(counts.get(path, 0) / sample_count, 1.0) * idf.get(path, 1.0)
-        for path in paths
-    )
+    hit = 0.0
+    for path in paths:
+        likelihood = min(counts.get(path, 0) / sample_count, 1.0)
+        if background:
+            likelihood = _posterior(likelihood, background.get(path, 0.0))
+        hit += likelihood * idf.get(path, 1.0)
     return hit / weight_total
 
 
@@ -377,6 +423,7 @@ def signature_score(
     signature: MethodSignature,
     features: StructuralFeatures,
     idf: dict[str, float] | None = None,
+    background: dict[str, float] | None = None,
 ) -> float:
     """方法卡的结构签名与当前题目结构的契合度，取值 [0, 1]。
 
@@ -404,7 +451,7 @@ def signature_score(
     )
     flag_score = _conditional_hit_rate(signature.flags, features.flags, count)
     path_score = _weighted_path_hit_rate(
-        signature.paths, features.paths, count, idf or {}
+        signature.paths, features.paths, count, idf or {}, background
     )
 
     return round(
