@@ -128,6 +128,78 @@ final class AppModel: ObservableObject {
     }
   }
 
+  /// 切换这个对话使用的模型服务。立即生效，不重启数学引擎。
+  func setConversationProvider(_ provider: ConversationProvider?) async {
+    guard let api, let workspaceID = selectedWorkspaceID,
+      let conversationID = selectedConversationID
+    else { return }
+    do {
+      let updated = try await api.setConversationProvider(
+        workspaceID: workspaceID,
+        conversationID: conversationID,
+        provider: provider
+      )
+      replaceConversation(updated)
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  func renameSelectedConversation(_ title: String) async {
+    guard let api, let workspaceID = selectedWorkspaceID,
+      let conversationID = selectedConversationID
+    else { return }
+    do {
+      replaceConversation(
+        try await api.renameConversation(
+          workspaceID: workspaceID,
+          conversationID: conversationID,
+          title: title
+        )
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  /// 归档只改状态，不删除任何消息。
+  func toggleConversationArchive() async {
+    guard let api, let workspaceID = selectedWorkspaceID,
+      let conversation = selectedConversation
+    else { return }
+    let next: ConversationStatus = conversation.status == .archived ? .active : .archived
+    do {
+      replaceConversation(
+        try await api.setConversationStatus(
+          workspaceID: workspaceID,
+          conversationID: conversation.id,
+          status: next
+        )
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  func searchConversations(_ query: String) async -> [ConversationMessage] {
+    guard let api, let workspaceID = selectedWorkspaceID else { return [] }
+    do {
+      return try await api.searchConversationMessages(
+        workspaceID: workspaceID,
+        query: query
+      )
+    } catch {
+      errorMessage = error.localizedDescription
+      return []
+    }
+  }
+
+  private func replaceConversation(_ updated: Conversation) {
+    if let index = conversations.firstIndex(where: { $0.id == updated.id }) {
+      conversations[index] = updated
+    }
+  }
+
   func refreshWorkspaces() async {
     guard let api else { return }
     isRefreshing = true

@@ -55,7 +55,7 @@ require(workspace.name == "渐进估计", "workspace name")
 require(workspace.createdAt.hasPrefix("2026-08-01"), "workspace timestamp")
 
 let conversationData = Data(
-  #"{"id":"chat-1","workspace_id":"ws-1","title":"根式讨论","summary":"此前讨论了有理化。","summary_through_ordinal":2,"message_count":4,"created_at":"2026-08-01T01:00:00Z","updated_at":"2026-08-01T01:05:00Z"}"#
+  #"{"id":"chat-1","workspace_id":"ws-1","title":"根式讨论","summary":"此前讨论了有理化。","summary_through_ordinal":2,"message_count":4,"status":"active","provider":{"profile_id":"cheap","model":null},"created_at":"2026-08-01T01:00:00Z","updated_at":"2026-08-01T01:05:00Z"}"#
     .utf8
 )
 let conversation = try JSONDecoder().decode(Conversation.self, from: conversationData)
@@ -287,5 +287,21 @@ require(
   danglingRoles[ModelRole.conversation.rawValue]?.profile == "deepseek-1",
   "valid binding survives"
 )
+
+// 对话的模型选择与归档状态
+require(conversation.status == .active, "conversation defaults to active")
+require(conversation.provider?.profileID == "cheap", "conversation provider decodes")
+
+let providerData = try JSONEncoder().encode(
+  ConversationProvider(profileID: "strong", model: "deepseek-reasoner")
+)
+let providerObject = try JSONSerialization.jsonObject(with: providerData) as? [String: Any]
+require(providerObject?["profile_id"] as? String == "strong", "provider profile_id key")
+// 对话记录里绝不能出现密钥——备份文件不加密。
+require(providerObject?["api_key"] == nil, "conversation provider carries no key")
+
+let renameData = try JSONEncoder().encode(ConversationRenameRequest(title: "新标题"))
+let renameObject = try JSONSerialization.jsonObject(with: renameData) as? [String: Any]
+require(renameObject?["title"] as? String == "新标题", "rename encoding")
 
 print("MathHarnessCore checks passed")

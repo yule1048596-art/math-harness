@@ -316,6 +316,54 @@ public actor APIClient {
     )
   }
 
+  public func renameConversation(
+    workspaceID: String,
+    conversationID: String,
+    title: String
+  ) async throws -> Conversation {
+    try await send(
+      path: "/workspaces/\(workspaceID)/conversations/\(conversationID)",
+      method: "PATCH",
+      body: ConversationRenameRequest(title: title)
+    )
+  }
+
+  public func setConversationStatus(
+    workspaceID: String,
+    conversationID: String,
+    status: ConversationStatus
+  ) async throws -> Conversation {
+    try await send(
+      path: "/workspaces/\(workspaceID)/conversations/\(conversationID)/status"
+        + "?status=\(status.rawValue)",
+      method: "PUT"
+    )
+  }
+
+  public func setConversationProvider(
+    workspaceID: String,
+    conversationID: String,
+    provider: ConversationProvider?
+  ) async throws -> Conversation {
+    let path = "/workspaces/\(workspaceID)/conversations/\(conversationID)/provider"
+    guard let provider else {
+      return try await send(path: path, method: "PUT", body: [String: String]())
+    }
+    return try await send(path: path, method: "PUT", body: provider)
+  }
+
+  public func searchConversationMessages(
+    workspaceID: String,
+    query: String
+  ) async throws -> [ConversationMessage] {
+    let escaped =
+      query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
+    return try await send(
+      path: "/workspaces/\(workspaceID)/conversations/search?q=\(escaped)",
+      method: "GET"
+    )
+  }
+
   public func testProvider(_ request: ProviderTestRequest) async throws
     -> ProviderTestResult
   {

@@ -96,6 +96,35 @@ public struct ConversationCreateRequest: Codable, Equatable, Sendable {
   }
 }
 
+public enum ConversationStatus: String, Codable, Sendable {
+  case active
+  case archived
+}
+
+/// 这个对话选定的模型服务。只有档案 ID 和模型名，**不含密钥**。
+public struct ConversationProvider: Codable, Equatable, Sendable {
+  public let profileID: String
+  public let model: String?
+
+  enum CodingKeys: String, CodingKey {
+    case profileID = "profile_id"
+    case model
+  }
+
+  public init(profileID: String, model: String? = nil) {
+    self.profileID = profileID
+    self.model = model
+  }
+}
+
+public struct ConversationRenameRequest: Codable, Sendable {
+  public let title: String
+
+  public init(title: String) {
+    self.title = title
+  }
+}
+
 public struct Conversation: Codable, Identifiable, Equatable, Sendable {
   public let id: String
   public let workspaceID: String
@@ -103,11 +132,13 @@ public struct Conversation: Codable, Identifiable, Equatable, Sendable {
   public let summary: String
   public let summaryThroughOrdinal: Int
   public let messageCount: Int
+  public let status: ConversationStatus
+  public let provider: ConversationProvider?
   public let createdAt: String
   public let updatedAt: String
 
   enum CodingKeys: String, CodingKey {
-    case id, title, summary
+    case id, title, summary, status, provider
     case workspaceID = "workspace_id"
     case summaryThroughOrdinal = "summary_through_ordinal"
     case messageCount = "message_count"

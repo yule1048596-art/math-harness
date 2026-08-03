@@ -1,8 +1,34 @@
+import AppKit
 import MathHarnessCore
 import SwiftUI
 
 struct WorkspaceView: View {
   @EnvironmentObject private var model: AppModel
+  @State private var showingRename = false
+  @State private var renameDraft = ""
+  @State private var searchQuery = ""
+  @State private var searchHits: [ConversationMessage] = []
+  @State private var showingSearch = false
+
+  private var providerProfiles: [ProviderProfile] {
+    AppSettings.providerSettings.profiles
+  }
+
+  /// 当前对话实际会用哪个服务；跟随全局时显示全局那个。
+  private var currentModelLabel: String {
+    let settings = AppSettings.providerSettings
+    if let chosen = model.selectedConversation?.provider?.profileID,
+      let profile = settings.profile(id: chosen)
+    {
+      return profile.name
+    }
+    if let fallback = settings.simpleProfileID,
+      let profile = settings.profile(id: fallback)
+    {
+      return "\(profile.name)（全局）"
+    }
+    return "离线 SymPy"
+  }
 
   var body: some View {
     VStack(spacing: 0) {
@@ -54,6 +80,24 @@ struct WorkspaceView: View {
         } label: {
           Label("新建会话", systemImage: "square.and.pencil")
         }
+        if model.selectedConversation != nil {
+          Divider()
+          Button {
+            renameDraft = model.selectedConversation?.title ?? ""
+            showingRename = true
+          } label: {
+            Label("重命名……", systemImage: "pencil")
+          }
+          Button {
+            Task { await model.toggleConversationArchive() }
+          } label: {
+            Label(
+              model.selectedConversation?.status == .archived ? "取消归档" : "归档",
+              systemImage: model.selectedConversation?.status == .archived
+                ? "tray.and.arrow.up" : "archivebox"
+            )
+          }
+        }
       } label: {
         Label(
           model.selectedConversation?.title ?? "新会话",
@@ -64,6 +108,52 @@ struct WorkspaceView: View {
       .menuStyle(.borderlessButton)
       .frame(maxWidth: 220)
       .disabled(model.isSolving)
+
+      // 对话内切换模型：立即生效，不需要重启数学引擎。选择随这个对话持久化。
+      Menu {
+        Button {
+          Task { await model.setConversationProvider(nil) }
+        } label: {
+          if model.selectedConversation?.provider == nil {
+            Label("跟随全局设置", systemImage: "checkmark")
+          } else {
+            Text("跟随全局设置")
+          }
+        }
+        if !providerProfiles.isEmpty {
+          Divider()
+          ForEach(providerProfiles) { profile in
+            Button {
+              Task {
+                await model.setConversationProvider(
+                  ConversationProvider(profileID: profile.id)
+                )
+              }
+            } label: {
+              if model.selectedConversation?.provider?.profileID == profile.id {
+                Label(profile.name, systemImage: "checkmark")
+              } else {
+                Text(profile.name)
+              }
+            }
+          }
+        }
+      } label: {
+        Label(currentModelLabel, systemImage: "cpu")
+          .lineLimit(1)
+      }
+      .menuStyle(.borderlessButton)
+      .frame(maxWidth: 200)
+      .help("这个对话使用的模型服务")
+      .disabled(model.selectedConversation == nil || model.isSolving)
+
+      Button {
+        showingSearch.toggle()
+      } label: {
+        Label("搜索", systemImage: "magnifyingglass")
+      }
+      .buttonStyle(.borderless)
+      .help("搜索本工作区的会话消息")
 
       if !model.pendingExamples.isEmpty {
         Label("\(model.pendingExamples.count) 待复核", systemImage: "tray.full")
@@ -82,6 +172,53 @@ struct WorkspaceView: View {
     }
     .padding(.horizontal, 18)
     .frame(minHeight: 58)
+    .alert("重命名会话", isPresented: $showingRename) {
+      TextField("标题", text: $renameDraft)
+      Button("取消", role: .cancel) {}
+      Button("保存") {
+        let title = renameDraft
+        Task { await model.renameSelectedConversation(title) }
+      }
+    }
+    .popover(isPresented: $showingSearch, arrowEdge: .bottom) {
+      searchPanel
+    }
+  }
+
+  private var searchPanel: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      TextField("搜索本工作区的会话消息", text: $searchQuery)
+        .textFieldStyle(.roundedBorder)
+        .onSubmit {
+          let query = searchQuery
+          Task { searchHits = await model.searchConversations(query) }
+        }
+      if searchHits.isEmpty {
+        Text(searchQuery.isEmpty ? "输入关键词后回车。" : "没有匹配的消息。")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      } else {
+        List(searchHits) { hit in
+          VStack(alignment: .leading, spacing: 2) {
+            Text(verbatim: hit.role == "user" ? "我" : "助手")
+              .font(.caption2)
+              .foregroundStyle(.secondary)
+            Text(hit.content)
+              .lineLimit(3)
+              .font(.callout)
+          }
+          .contentShape(Rectangle())
+          .onTapGesture {
+            model.selectConversation(hit.conversationID)
+            showingSearch = false
+          }
+        }
+        .listStyle(.plain)
+        .frame(height: 260)
+      }
+    }
+    .padding(12)
+    .frame(width: 380)
   }
 
   private var activeMemoryCount: Int {
@@ -143,6 +280,8 @@ private struct ConversationTimeline: View {
 
 private struct ConversationMessageRow: View {
   @EnvironmentObject private var model: AppModel
+  @State private var showingEdit = false
+  @State private var editDraft = ""
   let message: ConversationMessage
 
   var body: some View {
@@ -154,6 +293,47 @@ private struct ConversationMessageRow: View {
           .padding(.horizontal, 14)
           .padding(.vertical, 10)
           .background(.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 15))
+          .contextMenu {
+            // 两者都以新回合追加，原始历史不覆盖——与人工纠正、方法卡版本快照
+            // 保持同一条审计原则。
+            Button {
+              let content = message.content
+              Task {
+                _ = await model.sendConversationTurn(
+                  message: content, tags: [], mathTarget: nil
+                )
+              }
+            } label: {
+              Label("重新生成", systemImage: "arrow.clockwise")
+            }
+            Button {
+              editDraft = message.content
+              showingEdit = true
+            } label: {
+              Label("编辑后重发……", systemImage: "pencil")
+            }
+            Divider()
+            Button {
+              NSPasteboard.general.clearContents()
+              NSPasteboard.general.setString(message.content, forType: .string)
+            } label: {
+              Label("复制", systemImage: "doc.on.doc")
+            }
+          }
+      }
+      .alert("编辑后重发", isPresented: $showingEdit) {
+        TextField("消息", text: $editDraft)
+        Button("取消", role: .cancel) {}
+        Button("发送") {
+          let content = editDraft
+          Task {
+            _ = await model.sendConversationTurn(
+              message: content, tags: [], mathTarget: nil
+            )
+          }
+        }
+      } message: {
+        Text("会以新回合追加，原消息保留在历史中。")
       }
     } else {
       HStack(alignment: .top, spacing: 10) {
