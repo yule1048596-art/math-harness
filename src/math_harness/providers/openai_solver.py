@@ -68,6 +68,7 @@ class OpenAISolutionGenerator:
         provider_name: str = "openai",
         structured_output_mode: str = "json_schema",
         json_object_retries: int = 0,
+        tool_session: Any | None = None,
         max_retries: int = 0,
         client: Any | None = None,
     ) -> None:
@@ -94,6 +95,7 @@ class OpenAISolutionGenerator:
         self.name = provider_name
         self.structured_output_mode = structured_output_mode
         self.json_object_retries = json_object_retries
+        self.tool_session = tool_session
         self.max_retries = max_retries
         self._client = client
 
@@ -217,6 +219,11 @@ class OpenAISolutionGenerator:
     ) -> SolutionGenerationResult:
         started = perf_counter()
         client = self._client_or_create()
+        # 工具启用时先独立取证，再把结论作为上下文交给下面原有的结构化请求。
+        if self.tool_session is not None:
+            findings = self.tool_session.research(client, self.model, user_content)
+            if findings:
+                user_content = f"{findings}\n\n{user_content}"
         common_options = {
             "model": self.model,
             "input": [
