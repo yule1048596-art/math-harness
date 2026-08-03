@@ -1,19 +1,21 @@
 # Math Harness
 
-一个面向数学学习、研究和知识积累的本地优先 AI Harness。你可以为不同数学方向创建彼此
-隔离的工作区，让系统从题目、解答、求解记录和人工复核中逐步积累可检索的方法卡，同时
-使用 SymPy 对可形式化的结论进行独立验证。
+一个面向数学学习、研究和知识积累的本地优先 AI Harness。它现在既是可以接入模型进行
+自然语言交流的原生 macOS 对话 App，也是一个带独立验算、人工复核和可审计成长闭环的
+数学工作台。你可以为不同数学方向创建彼此隔离的工作区，让系统逐步积累可信的方法卡。
 
 [下载最新版](https://github.com/yule1048596-art/math-harness/releases/latest) ·
 [查看全部版本](https://github.com/yule1048596-art/math-harness/releases) ·
 [MIT License](LICENSE)
 
-> 当前版本：**v0.9.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
+> 当前版本：**v0.10.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
 > 当前公开安装包使用 ad-hoc 签名，尚未完成 Developer ID 公证。
 
 ## 它能做什么
 
 - 为渐进估计、极限、级数或其他主题建立互不干扰的独立工作区；
+- 在每个工作区中建立多个持久对话，像普通 AI 聊天软件一样输入自然语言；
+- 用滚动摘要、近期消息和当前工作区已晋级方法维持可控的长对话上下文；
 - 使用离线 SymPy，或可选的小米 MiMo，生成候选解和简洁推导；
 - 把自然语言题目整理成可验证目标，再由用户检查、确认；
 - 用受限表达式解析器和 SymPy 独立验收候选答案；
@@ -31,6 +33,7 @@ Math Harness 的“成长”目前指的是**可审计的记忆、方法卡、�
 - [下载安装](#下载安装)
 - [第一次启动](#第一次启动)
 - [配置小米 MiMo](#配置小米-mimo)
+- [使用持久对话](#使用持久对话)
 - [完成第一次求解](#完成第一次求解)
 - [让工作区逐步成长](#让工作区逐步成长)
 - [批量导入题库](#批量导入题库)
@@ -55,7 +58,7 @@ Math Harness 的“成长”目前指的是**可审计的记忆、方法卡、�
 安装步骤：
 
 1. 打开 [最新 Release](https://github.com/yule1048596-art/math-harness/releases/latest)。
-2. 下载文件名类似 `Math-Harness-0.9.0-macOS-arm64.dmg` 的安装镜像。
+2. 下载文件名类似 `Math-Harness-0.10.0-macOS-arm64.dmg` 的安装镜像。
 3. 打开 DMG，把 `Math Harness.app` 拖入“应用程序”文件夹。
 4. 从“应用程序”中启动 Math Harness。
 
@@ -95,8 +98,9 @@ FastAPI 和模型客户端，最终用户不需要另外安装这些依赖。
 - **名称**：建议写清数学方向，例如“渐进估计”“实分析极限”或“Gamma 函数渐近”；
 - **描述**：说明这个空间接受什么题、不接受什么题，以及希望形成怎样的方法体系。
 
-每个工作区拥有独立的 SQLite 数据库、例题、方法卡、求解历史和学习事件。工作区 A 中
-学到的方法不会自动出现在工作区 B 中。同一个工作区越聚焦，检索到的方法通常越相关。
+每个工作区拥有独立的 SQLite 数据库、会话、消息、摘要、例题、方法卡、求解历史和学习
+事件。工作区 A 中的聊天和方法不会自动出现在工作区 B 中。同一个工作区越聚焦，检索到
+的方法通常越相关。
 
 推荐做法：
 
@@ -107,7 +111,8 @@ FastAPI 和模型客户端，最终用户不需要另外安装这些依赖。
 ### 2. 选择求解器
 
 Math Harness 默认使用离线 **SymPy**：不发送网络请求，也不需要 API Key。它适合已经
-填写可验证目标的极限、等价、展开和表达式等价问题，但覆盖范围有限。
+填写可验证目标的极限、等价、展开和表达式等价问题，但覆盖范围有限。离线模式仍会保存
+完整对话，不过普通聊天只会返回透明的离线说明，不会伪装成通用语言模型。
 
 如果希望直接输入自然语言、获得更灵活的推导和方法提炼，可以配置小米 MiMo。配置方法
 见下一节。
@@ -140,6 +145,7 @@ MiMo 控制台为该套餐提供的专用 Base URL。
 
 一次完整流程可能包含不同用途的模型请求：
 
+- 普通聊天中的每一个用户回合；
 - “自动整理”自然语言数学目标；
 - 生成候选解；
 - 在独立验证失败后进行一次纠正；
@@ -164,10 +170,12 @@ uv sync --frozen --no-editable --extra dev --extra llm
 MATH_HARNESS_METHOD_EXTRACTOR=rules
 MATH_HARNESS_SOLVER=mimo
 MATH_HARNESS_TARGET_DRAFTER=mimo
+MATH_HARNESS_CONVERSATION_PROVIDER=mimo
 MIMO_API_KEY=replace-with-your-own-key
 MATH_HARNESS_MIMO_BASE_URL=https://api.xiaomimimo.com/v1
 MATH_HARNESS_MIMO_MODEL=mimo-v2.5-pro
 MATH_HARNESS_MIMO_SOLVER_REASONING_EFFORT=none
+MATH_HARNESS_MIMO_CHAT_REASONING_EFFORT=none
 MATH_HARNESS_MIMO_TIMEOUT_SECONDS=60
 MATH_HARNESS_VERIFICATION_REPAIR=true
 MATH_HARNESS_VERIFICATION_FALLBACK=true
@@ -175,6 +183,33 @@ MATH_HARNESS_VERIFICATION_FALLBACK=true
 
 真实 `.env` 已被 Git 忽略。不要把密钥写入 `.env.example`、README、源码、测试、Issue
 或提交记录。服务会读取 `.env`，但不会覆盖已经从 Shell 导出的同名变量。
+
+## 使用持久对话
+
+工作区打开后，中间区域就是对话界面。第一次发送消息时，App 会自动创建对话，并用首条
+消息生成标题。顶部的对话菜单可以切换历史对话，旁边的 **“新对话”** 用于在同一工作区
+开启一段互不混杂的新上下文。
+
+输入区有两种模式：
+
+- **普通聊天**：直接输入自然语言并发送。配置 MiMo 后，可以讨论定义、比较方法、追问上文
+  或请它解释思路；消息会立即持久化。
+- **验算求解**：除自然语言题面外，再填写并确认表达式、变量、趋近点、验算模式等目标。
+  系统生成候选解后交给本地 SymPy 独立验算；通过的题会自动形成待审核知识草稿。
+
+每次普通聊天会获得以下上下文：当前工作区信息、已有滚动摘要、最多最近 12 条未压缩消息，
+以及与本次问题最相关的已晋级方法卡。超过 16 条未摘要消息后，系统会把较早部分整理成最多
+6,000 字符的确定性摘要，同时保留最近 8 条原文。摘要和历史消息都被当作不可信上下文，
+不能绕过数学验证或人工复核。
+
+需要特别区分两种“记忆”：
+
+- **会话记忆**保存你们说过什么，用于后续交流，但不会自动成为可信数学知识；
+- **知识记忆**只接收验算求解产生的草稿，并且必须通过独立验证和人工确认，才会晋级为
+  后续可检索的方法卡。
+
+升级旧数据时，v0.10.0 会把已有不可变求解记录一次性包装为一个可阅读的历史对话；原始
+求解记录不会被改写或删除。工作区备份也会包含新对话、消息和摘要。
 
 ## 完成第一次求解
 
@@ -188,8 +223,8 @@ MATH_HARNESS_VERIFICATION_FALLBACK=true
 求 x→∞ 时 sqrt(x^2+x)-x 的渐进展开到 O(x^-2)
 ```
 
-你可以点击 **“自动整理”**。如果可验证目标还是空的，直接点击“求解”也会先进入目标整理，
-不会静默跳过确认。
+先把输入模式切换到 **“验算求解”**。你可以点击 **“自动整理”**；如果可验证目标还是空的，
+直接点击“整理目标”也会进入目标整理，不会静默跳过确认。
 
 ### 2. 检查可验证目标
 
@@ -207,7 +242,7 @@ MATH_HARNESS_VERIFICATION_FALLBACK=true
 | 假设 | 留空 | 参数条件，例如 `a:positive` |
 | 标签 | `渐进估计, 根式` | 帮助词面检索与整理 |
 
-目标无误后点击 **“确认并求解”**，或按 `⌘↩`。
+目标无误后点击 **“确认并验算”**，或按 `⌘↩`。
 
 ### 3. 阅读求解结果
 
@@ -366,7 +401,7 @@ JSONL 文件中的每道题必须写在一行。下面为了便于阅读进行�
 备份包含：
 
 - 当前工作区的一致性 SQLite 快照；
-- 例题、方法卡、求解历史、版本和学习事件；
+- 对话、消息、滚动摘要、例题、方法卡、求解历史、版本和学习事件；
 - 应用版本、原工作区信息和逐表记录数；
 - 数据库大小和 SHA-256 完整性清单。
 
@@ -565,6 +600,17 @@ macOS App 与旧 CLI 数据目录相互独立，目前不会自动迁移。
 自然语言中的变量、方向、参数条件和余项阶数经常有歧义。建议稿必须先由用户确认，避免模型
 误解题意后仍被验证器当成另一个问题验收。这是设计中的安全步骤。
 
+### 普通聊天会自动让 AI 学会新方法吗
+
+不会直接学会。普通聊天只增加会话记忆，模型在后续回合可以参考它，但其中的数学陈述并未
+经过验证。要形成可复用知识，请切换到“验算求解”，确认数学目标，完成本地验算，再到待复核
+区人工确认。这样可以防止一句错误回答永久污染工作区。
+
+### 换一个对话还记得之前聊过什么吗
+
+新对话不会继承旧对话的消息和摘要，但仍能检索同一工作区里已经人工确认的共享方法卡。
+切换工作区后，连方法卡也完全隔离。当前没有跨对话的用户画像或自动事实记忆。
+
 ### 为什么不能点击“确认晋级”
 
 只有当前修订同时具备可验证数学目标且状态为 `verified` 时才能晋级。展开草稿并补全或修正
@@ -642,6 +688,24 @@ curl -sS -X POST http://127.0.0.1:8000/workspaces \
 export WORKSPACE_ID='replace-with-workspace-id'
 ```
 
+创建并发送普通对话：
+
+```bash
+CONVERSATION_ID="$(curl -sS -X POST \
+  "http://127.0.0.1:8000/workspaces/${WORKSPACE_ID}/conversations" \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"极限讨论"}' | python -c \
+  'import json,sys; print(json.load(sys.stdin)["id"])')"
+
+curl -sS -X POST \
+  "http://127.0.0.1:8000/workspaces/${WORKSPACE_ID}/conversations/${CONVERSATION_ID}/turns" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"为什么等价无穷小不能随意用于加减法？","turn_id":"discussion-1"}'
+```
+
+在对话回合中附上 `math_target`，会进入与 App“验算求解”相同的求解、验证和知识草稿闭环。
+可重复使用相同 `turn_id` 安全重试；服务不会重复生成同一回合。
+
 提交一道可验证题：
 
 ```bash
@@ -683,6 +747,11 @@ curl -sS -X POST http://127.0.0.1:8000/workspace-restores \
 
 ```text
 POST   /workspaces
+POST   /workspaces/{id}/conversations
+GET    /workspaces/{id}/conversations
+GET    /workspaces/{id}/conversations/{conversation_id}
+GET    /workspaces/{id}/conversations/{conversation_id}/messages
+POST   /workspaces/{id}/conversations/{conversation_id}/turns
 POST   /workspaces/{id}/math-target-drafts
 POST   /workspaces/{id}/examples
 GET    /workspaces/{id}/examples
@@ -742,6 +811,7 @@ MATH_HARNESS_SKIP_APP_BUILD=true ./scripts/package_macos_dmg.sh
 ```mermaid
 flowchart TB
     UI["SwiftUI macOS App"] -->|"localhost + 每次启动令牌"| API["FastAPI helper"]
+    API --> C["持久会话 + 滚动摘要"]
     API --> V["受限解析器 + SymPy 验证器"]
     API --> LLM["可选 MiMo / OpenAI-compatible 模型"]
     API --> R["结构与方法检索"]
@@ -760,6 +830,8 @@ flowchart TB
 ## 当前边界
 
 - 当前是 Beta，重点优化渐进估计、极限和有限的符号表达式任务；
+- 对话摘要是确定性的抽取式压缩；目前没有语义化用户画像、跨对话事实记忆或后台自主学习；
+- 普通聊天还没有流式输出，模型完成整条回复后才会显示；
 - macOS 公共包仅面向 Apple Silicon/macOS 14+，尚无 Universal 2；
 - 默认是 ad-hoc 签名，尚未完成 Developer ID 公证和自动更新；
 - 数学表达式暂时以等宽文本展示，尚无原生离线 LaTeX 排版；

@@ -15,6 +15,13 @@ from math_harness.bulk_import import (
 )
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
+from math_harness.conversation import (
+    ChatGeneration,
+    ConversationContext,
+    ConversationResponderProtocol,
+    ExtractiveConversationSummarizer,
+    build_conversation_responder_from_env,
+)
 from math_harness.dedup import find_merge_candidates
 from math_harness.errors import InvalidKnowledgeState
 from math_harness.extraction import (
@@ -30,7 +37,14 @@ from math_harness.models import (
     BulkImportItemStatus,
     CandidateSolution,
     CandidateStep,
+    Conversation,
     ConversationCaptureResult,
+    ConversationCreate,
+    ConversationMessage,
+    ConversationMessageKind,
+    ConversationRole,
+    ConversationTurnRequest,
+    ConversationTurnResult,
     EvaluationCaseResult,
     EvaluationMetrics,
     EvaluationRequest,
@@ -110,6 +124,11 @@ class _PreparedIngestion:
     promotion_approved: bool
 
 
+_CONVERSATION_CONTEXT_MESSAGES = 12
+_CONVERSATION_SUMMARY_TRIGGER = 16
+_CONVERSATION_SUMMARY_RETAIN = 8
+
+
 class MathHarnessService:
     def __init__(
         self,
@@ -120,6 +139,8 @@ class MathHarnessService:
         generator: SolutionGeneratorProtocol | None = None,
         normalizer: CandidateSolutionNormalizer | None = None,
         target_drafter: TargetDrafterProtocol | None = None,
+        conversation_responder: ConversationResponderProtocol | None = None,
+        conversation_summarizer: ExtractiveConversationSummarizer | None = None,
     ) -> None:
         load_local_environment()
         self.workspaces = WorkspaceManager(data_root)
@@ -129,6 +150,12 @@ class MathHarnessService:
         self.generator = generator or build_solution_generator_from_env()
         self.normalizer = normalizer or CandidateSolutionNormalizer()
         self.target_drafter = target_drafter or build_target_drafter_from_env()
+        self.conversation_responder = (
+            conversation_responder or build_conversation_responder_from_env()
+        )
+        self.conversation_summarizer = (
+            conversation_summarizer or ExtractiveConversationSummarizer()
+        )
         self._knowledge_lock = RLock()
 
     def create_workspace(self, request: WorkspaceCreate) -> Workspace:
@@ -139,6 +166,302 @@ class MathHarnessService:
 
     def list_workspaces(self) -> list[Workspace]:
         return self.workspaces.list()
+
+    def create_conversation(
+        self,
+        workspace_id: str,
+        request: ConversationCreate,
+    ) -> Conversation:
+        self.workspaces.get(workspace_id)
+        now = utc_now()
+        conversation = Conversation(
+            id=str(uuid.uuid4()),
+            workspace_id=workspace_id,
+            title=request.title or "新对话",
+            created_at=now,
+            updated_at=now,
+        )
+        store = self.workspaces.store(workspace_id)
+        store.add_conversation(conversation)
+        store.record_learning_event(
+            "conversation_created",
+            conversation.id,
+            {"title": conversation.title},
+        )
+        return conversation
+
+    def get_conversation(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+    ) -> Conversation:
+        return self.workspaces.store(workspace_id).get_conversation(conversation_id)
+
+    def list_conversations(self, workspace_id: str) -> list[Conversation]:
+        return self.workspaces.store(workspace_id).list_conversations()
+
+    def list_conversation_messages(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+    ) -> list[ConversationMessage]:
+        return self.workspaces.store(workspace_id).list_conversation_messages(
+            conversation_id
+        )
+
+    def send_conversation_turn(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        request: ConversationTurnRequest,
+    ) -> ConversationTurnResult:
+        with self._knowledge_lock:
+            return self._send_conversation_turn(
+                workspace_id,
+                conversation_id,
+                request,
+            )
+
+    def _send_conversation_turn(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        request: ConversationTurnRequest,
+    ) -> ConversationTurnResult:
+        store = self.workspaces.store(workspace_id)
+        store.get_conversation(conversation_id)
+        turn_id = request.turn_id or str(uuid.uuid4())
+        existing = store.get_conversation_turn_messages(conversation_id, turn_id)
+        user_message = next(
+            (item for item in existing if item.role is ConversationRole.USER),
+            None,
+        )
+        assistant_message = next(
+            (item for item in existing if item.role is ConversationRole.ASSISTANT),
+            None,
+        )
+        if user_message is not None and user_message.content != request.message:
+            raise InvalidKnowledgeState(
+                "turn_id already belongs to a different conversation message"
+            )
+        if user_message is not None and assistant_message is not None:
+            attempt = (
+                store.get_solution_attempt(assistant_message.attempt_id)
+                if assistant_message.attempt_id
+                else None
+            )
+            knowledge_draft = (
+                store.get_example(assistant_message.knowledge_draft_id)
+                if assistant_message.knowledge_draft_id
+                else None
+            )
+            return ConversationTurnResult(
+                conversation=store.get_conversation(conversation_id),
+                user_message=user_message,
+                assistant_message=assistant_message,
+                attempt=attempt,
+                knowledge_draft=knowledge_draft,
+                summary_updated=False,
+            )
+
+        matches = self.search_methods(
+            workspace_id,
+            request.message,
+            tags=request.tags,
+            top_k=request.top_k,
+            math_target=request.math_target,
+        )
+        context = self._build_conversation_context(
+            workspace_id,
+            conversation_id,
+            matches,
+            excluding_turn_id=turn_id,
+        )
+        kind = (
+            ConversationMessageKind.SOLVE
+            if request.math_target is not None
+            else ConversationMessageKind.CHAT
+        )
+        if user_message is None:
+            user_message = store.append_conversation_message(
+                conversation_id,
+                turn_id,
+                ConversationRole.USER,
+                kind,
+                request.message,
+            )
+
+        attempt: SolutionAttempt | None = None
+        knowledge_draft: ProblemExample | None = None
+        if request.math_target is not None:
+            solve_request = SolveRequest(
+                problem=request.message,
+                tags=request.tags,
+                top_k=request.top_k,
+                math_target=request.math_target,
+                max_output_tokens=request.max_output_tokens,
+            )
+            attempt = self._build_solution_attempt(
+                workspace_id,
+                solve_request,
+                conversation_context=context.model_payload(),
+            )
+            attempt = self._persist_attempt_and_capture(workspace_id, attempt)
+            knowledge_draft = store.get_example_by_source_attempt(attempt.id)
+            candidate = attempt.candidate
+            assistant_content = (
+                self._candidate_solution_text(candidate)
+                if candidate is not None
+                else attempt.generation.error or attempt.verification.summary
+            )
+            method_keys = candidate.used_method_keys if candidate else []
+            provider = attempt.generation.provider
+            model = attempt.generation.model
+            verification_status = attempt.verification.status
+        else:
+            generation = self._generate_chat_response(
+                context,
+                request.message,
+                request.max_output_tokens,
+            )
+            assistant_content = generation.content
+            method_keys = [match.method.key for match in matches]
+            provider = generation.provider
+            model = generation.model
+            verification_status = None
+
+        assistant_message = store.append_conversation_message(
+            conversation_id,
+            turn_id,
+            ConversationRole.ASSISTANT,
+            kind,
+            assistant_content,
+            provider=provider,
+            model=model,
+            attempt_id=attempt.id if attempt else None,
+            knowledge_draft_id=knowledge_draft.id if knowledge_draft else None,
+            verification_status=verification_status,
+            method_keys=method_keys,
+        )
+        summary_updated = self._compact_conversation(store, conversation_id)
+        conversation = store.get_conversation(conversation_id)
+        store.record_learning_event(
+            "conversation_turn_completed",
+            turn_id,
+            {
+                "conversation_id": conversation_id,
+                "kind": kind.value,
+                "attempt_id": attempt.id if attempt else None,
+                "knowledge_draft_id": knowledge_draft.id if knowledge_draft else None,
+                "verification_status": (
+                    verification_status.value if verification_status else None
+                ),
+                "summary_updated": summary_updated,
+            },
+        )
+        return ConversationTurnResult(
+            conversation=conversation,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            attempt=attempt,
+            knowledge_draft=knowledge_draft,
+            summary_updated=summary_updated,
+        )
+
+    def _build_conversation_context(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        matches: list[MethodMatch],
+        *,
+        excluding_turn_id: str | None = None,
+    ) -> ConversationContext:
+        workspace = self.workspaces.get(workspace_id)
+        store = self.workspaces.store(workspace_id)
+        conversation = store.get_conversation(conversation_id)
+        messages = store.list_conversation_messages(
+            conversation_id,
+            after_ordinal=conversation.summary_through_ordinal,
+        )
+        if excluding_turn_id is not None:
+            messages = [
+                message for message in messages if message.turn_id != excluding_turn_id
+            ]
+        return ConversationContext(
+            workspace=workspace,
+            summary=conversation.summary,
+            recent_messages=messages[-_CONVERSATION_CONTEXT_MESSAGES:],
+            trusted_methods=matches,
+        )
+
+    def _generate_chat_response(
+        self,
+        context: ConversationContext,
+        message: str,
+        max_output_tokens: int,
+    ) -> ChatGeneration:
+        try:
+            return self.conversation_responder.respond(
+                context,
+                message,
+                max_output_tokens,
+            )
+        except Exception as exc:  # noqa: BLE001
+            provider = getattr(
+                self.conversation_responder,
+                "name",
+                self.conversation_responder.__class__.__name__,
+            )
+            error = f"{exc.__class__.__name__}: {exc}"[:2_000]
+            return ChatGeneration(
+                content=(
+                    "这次对话回复生成失败，但你的消息已经保存在当前工作区。"
+                    "请检查模型设置或网络后重新发送。"
+                ),
+                provider=provider,
+                model=getattr(self.conversation_responder, "model", None),
+                prompt_version=getattr(
+                    self.conversation_responder,
+                    "prompt_version",
+                    "unknown",
+                ),
+                error=error,
+            )
+
+    def _compact_conversation(
+        self,
+        store: WorkspaceStore,
+        conversation_id: str,
+    ) -> bool:
+        conversation = store.get_conversation(conversation_id)
+        unsummarized = store.list_conversation_messages(
+            conversation_id,
+            after_ordinal=conversation.summary_through_ordinal,
+        )
+        if len(unsummarized) <= _CONVERSATION_SUMMARY_TRIGGER:
+            return False
+        compacted = unsummarized[:-_CONVERSATION_SUMMARY_RETAIN]
+        if not compacted:
+            return False
+        summary = self.conversation_summarizer.summarize(
+            conversation.summary,
+            compacted,
+        )
+        through_ordinal = compacted[-1].ordinal
+        store.update_conversation_summary(
+            conversation_id,
+            summary,
+            through_ordinal,
+        )
+        store.record_learning_event(
+            "conversation_summary_updated",
+            conversation_id,
+            {
+                "through_ordinal": through_ordinal,
+                "summary_characters": len(summary),
+            },
+        )
+        return True
 
     def export_workspace_backup(self, workspace_id: str) -> bytes:
         return create_workspace_archive(self.workspaces, workspace_id)
@@ -956,6 +1279,7 @@ class MathHarnessService:
         *,
         correction_of: str | None = None,
         generation_result: SolutionGenerationResult | None = None,
+        conversation_context: dict[str, object] | None = None,
     ) -> SolutionAttempt:
         allow_automatic_recovery = generation_result is None
         matches = self.search_methods(
@@ -966,7 +1290,11 @@ class MathHarnessService:
             math_target=request.math_target,
         )
         if generation_result is None:
-            generation_result = self._generate_candidate(request, matches)
+            generation_result = self._generate_candidate(
+                request,
+                matches,
+                conversation_context=conversation_context,
+            )
         if allow_automatic_recovery:
             generation_result = self._prepare_generation_result(
                 generation_result,
@@ -1028,8 +1356,23 @@ class MathHarnessService:
         self,
         request: SolveRequest,
         matches: list[MethodMatch],
+        *,
+        conversation_context: dict[str, object] | None = None,
     ) -> SolutionGenerationResult:
         try:
+            contextual_generate = getattr(
+                self.generator,
+                "generate_with_context",
+                None,
+            )
+            if conversation_context is not None and callable(contextual_generate):
+                return contextual_generate(
+                    request.problem,
+                    matches,
+                    request.math_target,
+                    request.max_output_tokens,
+                    conversation_context,
+                )
             return self.generator.generate(
                 request.problem,
                 matches,

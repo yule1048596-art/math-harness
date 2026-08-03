@@ -39,6 +39,97 @@ public struct WorkspaceCreateRequest: Codable, Equatable, Sendable {
   }
 }
 
+public struct ConversationCreateRequest: Codable, Equatable, Sendable {
+  public let title: String
+
+  public init(title: String = "") {
+    self.title = title
+  }
+}
+
+public struct Conversation: Codable, Identifiable, Equatable, Sendable {
+  public let id: String
+  public let workspaceID: String
+  public let title: String
+  public let summary: String
+  public let summaryThroughOrdinal: Int
+  public let messageCount: Int
+  public let createdAt: String
+  public let updatedAt: String
+
+  enum CodingKeys: String, CodingKey {
+    case id, title, summary
+    case workspaceID = "workspace_id"
+    case summaryThroughOrdinal = "summary_through_ordinal"
+    case messageCount = "message_count"
+    case createdAt = "created_at"
+    case updatedAt = "updated_at"
+  }
+}
+
+public struct ConversationMessage: Codable, Identifiable, Equatable, Sendable {
+  public let id: String
+  public let workspaceID: String
+  public let conversationID: String
+  public let turnID: String
+  public let ordinal: Int
+  public let role: String
+  public let kind: String
+  public let content: String
+  public let provider: String?
+  public let model: String?
+  public let attemptID: String?
+  public let knowledgeDraftID: String?
+  public let verificationStatus: String?
+  public let methodKeys: [String]
+  public let createdAt: String
+
+  enum CodingKeys: String, CodingKey {
+    case id, ordinal, role, kind, content, provider, model
+    case workspaceID = "workspace_id"
+    case conversationID = "conversation_id"
+    case turnID = "turn_id"
+    case attemptID = "attempt_id"
+    case knowledgeDraftID = "knowledge_draft_id"
+    case verificationStatus = "verification_status"
+    case methodKeys = "method_keys"
+    case createdAt = "created_at"
+  }
+}
+
+public struct ConversationTurnRequest: Codable, Equatable, Sendable {
+  public let message: String
+  public let turnID: String
+  public let tags: [String]
+  public let topK: Int
+  public let mathTarget: SolveMathTargetRequest?
+  public let maxOutputTokens: Int
+
+  enum CodingKeys: String, CodingKey {
+    case message, tags
+    case turnID = "turn_id"
+    case topK = "top_k"
+    case mathTarget = "math_target"
+    case maxOutputTokens = "max_output_tokens"
+  }
+
+  public init(
+    message: String,
+    turnID: String = UUID().uuidString,
+    tags: [String] = [],
+    topK: Int = 5,
+    mathTarget: SolveMathTargetRequest? = nil,
+    maxOutputTokens: Int = 3_000
+  ) {
+    self.message = message
+    self.turnID = turnID
+    self.tags = tags
+    self.topK = topK
+    self.mathTarget = mathTarget
+    self.maxOutputTokens = maxOutputTokens
+  }
+}
+
 public enum ImportReviewPolicy: String, Codable, CaseIterable, Identifiable, Sendable {
   case pending
   case preserve
@@ -469,6 +560,23 @@ public struct SolutionAttempt: Codable, Identifiable, Equatable, Sendable {
     case feedbackMethodKeys = "feedback_method_keys"
     case correctionOf = "correction_of"
     case createdAt = "created_at"
+  }
+}
+
+public struct ConversationTurnResult: Codable, Equatable, Sendable {
+  public let conversation: Conversation
+  public let userMessage: ConversationMessage
+  public let assistantMessage: ConversationMessage
+  public let attempt: SolutionAttempt?
+  public let knowledgeDraft: ProblemExample?
+  public let summaryUpdated: Bool
+
+  enum CodingKeys: String, CodingKey {
+    case conversation, attempt
+    case userMessage = "user_message"
+    case assistantMessage = "assistant_message"
+    case knowledgeDraft = "knowledge_draft"
+    case summaryUpdated = "summary_updated"
   }
 }
 

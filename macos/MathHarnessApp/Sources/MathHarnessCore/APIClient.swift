@@ -53,6 +53,46 @@ public actor APIClient {
     try await send(path: "workspaces", method: "POST", body: request)
   }
 
+  public func createConversation(
+    workspaceID: String,
+    request: ConversationCreateRequest = ConversationCreateRequest()
+  ) async throws -> Conversation {
+    try await send(
+      path: "workspaces/\(workspaceID)/conversations",
+      method: "POST",
+      body: request
+    )
+  }
+
+  public func listConversations(workspaceID: String) async throws -> [Conversation] {
+    try await send(
+      path: "workspaces/\(workspaceID)/conversations",
+      method: "GET"
+    )
+  }
+
+  public func listConversationMessages(
+    workspaceID: String,
+    conversationID: String
+  ) async throws -> [ConversationMessage] {
+    try await send(
+      path: "workspaces/\(workspaceID)/conversations/\(conversationID)/messages",
+      method: "GET"
+    )
+  }
+
+  public func sendConversationTurn(
+    workspaceID: String,
+    conversationID: String,
+    request: ConversationTurnRequest
+  ) async throws -> ConversationTurnResult {
+    try await send(
+      path: "workspaces/\(workspaceID)/conversations/\(conversationID)/turns",
+      method: "POST",
+      body: request
+    )
+  }
+
   public func bulkImportExamples(
     workspaceID: String,
     request: BulkExampleImportRequest

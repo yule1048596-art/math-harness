@@ -36,6 +36,7 @@ codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 env \
     MATH_HARNESS_LOCAL_TOKEN="integration-token" \
     MATH_HARNESS_SOLVER="mimo" \
+    MATH_HARNESS_CONVERSATION_PROVIDER="offline" \
     MATH_HARNESS_METHOD_EXTRACTOR="rules" \
     MATH_HARNESS_TARGET_DRAFTER="mimo" \
     MIMO_API_KEY="bundle-test-placeholder" \
@@ -72,6 +73,20 @@ WORKSPACE="$(curl -fsS \
     --data-binary '{"name":"macOS E2E","description":"packaged backend"}' \
     "$BASE_URL/workspaces")"
 WORKSPACE_ID="$(jq -r .id <<<"$WORKSPACE")"
+CONVERSATION="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/json' \
+    --data-binary '{}' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/conversations")"
+CONVERSATION_ID="$(jq -r .id <<<"$CONVERSATION")"
+CHAT_TURN="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    -H 'Content-Type: application/json' \
+    --data-binary '{"message":"你好，请记住我们在测试持久会话。","turn_id":"bundle-chat-1"}' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/conversations/$CONVERSATION_ID/turns")"
+[[ "$(jq -r .assistant_message.kind <<<"$CHAT_TURN")" == "chat" ]]
+[[ "$(jq -r .assistant_message.provider <<<"$CHAT_TURN")" == "offline" ]]
+[[ "$(jq -r .conversation.message_count <<<"$CHAT_TURN")" == "2" ]]
 IMPORT_LINE='{"problem":"展开 (x+1)^2","solution":"按二项式展开得到 x^2+2x+1。","tags":["代数"],"reviewed":true,"math_payload":{"expression":"(x+1)**2","expected":"x**2+2*x+1","variable":"x","point":"0","mode":"exact_equivalence"}}'
 IMPORT_PREVIEW_BODY="$(jq -nc \
     --arg content "$IMPORT_LINE" \
@@ -106,6 +121,14 @@ RESTORED_WORKSPACE_ID="$(jq -r .workspace.id <<<"$RESTORE")"
 [[ "$RESTORED_WORKSPACE_ID" != "$WORKSPACE_ID" ]]
 [[ "$(jq -r .source_workspace_id <<<"$RESTORE")" == "$WORKSPACE_ID" ]]
 [[ "$(jq -r .restored_record_counts.examples <<<"$RESTORE")" == "1" ]]
+RESTORED_CONVERSATIONS="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    "$BASE_URL/workspaces/$RESTORED_WORKSPACE_ID/conversations")"
+[[ "$(jq -r 'length' <<<"$RESTORED_CONVERSATIONS")" == "1" ]]
+RESTORED_MESSAGES="$(curl -fsS \
+    -H 'Authorization: Bearer integration-token' \
+    "$BASE_URL/workspaces/$RESTORED_WORKSPACE_ID/conversations/$CONVERSATION_ID/messages")"
+[[ "$(jq -r 'length' <<<"$RESTORED_MESSAGES")" == "2" ]]
 TARGET_DRAFT="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     -H 'Content-Type: application/json' \
@@ -114,13 +137,17 @@ TARGET_DRAFT="$(curl -fsS \
 [[ "$(jq -r .requires_confirmation <<<"$TARGET_DRAFT")" == "true" ]]
 [[ "$(jq -r .target.expression <<<"$TARGET_DRAFT")" == "sqrt(x**2+x)-x" ]]
 [[ "$(jq -r .status <<<"$TARGET_DRAFT")" == "fallback" ]]
-SOLUTION="$(curl -fsS \
+SOLUTION_TURN="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
     -H 'Content-Type: application/json' \
-    --data-binary '{"problem":"使用共轭有理化和泰勒展开求 sqrt(x^2+x)-x 的渐进展开","tags":["radical"],"math_target":{"expression":"sqrt(x**2+x)-x","variable":"x","point":"oo","mode":"asymptotic_expansion","remainder_power":2}}' \
-    "$BASE_URL/workspaces/$WORKSPACE_ID/solve")"
+    --data-binary '{"message":"使用共轭有理化和泰勒展开求 sqrt(x^2+x)-x 的渐进展开","turn_id":"bundle-solve-1","tags":["radical"],"math_target":{"expression":"sqrt(x**2+x)-x","variable":"x","point":"oo","mode":"asymptotic_expansion","remainder_power":2}}' \
+    "$BASE_URL/workspaces/$WORKSPACE_ID/conversations/$CONVERSATION_ID/turns")"
+SOLUTION="$(jq -c .attempt <<<"$SOLUTION_TURN")"
 [[ "$(jq -r .status <<<"$SOLUTION")" == "verified" ]]
 [[ "$(jq -r .generation.fallback_used <<<"$SOLUTION")" == "true" ]]
+[[ "$(jq -r .assistant_message.kind <<<"$SOLUTION_TURN")" == "solve" ]]
+[[ "$(jq -r .assistant_message.verification_status <<<"$SOLUTION_TURN")" == "verified" ]]
+[[ "$(jq -r .knowledge_draft.status <<<"$SOLUTION_TURN")" == "pending_review" ]]
 ATTEMPT_ID="$(jq -r .id <<<"$SOLUTION")"
 EXAMPLES="$(curl -fsS \
     -H 'Authorization: Bearer integration-token' \
@@ -174,6 +201,7 @@ REVIEW="$(curl -fsS \
 
 print "health=$(jq -r '.status + " v" + .version' <<<"$HEALTH")"
 print "workspace=$(jq -r .name <<<"$WORKSPACE")"
+print "conversation=$(jq -r '.conversation.title + " → " + (.conversation.message_count | tostring) + " messages"' <<<"$SOLUTION_TURN")"
 print "bulk_import=$(jq -r '.ready_count | tostring' <<<"$IMPORT_PREVIEW") ready → $(jq -r '.imported_count | tostring' <<<"$IMPORT_COMMIT") imported"
 print "backup_restore=$(jq -r '.workspace.name' <<<"$RESTORE")"
 print "solve_status=$(jq -r .status <<<"$SOLUTION")"

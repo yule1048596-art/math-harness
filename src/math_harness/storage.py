@@ -12,6 +12,10 @@ from math_harness.dedup import MergeCandidate, card_to_draft
 from math_harness.errors import InvalidKnowledgeState, RecordNotFound, WorkspaceNotFound
 from math_harness.merging import merge_method_content, sanitize_method_draft
 from math_harness.models import (
+    Conversation,
+    ConversationMessage,
+    ConversationMessageKind,
+    ConversationRole,
     EvaluationRun,
     ExampleVersion,
     KnowledgeStatus,
@@ -26,6 +30,7 @@ from math_harness.models import (
     SolutionAttempt,
     SolutionAttemptStatus,
     SolveEvaluationRun,
+    VerificationStatus,
     Workspace,
     WorkspaceCreate,
     utc_now,
@@ -385,6 +390,54 @@ class WorkspaceStore:
                 CREATE INDEX IF NOT EXISTS idx_solution_attempts_workspace
                     ON solution_attempts(workspace_id, created_at);
 
+                CREATE TABLE IF NOT EXISTS conversations (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    summary_through_ordinal INTEGER NOT NULL DEFAULT 0,
+                    message_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK (workspace_id <> ''),
+                    CHECK (summary_through_ordinal >= 0),
+                    CHECK (message_count >= 0)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_conversations_workspace
+                    ON conversations(workspace_id, updated_at, id);
+
+                CREATE TABLE IF NOT EXISTS conversation_messages (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    role TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    provider TEXT,
+                    model TEXT,
+                    attempt_id TEXT,
+                    knowledge_draft_id TEXT,
+                    verification_status TEXT,
+                    method_keys_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(workspace_id, conversation_id, ordinal),
+                    UNIQUE(workspace_id, conversation_id, turn_id, role),
+                    FOREIGN KEY (conversation_id)
+                        REFERENCES conversations(id) ON DELETE CASCADE,
+                    CHECK (workspace_id <> ''),
+                    CHECK (ordinal > 0),
+                    CHECK (role IN ('user', 'assistant')),
+                    CHECK (kind IN ('chat', 'solve'))
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_conversation_messages_conversation
+                    ON conversation_messages(
+                        workspace_id, conversation_id, ordinal
+                    );
+
                 CREATE TABLE IF NOT EXISTS attempt_methods (
                     workspace_id TEXT NOT NULL,
                     attempt_id TEXT NOT NULL,
@@ -463,6 +516,7 @@ class WorkspaceStore:
                 "signature_json",
                 "TEXT NOT NULL DEFAULT '{}'",
             )
+            self._backfill_legacy_conversation(connection)
 
     @staticmethod
     def _ensure_column(
@@ -476,6 +530,379 @@ class WorkspaceStore:
         }
         if column not in columns:
             connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _backfill_legacy_conversation(self, connection: sqlite3.Connection) -> None:
+        """Wrap pre-v0.10 immutable attempts in one readable conversation once."""
+
+        if int(connection.execute("PRAGMA user_version").fetchone()[0]) >= 10:
+            return
+        rows = connection.execute(
+            """
+            SELECT report_json FROM solution_attempts
+            WHERE workspace_id = ?
+            ORDER BY created_at, id
+            """,
+            (self.workspace_id,),
+        ).fetchall()
+        if rows:
+            attempts = [
+                SolutionAttempt.model_validate(json.loads(row["report_json"]))
+                for row in rows
+            ]
+            conversation_id = str(uuid.uuid4())
+            first = attempts[0]
+            title = self._conversation_title(first.problem, fallback="历史求解记录")
+            connection.execute(
+                """
+                INSERT INTO conversations (
+                    id, workspace_id, title, summary,
+                    summary_through_ordinal, message_count,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, '', 0, ?, ?, ?)
+                """,
+                (
+                    conversation_id,
+                    self.workspace_id,
+                    title,
+                    len(attempts) * 2,
+                    first.created_at.isoformat(),
+                    attempts[-1].created_at.isoformat(),
+                ),
+            )
+            ordinal = 0
+            for attempt in attempts:
+                turn_id = f"legacy:{attempt.id}"
+                ordinal += 1
+                connection.execute(
+                    """
+                    INSERT INTO conversation_messages (
+                        id, workspace_id, conversation_id, turn_id, ordinal,
+                        role, kind, content, provider, model, attempt_id,
+                        knowledge_draft_id, verification_status,
+                        method_keys_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL,
+                              NULL, NULL, '[]', ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        self.workspace_id,
+                        conversation_id,
+                        turn_id,
+                        ordinal,
+                        ConversationRole.USER.value,
+                        ConversationMessageKind.SOLVE.value,
+                        attempt.problem,
+                        attempt.created_at.isoformat(),
+                    ),
+                )
+                ordinal += 1
+                draft_row = connection.execute(
+                    """
+                    SELECT id FROM examples
+                    WHERE workspace_id = ? AND source_attempt_id = ?
+                    """,
+                    (self.workspace_id, attempt.id),
+                ).fetchone()
+                method_keys = (
+                    attempt.candidate.used_method_keys if attempt.candidate else []
+                )
+                connection.execute(
+                    """
+                    INSERT INTO conversation_messages (
+                        id, workspace_id, conversation_id, turn_id, ordinal,
+                        role, kind, content, provider, model, attempt_id,
+                        knowledge_draft_id, verification_status,
+                        method_keys_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        self.workspace_id,
+                        conversation_id,
+                        turn_id,
+                        ordinal,
+                        ConversationRole.ASSISTANT.value,
+                        ConversationMessageKind.SOLVE.value,
+                        self._legacy_attempt_text(attempt),
+                        attempt.generation.provider,
+                        attempt.generation.model,
+                        attempt.id,
+                        draft_row["id"] if draft_row else None,
+                        attempt.verification.status.value,
+                        _dump(method_keys),
+                        attempt.created_at.isoformat(),
+                    ),
+                )
+        connection.execute("PRAGMA user_version = 10")
+
+    @staticmethod
+    def _legacy_attempt_text(attempt: SolutionAttempt) -> str:
+        if attempt.candidate is None:
+            return attempt.generation.error or attempt.verification.summary
+        parts = [attempt.candidate.answer_text]
+        for index, step in enumerate(attempt.candidate.steps, start=1):
+            line = f"{index}. {step.explanation}"
+            if step.expression:
+                line += f"\n   {step.expression}"
+            parts.append(line)
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _conversation_title(value: str, *, fallback: str = "新对话") -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            return fallback
+        return normalized if len(normalized) <= 42 else normalized[:41] + "…"
+
+    def add_conversation(self, conversation: Conversation) -> Conversation:
+        self._assert_workspace(conversation.workspace_id)
+        with self.connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversations (
+                    id, workspace_id, title, summary,
+                    summary_through_ordinal, message_count,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conversation.id,
+                    conversation.workspace_id,
+                    conversation.title,
+                    conversation.summary,
+                    conversation.summary_through_ordinal,
+                    conversation.message_count,
+                    conversation.created_at.isoformat(),
+                    conversation.updated_at.isoformat(),
+                ),
+            )
+        return conversation
+
+    def get_conversation(self, conversation_id: str) -> Conversation:
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM conversations
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (conversation_id, self.workspace_id),
+            ).fetchone()
+        if row is None:
+            raise RecordNotFound(
+                f"conversation not found in workspace: {conversation_id}"
+            )
+        return self._row_to_conversation(row)
+
+    def list_conversations(self) -> list[Conversation]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM conversations
+                WHERE workspace_id = ?
+                ORDER BY updated_at DESC, id DESC
+                """,
+                (self.workspace_id,),
+            ).fetchall()
+        return [self._row_to_conversation(row) for row in rows]
+
+    def append_conversation_message(
+        self,
+        conversation_id: str,
+        turn_id: str,
+        role: ConversationRole,
+        kind: ConversationMessageKind,
+        content: str,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        attempt_id: str | None = None,
+        knowledge_draft_id: str | None = None,
+        verification_status: VerificationStatus | None = None,
+        method_keys: list[str] | None = None,
+        created_at: datetime | None = None,
+    ) -> ConversationMessage:
+        existing = self.get_conversation_turn_messages(conversation_id, turn_id)
+        duplicate = next((item for item in existing if item.role is role), None)
+        if duplicate is not None:
+            return duplicate
+
+        now = created_at or utc_now()
+        with self.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT title, message_count FROM conversations
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (conversation_id, self.workspace_id),
+            ).fetchone()
+            if row is None:
+                raise RecordNotFound(
+                    f"conversation not found in workspace: {conversation_id}"
+                )
+            title = row["title"]
+            if (
+                role is ConversationRole.USER
+                and int(row["message_count"]) == 0
+                and title == "新对话"
+            ):
+                title = self._conversation_title(content)
+            updated = connection.execute(
+                """
+                UPDATE conversations
+                SET title = ?, message_count = message_count + 1, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                RETURNING message_count
+                """,
+                (title, now.isoformat(), conversation_id, self.workspace_id),
+            ).fetchone()
+            if updated is None:
+                raise RecordNotFound(
+                    f"conversation not found in workspace: {conversation_id}"
+                )
+            message = ConversationMessage(
+                id=str(uuid.uuid4()),
+                workspace_id=self.workspace_id,
+                conversation_id=conversation_id,
+                turn_id=turn_id,
+                ordinal=int(updated["message_count"]),
+                role=role,
+                kind=kind,
+                content=content,
+                provider=provider,
+                model=model,
+                attempt_id=attempt_id,
+                knowledge_draft_id=knowledge_draft_id,
+                verification_status=verification_status,
+                method_keys=method_keys or [],
+                created_at=now,
+            )
+            connection.execute(
+                """
+                INSERT INTO conversation_messages (
+                    id, workspace_id, conversation_id, turn_id, ordinal,
+                    role, kind, content, provider, model, attempt_id,
+                    knowledge_draft_id, verification_status,
+                    method_keys_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message.id,
+                    message.workspace_id,
+                    message.conversation_id,
+                    message.turn_id,
+                    message.ordinal,
+                    message.role.value,
+                    message.kind.value,
+                    message.content,
+                    message.provider,
+                    message.model,
+                    message.attempt_id,
+                    message.knowledge_draft_id,
+                    (
+                        message.verification_status.value
+                        if message.verification_status
+                        else None
+                    ),
+                    _dump(message.method_keys),
+                    message.created_at.isoformat(),
+                ),
+            )
+        return message
+
+    def get_conversation_turn_messages(
+        self,
+        conversation_id: str,
+        turn_id: str,
+    ) -> list[ConversationMessage]:
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM conversation_messages
+                WHERE workspace_id = ? AND conversation_id = ? AND turn_id = ?
+                ORDER BY ordinal
+                """,
+                (self.workspace_id, conversation_id, turn_id),
+            ).fetchall()
+        return [self._row_to_conversation_message(row) for row in rows]
+
+    def list_conversation_messages(
+        self,
+        conversation_id: str,
+        *,
+        after_ordinal: int = 0,
+        limit: int = 5_000,
+    ) -> list[ConversationMessage]:
+        self.get_conversation(conversation_id)
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM conversation_messages
+                WHERE workspace_id = ? AND conversation_id = ? AND ordinal > ?
+                ORDER BY ordinal
+                LIMIT ?
+                """,
+                (self.workspace_id, conversation_id, after_ordinal, limit),
+            ).fetchall()
+        return [self._row_to_conversation_message(row) for row in rows]
+
+    def update_conversation_summary(
+        self,
+        conversation_id: str,
+        summary: str,
+        through_ordinal: int,
+    ) -> Conversation:
+        conversation = self.get_conversation(conversation_id)
+        if through_ordinal < conversation.summary_through_ordinal:
+            raise InvalidKnowledgeState("conversation summary cannot move backwards")
+        if through_ordinal > conversation.message_count:
+            raise InvalidKnowledgeState("conversation summary exceeds message history")
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE conversations
+                SET summary = ?, summary_through_ordinal = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (summary, through_ordinal, conversation_id, self.workspace_id),
+            )
+        return self.get_conversation(conversation_id)
+
+    @staticmethod
+    def _row_to_conversation(row: sqlite3.Row) -> Conversation:
+        return Conversation(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            title=row["title"],
+            summary=row["summary"],
+            summary_through_ordinal=int(row["summary_through_ordinal"]),
+            message_count=int(row["message_count"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_conversation_message(row: sqlite3.Row) -> ConversationMessage:
+        return ConversationMessage(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            conversation_id=row["conversation_id"],
+            turn_id=row["turn_id"],
+            ordinal=int(row["ordinal"]),
+            role=ConversationRole(row["role"]),
+            kind=ConversationMessageKind(row["kind"]),
+            content=row["content"],
+            provider=row["provider"],
+            model=row["model"],
+            attempt_id=row["attempt_id"],
+            knowledge_draft_id=row["knowledge_draft_id"],
+            verification_status=(
+                VerificationStatus(row["verification_status"])
+                if row["verification_status"]
+                else None
+            ),
+            method_keys=json.loads(row["method_keys_json"] or "[]"),
+            created_at=datetime.fromisoformat(row["created_at"]),
+        )
 
     def add_example(
         self,

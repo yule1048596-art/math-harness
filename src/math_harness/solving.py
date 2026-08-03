@@ -317,14 +317,57 @@ class FallbackSolutionGenerator:
         math_target: SolveMathTarget | None,
         max_output_tokens: int,
     ) -> SolutionGenerationResult:
+        return self._generate(
+            problem,
+            methods,
+            math_target,
+            max_output_tokens,
+            conversation_context=None,
+        )
+
+    def generate_with_context(
+        self,
+        problem: str,
+        methods: list[MethodMatch],
+        math_target: SolveMathTarget | None,
+        max_output_tokens: int,
+        conversation_context: dict[str, object],
+    ) -> SolutionGenerationResult:
+        return self._generate(
+            problem,
+            methods,
+            math_target,
+            max_output_tokens,
+            conversation_context=conversation_context,
+        )
+
+    def _generate(
+        self,
+        problem: str,
+        methods: list[MethodMatch],
+        math_target: SolveMathTarget | None,
+        max_output_tokens: int,
+        *,
+        conversation_context: dict[str, object] | None,
+    ) -> SolutionGenerationResult:
         started = perf_counter()
         try:
-            primary_result = self.primary.generate(
-                problem,
-                methods,
-                math_target,
-                max_output_tokens,
-            )
+            contextual_generate = getattr(self.primary, "generate_with_context", None)
+            if conversation_context is not None and callable(contextual_generate):
+                primary_result = contextual_generate(
+                    problem,
+                    methods,
+                    math_target,
+                    max_output_tokens,
+                    conversation_context,
+                )
+            else:
+                primary_result = self.primary.generate(
+                    problem,
+                    methods,
+                    math_target,
+                    max_output_tokens,
+                )
             if primary_result.candidate is not None:
                 return primary_result
             primary_error = (
