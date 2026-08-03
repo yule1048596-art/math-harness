@@ -14,6 +14,9 @@ final class AppModel: ObservableObject {
   @Published private(set) var backendPhase: BackendPhase = .idle
   @Published private(set) var workspaces: [Workspace] = []
   @Published var selectedWorkspaceID: String?
+  @Published private(set) var conversations: [Conversation] = []
+  @Published private(set) var selectedConversationID: String?
+  @Published private(set) var messages: [ConversationMessage] = []
   @Published private(set) var attempts: [SolutionAttempt] = []
   @Published private(set) var examples: [ProblemExample] = []
   @Published private(set) var methods: [MethodCard] = []
@@ -32,6 +35,10 @@ final class AppModel: ObservableObject {
 
   var selectedWorkspace: Workspace? {
     workspaces.first { $0.id == selectedWorkspaceID }
+  }
+
+  var selectedConversation: Conversation? {
+    conversations.first { $0.id == selectedConversationID }
   }
 
   var isDataOperationInProgress: Bool {
@@ -80,6 +87,9 @@ final class AppModel: ObservableObject {
     backend.stop()
     api = nil
     backendPhase = .idle
+    conversations = []
+    selectedConversationID = nil
+    messages = []
     attempts = []
     examples = []
     methods = []
@@ -109,6 +119,8 @@ final class AppModel: ObservableObject {
 
   func selectWorkspace(_ workspaceID: String?) {
     selectedWorkspaceID = workspaceID
+    selectedConversationID = nil
+    messages = []
     Task { await refreshSelectedWorkspace() }
   }
 
@@ -196,6 +208,116 @@ final class AppModel: ObservableObject {
     } catch {
       errorMessage = error.localizedDescription
       return nil
+    }
+  }
+
+  func createConversation() async -> Conversation? {
+    guard let api, let workspaceID = selectedWorkspaceID else { return nil }
+    do {
+      let conversation = try await api.createConversation(workspaceID: workspaceID)
+      guard workspaceID == selectedWorkspaceID else { return conversation }
+      conversations.insert(conversation, at: 0)
+      selectedConversationID = conversation.id
+      messages = []
+      return conversation
+    } catch {
+      errorMessage = error.localizedDescription
+      return nil
+    }
+  }
+
+  func selectConversation(_ conversationID: String?) {
+    guard conversationID != selectedConversationID else { return }
+    selectedConversationID = conversationID
+    messages = []
+    Task { await refreshSelectedConversation() }
+  }
+
+  func sendConversationTurn(
+    message: String,
+    tags: [String],
+    mathTarget: SolveMathTargetRequest?
+  ) async -> Bool {
+    guard let api, let workspaceID = selectedWorkspaceID else { return false }
+    let trimmedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedMessage.isEmpty else {
+      errorMessage = "请输入消息。"
+      return false
+    }
+
+    isSolving = true
+    errorMessage = nil
+    defer { isSolving = false }
+    do {
+      let conversationID: String
+      if let selectedConversationID {
+        conversationID = selectedConversationID
+      } else {
+        let created = try await api.createConversation(workspaceID: workspaceID)
+        guard workspaceID == selectedWorkspaceID else { return false }
+        conversations.insert(created, at: 0)
+        self.selectedConversationID = created.id
+        conversationID = created.id
+      }
+      let result = try await api.sendConversationTurn(
+        workspaceID: workspaceID,
+        conversationID: conversationID,
+        request: ConversationTurnRequest(
+          message: trimmedMessage,
+          tags: tags,
+          topK: 5,
+          mathTarget: mathTarget,
+          maxOutputTokens: AppSettings.maxOutputTokens
+        )
+      )
+      guard
+        workspaceID == selectedWorkspaceID,
+        conversationID == selectedConversationID
+      else { return true }
+
+      if !messages.contains(where: { $0.id == result.userMessage.id }) {
+        messages.append(result.userMessage)
+      }
+      if !messages.contains(where: { $0.id == result.assistantMessage.id }) {
+        messages.append(result.assistantMessage)
+      }
+      messages.sort { $0.ordinal < $1.ordinal }
+      if let index = conversations.firstIndex(where: { $0.id == result.conversation.id }) {
+        conversations[index] = result.conversation
+      } else {
+        conversations.append(result.conversation)
+      }
+      conversations.sort { $0.updatedAt > $1.updatedAt }
+      if let attempt = result.attempt,
+        !attempts.contains(where: { $0.id == attempt.id })
+      {
+        attempts.append(attempt)
+        attempts.sort { $0.createdAt < $1.createdAt }
+      }
+
+      if mathTarget != nil {
+        do {
+          async let loadedMethods = api.listMethods(workspaceID: workspaceID)
+          async let loadedExamples = api.listExamples(workspaceID: workspaceID)
+          let (methods, examples) = try await (loadedMethods, loadedExamples)
+          guard
+            workspaceID == selectedWorkspaceID,
+            conversationID == selectedConversationID
+          else { return true }
+          self.methods = methods
+          self.examples = examples
+        } catch {
+          guard
+            workspaceID == selectedWorkspaceID,
+            conversationID == selectedConversationID
+          else { return true }
+          errorMessage = "回复已经保存，但知识栏刷新失败：\(error.localizedDescription)"
+        }
+      }
+      return true
+    } catch {
+      errorMessage = error.localizedDescription
+      return false
     }
   }
 
@@ -342,24 +464,63 @@ final class AppModel: ObservableObject {
 
   func refreshSelectedWorkspace() async {
     guard let api, let workspaceID = selectedWorkspaceID else {
+      conversations = []
+      selectedConversationID = nil
+      messages = []
       attempts = []
       examples = []
       methods = []
       return
     }
     do {
+      async let loadedConversations = api.listConversations(workspaceID: workspaceID)
       async let loadedAttempts = api.listAttempts(workspaceID: workspaceID)
       async let loadedExamples = api.listExamples(workspaceID: workspaceID)
       async let loadedMethods = api.listMethods(workspaceID: workspaceID)
-      let (attempts, examples, methods) = try await (
+      let (conversations, attempts, examples, methods) = try await (
+        loadedConversations,
         loadedAttempts,
         loadedExamples,
         loadedMethods
       )
       guard workspaceID == selectedWorkspaceID else { return }
+      self.conversations = conversations.sorted { $0.updatedAt > $1.updatedAt }
+      if let selectedConversationID,
+        !conversations.contains(where: { $0.id == selectedConversationID })
+      {
+        self.selectedConversationID = nil
+      }
+      if selectedConversationID == nil {
+        selectedConversationID = self.conversations.first?.id
+      }
       self.attempts = attempts.sorted { $0.createdAt < $1.createdAt }
       self.examples = examples
       self.methods = methods
+      await refreshSelectedConversation()
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  func refreshSelectedConversation() async {
+    guard
+      let api,
+      let workspaceID = selectedWorkspaceID,
+      let conversationID = selectedConversationID
+    else {
+      messages = []
+      return
+    }
+    do {
+      let loaded = try await api.listConversationMessages(
+        workspaceID: workspaceID,
+        conversationID: conversationID
+      )
+      guard
+        workspaceID == selectedWorkspaceID,
+        conversationID == selectedConversationID
+      else { return }
+      messages = loaded.sorted { $0.ordinal < $1.ordinal }
     } catch {
       errorMessage = error.localizedDescription
     }

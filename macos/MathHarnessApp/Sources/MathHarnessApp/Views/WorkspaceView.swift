@@ -8,9 +8,9 @@ struct WorkspaceView: View {
     VStack(spacing: 0) {
       workspaceHeader
       Divider()
-      AttemptTimeline()
+      ConversationTimeline()
       Divider()
-      SolveComposer()
+      ConversationComposer()
     }
     .navigationTitle(model.selectedWorkspace?.name ?? "Math Harness")
   }
@@ -29,7 +29,42 @@ struct WorkspaceView: View {
             .lineLimit(1)
         }
       }
-      Spacer()
+
+      Spacer(minLength: 12)
+
+      Menu {
+        if model.conversations.isEmpty {
+          Text("还没有会话")
+        } else {
+          ForEach(model.conversations) { conversation in
+            Button {
+              model.selectConversation(conversation.id)
+            } label: {
+              if conversation.id == model.selectedConversationID {
+                Label(conversation.title, systemImage: "checkmark")
+              } else {
+                Text(conversation.title)
+              }
+            }
+          }
+          Divider()
+        }
+        Button {
+          Task { _ = await model.createConversation() }
+        } label: {
+          Label("新建会话", systemImage: "square.and.pencil")
+        }
+      } label: {
+        Label(
+          model.selectedConversation?.title ?? "新会话",
+          systemImage: "bubble.left.and.bubble.right"
+        )
+        .lineLimit(1)
+      }
+      .menuStyle(.borderlessButton)
+      .frame(maxWidth: 220)
+      .disabled(model.isSolving)
+
       if !model.pendingExamples.isEmpty {
         Label("\(model.pendingExamples.count) 待复核", systemImage: "tray.full")
           .font(.caption)
@@ -38,159 +73,193 @@ struct WorkspaceView: View {
       Label("\(model.methods.count) 张方法卡", systemImage: "books.vertical")
         .font(.caption)
         .foregroundStyle(.secondary)
-      Label("\(model.attempts.count) 次求解", systemImage: "bubble.left.and.text.bubble.right")
+      Label("\(model.messages.count) 条消息", systemImage: "text.bubble")
         .font(.caption)
         .foregroundStyle(.secondary)
     }
     .padding(.horizontal, 18)
-    .frame(minHeight: 54)
+    .frame(minHeight: 58)
   }
 }
 
-private struct AttemptTimeline: View {
+private struct ConversationTimeline: View {
   @EnvironmentObject private var model: AppModel
 
   var body: some View {
     ScrollViewReader { proxy in
       ScrollView {
-        LazyVStack(spacing: 22) {
-          if model.attempts.isEmpty {
+        LazyVStack(spacing: 18) {
+          if model.selectedConversation == nil {
             ContentUnavailableView {
-              Label("开始第一次数学对话", systemImage: "sum")
+              Label("开始一段数学对话", systemImage: "bubble.left.and.bubble.right")
             } description: {
-              Text("输入题目；若提供可验证目标，Harness 会用 SymPy 独立验收答案。")
+              Text("每个工作区保存独立的会话、摘要、例题和方法卡。")
+            } actions: {
+              Button("新建会话") {
+                Task { _ = await model.createConversation() }
+              }
+              .buttonStyle(.borderedProminent)
             }
-            .frame(maxWidth: .infinity, minHeight: 300)
+            .frame(maxWidth: .infinity, minHeight: 320)
+          } else if model.messages.isEmpty {
+            ContentUnavailableView {
+              Label("这是一段新会话", systemImage: "sparkles")
+            } description: {
+              Text("可以自然聊天，也可以切换到“验算求解”生成可复核的数学知识草稿。")
+            }
+            .frame(maxWidth: .infinity, minHeight: 320)
           } else {
-            ForEach(model.attempts) { attempt in
-              AttemptConversation(attempt: attempt)
-                .id(attempt.id)
+            ForEach(model.messages) { message in
+              ConversationMessageRow(message: message)
+                .id(message.id)
             }
           }
         }
-        .padding(24)
-        .frame(maxWidth: 860)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 22)
+        .frame(maxWidth: 900)
         .frame(maxWidth: .infinity)
       }
-      .onChange(of: model.attempts.count) {
-        if let id = model.attempts.last?.id {
+      .onChange(of: model.messages.count) {
+        if let id = model.messages.last?.id {
           withAnimation { proxy.scrollTo(id, anchor: .bottom) }
+        }
+      }
+      .onChange(of: model.selectedConversationID) {
+        if let id = model.messages.last?.id {
+          proxy.scrollTo(id, anchor: .bottom)
         }
       }
     }
   }
 }
 
-private struct AttemptConversation: View {
+private struct ConversationMessageRow: View {
   @EnvironmentObject private var model: AppModel
-  let attempt: SolutionAttempt
+  let message: ConversationMessage
 
   var body: some View {
-    VStack(spacing: 12) {
+    if message.role == "user" {
       HStack {
-        Spacer(minLength: 90)
-        Text(attempt.problem)
+        Spacer(minLength: 100)
+        Text(message.content)
           .textSelection(.enabled)
           .padding(.horizontal, 14)
           .padding(.vertical, 10)
-          .background(.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 14))
+          .background(.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 15))
       }
-
+    } else {
       HStack(alignment: .top, spacing: 10) {
         Image(systemName: "function")
           .font(.headline)
           .foregroundStyle(.tint)
-          .frame(width: 30, height: 30)
+          .frame(width: 31, height: 31)
           .background(.tint.opacity(0.10), in: Circle())
 
-        VStack(alignment: .leading, spacing: 12) {
-          HStack {
+        VStack(alignment: .leading, spacing: 10) {
+          HStack(spacing: 8) {
             Text("Math Harness")
               .font(.subheadline.weight(.semibold))
-            StatusBadge(status: attempt.status)
+            if let verification = message.verificationStatus {
+              VerificationPill(status: verification)
+            } else if message.kind == "chat" {
+              Text("对话")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(.quaternary, in: Capsule())
+            }
             Spacer()
-            Text(attempt.generation.model ?? attempt.generation.provider)
+            Text(message.model ?? message.provider ?? "本地")
               .font(.caption2)
               .foregroundStyle(.tertiary)
           }
 
-          if let candidate = attempt.candidate {
-            Text(candidate.answerText)
-              .textSelection(.enabled)
+          Text(message.content)
+            .textSelection(.enabled)
+            .lineSpacing(3)
 
-            if !candidate.steps.isEmpty {
-              VStack(alignment: .leading, spacing: 8) {
-                ForEach(Array(candidate.steps.enumerated()), id: \.offset) { index, step in
-                  HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("\(index + 1)")
-                      .font(.caption2.monospacedDigit())
-                      .foregroundStyle(.secondary)
-                      .frame(width: 18, height: 18)
-                      .background(.quaternary, in: Circle())
-                    VStack(alignment: .leading, spacing: 3) {
-                      Text(step.explanation)
-                      if let expression = step.expression, !expression.isEmpty {
-                        Text(expression)
-                          .font(.body.monospaced())
-                          .foregroundStyle(.secondary)
-                          .textSelection(.enabled)
-                      }
-                    }
-                  }
-                }
+          if message.knowledgeDraftID != nil || !message.methodKeys.isEmpty {
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+              if message.knowledgeDraftID != nil {
+                Label("已生成待复核知识草稿", systemImage: "tray.and.arrow.down.fill")
+                  .foregroundStyle(.orange)
               }
-            }
-          } else {
-            Text(attempt.generation.error ?? attempt.verification.summary)
-              .foregroundStyle(.secondary)
-          }
-
-          Divider()
-          HStack(alignment: .top, spacing: 8) {
-            Image(systemName: verificationIcon)
-              .foregroundStyle(verificationColor)
-            VStack(alignment: .leading, spacing: 3) {
-              Text(attempt.verification.summary)
-                .font(.caption)
-              if model.isAttemptCaptured(attempt.id) {
-                Label("已自动记入知识草稿", systemImage: "tray.and.arrow.down.fill")
-                  .font(.caption2)
-                  .foregroundStyle(.secondary)
-              }
-              if !attempt.recommendedMethods.isEmpty {
-                Text(
-                  "检索方法："
-                    + attempt.recommendedMethods
-                    .map(\.method.name)
-                    .joined(separator: "、")
+              if !message.methodKeys.isEmpty {
+                Label(
+                  "检索方法：\(methodLabels.joined(separator: "、"))",
+                  systemImage: "books.vertical"
                 )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
               }
             }
+            .font(.caption)
+            .foregroundStyle(.secondary)
           }
         }
         .padding(14)
-        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 14))
-        Spacer(minLength: 40)
+        .background(.background.secondary, in: RoundedRectangle(cornerRadius: 15))
+
+        Spacer(minLength: 52)
       }
     }
   }
 
-  private var verificationIcon: String {
-    attempt.verification.status == "verified"
-      ? "checkmark.seal.fill"
-      : "exclamationmark.triangle.fill"
-  }
-
-  private var verificationColor: Color {
-    attempt.verification.status == "verified" ? .green : .orange
+  private var methodLabels: [String] {
+    message.methodKeys.map { key in
+      model.methods.first(where: { $0.key == key })?.name ?? key
+    }
   }
 }
 
-private struct SolveComposer: View {
+private struct VerificationPill: View {
+  let status: String
+
+  var body: some View {
+    Label(label, systemImage: icon)
+      .font(.caption2.weight(.medium))
+      .foregroundStyle(color)
+      .padding(.horizontal, 7)
+      .padding(.vertical, 3)
+      .background(color.opacity(0.12), in: Capsule())
+  }
+
+  private var label: String {
+    switch status {
+    case "verified": "已验证"
+    case "rejected": "未通过"
+    default: "待复核"
+    }
+  }
+
+  private var icon: String {
+    status == "verified" ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
+  }
+
+  private var color: Color {
+    status == "verified" ? .green : .orange
+  }
+}
+
+private enum ComposerMode: String, CaseIterable, Identifiable {
+  case chat
+  case verifiedSolve
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .chat: "普通聊天"
+    case .verifiedSolve: "验算求解"
+    }
+  }
+}
+
+private struct ConversationComposer: View {
   @EnvironmentObject private var model: AppModel
-  @State private var problem = ""
+  @State private var composerMode: ComposerMode = .chat
+  @State private var message = ""
   @State private var tags = ""
   @State private var showingTarget = true
   @State private var expression = ""
@@ -199,16 +268,36 @@ private struct SolveComposer: View {
   @State private var assumptions = ""
   @State private var point = "oo"
   @State private var direction = "two_sided"
-  @State private var mode: VerificationMode = .asymptoticExpansion
+  @State private var verificationMode: VerificationMode = .asymptoticExpansion
   @State private var remainderPower = "2"
   @State private var targetDraftSummary: String?
   @State private var targetDraftWarnings: [String] = []
-  @State private var draftedProblem: String?
+  @State private var draftedMessage: String?
   @State private var awaitingTargetConfirmation = false
 
   var body: some View {
     VStack(spacing: 10) {
-      TextEditor(text: $problem)
+      HStack {
+        Picker("发送模式", selection: $composerMode) {
+          ForEach(ComposerMode.allCases) { mode in
+            Text(mode.title).tag(mode)
+          }
+        }
+        .pickerStyle(.segmented)
+        .frame(width: 250)
+        Spacer()
+        if composerMode == .chat {
+          Label("使用会话记忆与已晋级方法", systemImage: "brain.head.profile")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        } else {
+          Label("候选答案由独立验证器验收", systemImage: "checkmark.shield")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+      }
+
+      TextEditor(text: $message)
         .font(.body)
         .scrollContentBackground(.hidden)
         .frame(minHeight: 54, maxHeight: 110)
@@ -219,107 +308,27 @@ private struct SolveComposer: View {
             .stroke(.separator, lineWidth: 1)
         }
         .overlay(alignment: .topLeading) {
-          if problem.isEmpty {
-            Text("输入数学问题……")
-              .foregroundStyle(.tertiary)
-              .padding(.horizontal, 13)
-              .padding(.vertical, 16)
-              .allowsHitTesting(false)
+          if message.isEmpty {
+            Text(
+              composerMode == .chat
+                ? "输入消息，可以继续追问上下文……"
+                : "输入需要独立验算的数学问题……"
+            )
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 16)
+            .allowsHitTesting(false)
           }
         }
 
-      DisclosureGroup("可验证数学目标", isExpanded: $showingTarget) {
-        VStack(spacing: 8) {
-          HStack {
-            Button {
-              requestTargetDraft()
-            } label: {
-              if model.isDraftingTarget {
-                ProgressView()
-                  .controlSize(.mini)
-              } else {
-                Label("自动整理", systemImage: "wand.and.stars")
-              }
-            }
-            .buttonStyle(.bordered)
-            .disabled(
-              problem.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || model.isDraftingTarget || model.isSolving
-            )
-            TextField(
-              "表达式，例如 sqrt(x**2+x)-x",
-              text: $expression
-            )
-            .font(.body.monospaced())
-          }
-          HStack {
-            TextField("变量", text: $variable)
-              .frame(width: 72)
-            TextField("参数（逗号分隔）", text: $parameters)
-              .frame(minWidth: 130)
-            TextField("趋近点", text: $point)
-              .frame(width: 90)
-            Picker("方向", selection: $direction) {
-              Text("双侧").tag("two_sided")
-              Text("左侧").tag("left")
-              Text("右侧").tag("right")
-            }
-            .frame(width: 150)
-          }
-          HStack {
-            Picker("验算模式", selection: $mode) {
-              ForEach(VerificationMode.allCases) { item in
-                Text(item.displayName).tag(item)
-              }
-            }
-            .frame(maxWidth: 240)
-            if mode == .asymptoticExpansion {
-              TextField("余项阶数", text: $remainderPower)
-                .frame(width: 110)
-            }
-            TextField("标签（逗号分隔）", text: $tags)
-            Spacer()
-          }
-          TextField(
-            "假设，例如 a:positive; n:integer（可选）",
-            text: $assumptions
-          )
-          if let targetDraftSummary {
-            VStack(alignment: .leading, spacing: 3) {
-              Label(
-                awaitingTargetConfirmation
-                  ? "\(targetDraftSummary) 请检查后确认求解。"
-                  : targetDraftSummary,
-                systemImage: awaitingTargetConfirmation
-                  ? "checkmark.bubble" : "info.bubble"
-              )
-              ForEach(targetDraftWarnings, id: \.self) { warning in
-                Text("• \(warning)")
-              }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .foregroundStyle(awaitingTargetConfirmation ? .blue : .orange)
-          }
-          HStack {
-            Image(systemName: "checkmark.shield")
-            Text("自动整理只生成建议稿；表达式、变量、趋近点和假设均由你确认后才会用于验算。")
-            Spacer()
-          }
-          .font(.caption)
-          .foregroundStyle(.secondary)
-        }
-        .padding(.top, 6)
+      if composerMode == .verifiedSolve {
+        targetEditor
       }
-      .font(.caption)
 
       HStack {
-        Text(
-          model.isSolving
-            ? "正在检索、求解并验证……"
-            : model.isDraftingTarget ? "正在整理可验证目标……" : "⌘↩ 发送"
-        )
-        .font(.caption)
-        .foregroundStyle(.secondary)
+        Text(statusText)
+          .font(.caption)
+          .foregroundStyle(.secondary)
         Spacer()
         Button {
           submit()
@@ -327,23 +336,15 @@ private struct SolveComposer: View {
           if model.isSolving || model.isDraftingTarget {
             ProgressView()
               .controlSize(.small)
-              .frame(width: 58)
+              .frame(width: 62)
           } else {
-            Label(
-              awaitingTargetConfirmation
-                ? "确认并求解"
-                : isUnstructuredContinuation ? "继续非结构化" : "求解",
-              systemImage: awaitingTargetConfirmation
-                ? "checkmark.shield.fill"
-                : isUnstructuredContinuation
-                  ? "bubble.left.and.text.bubble.right" : "arrow.up.circle.fill"
-            )
+            Label(buttonTitle, systemImage: buttonIcon)
           }
         }
         .keyboardShortcut(.return, modifiers: [.command])
         .buttonStyle(.borderedProminent)
         .disabled(
-          problem.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || model.isSolving
             || model.isDraftingTarget
         )
@@ -352,28 +353,148 @@ private struct SolveComposer: View {
     .padding(.horizontal, 18)
     .padding(.vertical, 12)
     .background(.regularMaterial)
-    .onChange(of: problem) { _, _ in
-      if awaitingTargetConfirmation {
-        resetTargetFields()
+    .onChange(of: message) { _, _ in
+      invalidateTargetDraft()
+    }
+    .onChange(of: composerMode) { _, _ in
+      resetTargetFields()
+    }
+    .onChange(of: model.selectedConversationID) { oldValue, _ in
+      if oldValue == nil, model.isSolving {
+        return
       }
-      draftedProblem = nil
-      awaitingTargetConfirmation = false
-      targetDraftSummary = nil
-      targetDraftWarnings = []
+      composerMode = .chat
+      message = ""
+      resetTargetFields()
     }
   }
 
+  private var targetEditor: some View {
+    DisclosureGroup("可验证数学目标", isExpanded: $showingTarget) {
+      VStack(spacing: 8) {
+        HStack {
+          Button {
+            requestTargetDraft()
+          } label: {
+            if model.isDraftingTarget {
+              ProgressView().controlSize(.mini)
+            } else {
+              Label("自动整理", systemImage: "wand.and.stars")
+            }
+          }
+          .buttonStyle(.bordered)
+          .disabled(
+            message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              || model.isDraftingTarget || model.isSolving
+          )
+          TextField("表达式，例如 sqrt(x**2+x)-x", text: $expression)
+            .font(.body.monospaced())
+        }
+        HStack {
+          TextField("变量", text: $variable)
+            .frame(width: 72)
+          TextField("参数（逗号分隔）", text: $parameters)
+            .frame(minWidth: 130)
+          TextField("趋近点", text: $point)
+            .frame(width: 90)
+          Picker("方向", selection: $direction) {
+            Text("双侧").tag("two_sided")
+            Text("左侧").tag("left")
+            Text("右侧").tag("right")
+          }
+          .frame(width: 150)
+        }
+        HStack {
+          Picker("验算模式", selection: $verificationMode) {
+            ForEach(VerificationMode.allCases) { item in
+              Text(item.displayName).tag(item)
+            }
+          }
+          .frame(maxWidth: 240)
+          if verificationMode == .asymptoticExpansion {
+            TextField("余项阶数", text: $remainderPower)
+              .frame(width: 110)
+          }
+          TextField("标签（逗号分隔）", text: $tags)
+          Spacer()
+        }
+        TextField("假设，例如 a:positive; n:integer（可选）", text: $assumptions)
+        if let targetDraftSummary {
+          VStack(alignment: .leading, spacing: 3) {
+            Label(
+              awaitingTargetConfirmation
+                ? "\(targetDraftSummary) 请检查后确认。"
+                : targetDraftSummary,
+              systemImage: awaitingTargetConfirmation ? "checkmark.bubble" : "info.bubble"
+            )
+            ForEach(targetDraftWarnings, id: \.self) { warning in
+              Text("• \(warning)")
+            }
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
+          .foregroundStyle(awaitingTargetConfirmation ? .blue : .orange)
+        }
+        HStack {
+          Image(systemName: "checkmark.shield")
+          Text("自动整理只生成建议稿；目标由你确认后才用于验算和知识草稿。")
+          Spacer()
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      }
+      .padding(.top, 6)
+    }
+    .font(.caption)
+  }
+
+  private var statusText: String {
+    if model.isDraftingTarget { return "正在整理可验证目标……" }
+    if model.isSolving {
+      return composerMode == .chat
+        ? "正在结合会话记忆生成回复……"
+        : "正在检索、求解并独立验证……"
+    }
+    return "⌘↩ 发送"
+  }
+
+  private var buttonTitle: String {
+    if composerMode == .chat { return "发送" }
+    if awaitingTargetConfirmation { return "确认并验算" }
+    if isUnstructuredContinuation { return "作为聊天发送" }
+    if !expression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      return "验算求解"
+    }
+    return "整理目标"
+  }
+
+  private var buttonIcon: String {
+    if composerMode == .chat || isUnstructuredContinuation {
+      return "arrow.up.circle.fill"
+    }
+    if awaitingTargetConfirmation
+      || !expression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    {
+      return "checkmark.shield.fill"
+    }
+    return "wand.and.stars"
+  }
+
   private var isUnstructuredContinuation: Bool {
-    let trimmedProblem = problem.trimmingCharacters(in: .whitespacesAndNewlines)
-    return draftedProblem == trimmedProblem
+    let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    return draftedMessage == trimmed
       && expression.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && targetDraftSummary != nil
   }
 
   private func submit() {
-    let submittedProblem = problem.trimmingCharacters(in: .whitespacesAndNewlines)
+    let submittedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    if composerMode == .chat {
+      send(submittedMessage, target: nil, tags: [])
+      return
+    }
+
     let trimmedExpression = expression.trimmingCharacters(in: .whitespacesAndNewlines)
-    if trimmedExpression.isEmpty, draftedProblem != submittedProblem {
+    if trimmedExpression.isEmpty, draftedMessage != submittedMessage {
       requestTargetDraft()
       return
     }
@@ -388,7 +509,7 @@ private struct SolveComposer: View {
         return
       }
       let power: Int?
-      if mode == .asymptoticExpansion {
+      if verificationMode == .asymptoticExpansion {
         guard let parsed = Int(remainderPower), (1...50).contains(parsed) else {
           model.errorMessage = "余项阶数必须是 1 到 50 之间的整数。"
           return
@@ -403,9 +524,7 @@ private struct SolveComposer: View {
           assumptions,
           allowedSymbols: Set([trimmedVariable] + normalizedParameters)
         )
-      else {
-        return
-      }
+      else { return }
       target = SolveMathTargetRequest(
         expression: trimmedExpression,
         variable: trimmedVariable,
@@ -413,42 +532,46 @@ private struct SolveComposer: View {
         assumptions: parsedAssumptions,
         point: point.trimmingCharacters(in: .whitespacesAndNewlines),
         direction: direction,
-        mode: mode,
+        mode: verificationMode,
         remainderPower: power
       )
     }
+    send(submittedMessage, target: target, tags: parseCommaSeparated(tags))
+  }
 
-    let normalizedTags =
-      tags
-      .split(separator: ",")
-      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-      .filter { !$0.isEmpty }
+  private func send(
+    _ submittedMessage: String,
+    target: SolveMathTargetRequest?,
+    tags: [String]
+  ) {
     Task {
-      if await model.solve(
-        problem: submittedProblem,
-        tags: normalizedTags,
+      if await model.sendConversationTurn(
+        message: submittedMessage,
+        tags: tags,
         mathTarget: target
       ) {
-        problem = ""
-        resetTargetFields()
+        if message.trimmingCharacters(in: .whitespacesAndNewlines) == submittedMessage {
+          message = ""
+          resetTargetFields()
+        }
       }
     }
   }
 
   private func requestTargetDraft() {
-    let submittedProblem = problem.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !submittedProblem.isEmpty else {
+    let submittedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !submittedMessage.isEmpty else {
       model.errorMessage = "请先输入数学问题。"
       return
     }
     Task {
-      guard let result = await model.draftMathTarget(problem: submittedProblem) else {
+      guard let result = await model.draftMathTarget(problem: submittedMessage) else {
         return
       }
-      guard problem.trimmingCharacters(in: .whitespacesAndNewlines) == submittedProblem else {
+      guard message.trimmingCharacters(in: .whitespacesAndNewlines) == submittedMessage else {
         return
       }
-      draftedProblem = submittedProblem
+      draftedMessage = submittedMessage
       targetDraftSummary = result.summary
       targetDraftWarnings = result.warnings
       guard let target = result.target else {
@@ -472,7 +595,7 @@ private struct SolveComposer: View {
       .joined(separator: "; ")
     point = target.point
     direction = target.direction
-    mode = target.mode
+    verificationMode = target.mode
     remainderPower = target.remainderPower.map(String.init) ?? ""
   }
 
@@ -520,6 +643,17 @@ private struct SolveComposer: View {
     return result
   }
 
+  private func invalidateTargetDraft() {
+    if awaitingTargetConfirmation {
+      resetTargetFields()
+      return
+    }
+    draftedMessage = nil
+    awaitingTargetConfirmation = false
+    targetDraftSummary = nil
+    targetDraftWarnings = []
+  }
+
   private func resetTargetFields() {
     expression = ""
     variable = "x"
@@ -527,9 +661,9 @@ private struct SolveComposer: View {
     assumptions = ""
     point = "oo"
     direction = "two_sided"
-    mode = .asymptoticExpansion
+    verificationMode = .asymptoticExpansion
     remainderPower = "2"
-    draftedProblem = nil
+    draftedMessage = nil
     awaitingTargetConfirmation = false
     targetDraftSummary = nil
     targetDraftWarnings = []

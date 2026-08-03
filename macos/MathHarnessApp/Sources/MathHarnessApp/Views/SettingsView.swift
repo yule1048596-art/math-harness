@@ -25,14 +25,14 @@ struct SettingsView: View {
           TextField("Base URL", text: $baseURL)
           TextField("模型", text: $modelName)
           Toggle("求解后使用 MiMo 提炼方法", isOn: $mimoMethodExtraction)
-          Text("自动整理数学目标会使用一次模型请求；方法提炼开启后，可记忆答案还会再使用一次。")
+          Text("普通聊天、自动整理和候选解生成会使用 MiMo；方法提炼开启后，可记忆答案还会产生一次提炼请求。")
             .font(.caption)
             .foregroundStyle(.secondary)
           Text("密钥只保存在 macOS 钥匙串中，不会写入工作区数据库或项目文件。")
             .font(.caption)
             .foregroundStyle(.secondary)
         } else {
-          Text("离线模式不发送网络请求，适合已提供结构化数学目标的问题。")
+          Text("离线模式会保存完整会话，但只生成基础提示；带结构化目标的数学问题仍可由 SymPy 求解和验算。")
             .font(.caption)
             .foregroundStyle(.secondary)
         }

@@ -28,7 +28,7 @@ MAX_DATABASE_BYTES = 120 * 1024 * 1024
 MANIFEST_NAME = "manifest.json"
 DATABASE_NAME = "workspace.sqlite3"
 
-_WORKSPACE_TABLES = {
+_REQUIRED_TABLES = {
     "examples",
     "example_versions",
     "methods",
@@ -41,8 +41,11 @@ _WORKSPACE_TABLES = {
     "attempt_methods",
     "solve_evaluation_runs",
 }
-_REQUIRED_TABLES = _WORKSPACE_TABLES
-_WORKSPACE_INDEXES = {
+_WORKSPACE_TABLES = _REQUIRED_TABLES | {
+    "conversations",
+    "conversation_messages",
+}
+_REQUIRED_INDEXES = {
     "idx_evaluation_runs_workspace",
     "idx_example_versions_example",
     "idx_examples_source_attempt",
@@ -50,6 +53,10 @@ _WORKSPACE_INDEXES = {
     "idx_method_versions_method",
     "idx_solution_attempts_workspace",
     "idx_solve_evaluation_runs_workspace",
+}
+_WORKSPACE_INDEXES = _REQUIRED_INDEXES | {
+    "idx_conversations_workspace",
+    "idx_conversation_messages_conversation",
 }
 _TABLE_COLUMNS = {
     "examples": {
@@ -148,6 +155,33 @@ _TABLE_COLUMNS = {
         "used",
     },
     "solve_evaluation_runs": {"id", "workspace_id", "report_json", "created_at"},
+    "conversations": {
+        "id",
+        "workspace_id",
+        "title",
+        "summary",
+        "summary_through_ordinal",
+        "message_count",
+        "created_at",
+        "updated_at",
+    },
+    "conversation_messages": {
+        "id",
+        "workspace_id",
+        "conversation_id",
+        "turn_id",
+        "ordinal",
+        "role",
+        "kind",
+        "content",
+        "provider",
+        "model",
+        "attempt_id",
+        "knowledge_draft_id",
+        "verification_status",
+        "method_keys_json",
+        "created_at",
+    },
 }
 
 
@@ -359,7 +393,7 @@ def _validate_database(
             )
         indexes = {row["name"] for row in schema_rows if row["type"] == "index"}
         unknown_indexes = indexes - _WORKSPACE_INDEXES
-        missing_indexes = _WORKSPACE_INDEXES - indexes
+        missing_indexes = _REQUIRED_INDEXES - indexes
         if unknown_indexes or missing_indexes:
             details = []
             if unknown_indexes:

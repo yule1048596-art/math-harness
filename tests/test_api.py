@@ -9,7 +9,7 @@ def test_api_vertical_slice(tmp_path):
     client = TestClient(create_app(tmp_path))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["version"] == "0.9.0"
+    assert response.json()["version"] == "0.10.0"
 
     response = client.post(
         "/workspaces",
@@ -245,3 +245,66 @@ def test_review_api_enforces_verified_example_boundary(tmp_path):
     )
     assert response.status_code == 409
     assert "已验证例题" in response.json()["detail"]
+
+
+def test_conversation_api_persists_multi_turn_chat_and_verified_solves(tmp_path):
+    client = TestClient(create_app(tmp_path))
+    workspace_id = client.post(
+        "/workspaces",
+        json={"name": "会话 API"},
+    ).json()["id"]
+    created = client.post(
+        f"/workspaces/{workspace_id}/conversations",
+        json={},
+    )
+    assert created.status_code == 201
+    conversation_id = created.json()["id"]
+
+    chat = client.post(
+        f"/workspaces/{workspace_id}/conversations/{conversation_id}/turns",
+        json={"message": "你好", "turn_id": "api-chat-1"},
+    )
+    assert chat.status_code == 201
+    assert chat.json()["assistant_message"]["role"] == "assistant"
+    assert chat.json()["assistant_message"]["kind"] == "chat"
+
+    solve = client.post(
+        f"/workspaces/{workspace_id}/conversations/{conversation_id}/turns",
+        json={
+            "message": "求 sqrt(x^2+x)-x 在无穷远的展开",
+            "turn_id": "api-solve-1",
+            "math_target": {
+                "expression": "sqrt(x**2+x)-x",
+                "point": "oo",
+                "remainder_power": 2,
+            },
+        },
+    )
+    assert solve.status_code == 201
+    payload = solve.json()
+    assert payload["attempt"]["status"] == "verified"
+    assert payload["knowledge_draft"]["status"] == "pending_review"
+    assert payload["assistant_message"]["verification_status"] == "verified"
+
+    repeated = client.post(
+        f"/workspaces/{workspace_id}/conversations/{conversation_id}/turns",
+        json={
+            "message": "求 sqrt(x^2+x)-x 在无穷远的展开",
+            "turn_id": "api-solve-1",
+            "math_target": {
+                "expression": "sqrt(x**2+x)-x",
+                "point": "oo",
+                "remainder_power": 2,
+            },
+        },
+    )
+    assert repeated.status_code == 201
+    assert (
+        repeated.json()["assistant_message"]["id"] == payload["assistant_message"]["id"]
+    )
+
+    messages = client.get(
+        f"/workspaces/{workspace_id}/conversations/{conversation_id}/messages"
+    )
+    assert messages.status_code == 200
+    assert [item["ordinal"] for item in messages.json()] == [1, 2, 3, 4]

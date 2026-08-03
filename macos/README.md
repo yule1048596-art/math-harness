@@ -1,7 +1,8 @@
 # Math Harness for macOS
 
-v0.9.0 在原生 macOS 客户端中加入题库批量导入、工作区完整备份和安全恢复。SwiftUI
-继续负责工作区、数学对话、知识复核与数据操作；Python/SymPy 服务作为独立子进程运行。
+v0.10.0 把原生 macOS 客户端升级为持久数学对话 App：每个工作区可建立多个独立会话，
+普通聊天和带 SymPy 独立验算的数学求解共用一条时间线。SwiftUI 负责对话、知识复核与
+数据操作；Python/SymPy 服务作为独立子进程运行。
 
 ## 开发运行
 
@@ -35,8 +36,8 @@ swift run --package-path macos/MathHarnessApp MathHarnessCoreChecks
 
 ```bash
 ./scripts/build_macos_app.sh
-ditto -x -k "dist/Math-Harness-0.9.0-macOS-arm64.zip" /tmp/math-harness-beta
-open "/tmp/math-harness-alpha/Math Harness.app"
+ditto -x -k "dist/Math-Harness-0.10.0-macOS-arm64.zip" /tmp/math-harness-beta
+open "/tmp/math-harness-beta/Math Harness.app"
 ```
 
 构建脚本使用 PyInstaller 把 Python 解释器、SymPy、FastAPI 和模型客户端放进 App，
@@ -69,7 +70,15 @@ export MATH_HARNESS_NOTARY_PROFILE="math-harness-notary"
 分发构建不会启用它。沙箱版还需要给嵌入的 Python helper 配置继承权限并完成商店审核，
 不能只给主 App 打开沙箱开关。
 
-## v0.9.0 数据操作
+## v0.10.0 对话内核
+
+- 同一工作区可以创建和切换多个持久对话；不同工作区的消息、摘要和知识继续物理隔离。
+- “普通聊天”直接调用已配置的 MiMo；离线模式会诚实提示能力边界，同时仍保存消息。
+- “验算求解”把候选解、验证状态、求解记录和待审核知识草稿关联到同一个对话回合。
+- 模型上下文由滚动摘要、近期消息和已人工晋级的方法卡组成；普通聊天不会直接污染可信知识。
+- 打开旧数据库时，既有求解记录会一次性包装为可阅读的历史会话。工作区备份包含会话数据。
+
+## 数据操作
 
 - 工具栏“数据”菜单可以选择 JSON/JSONL 题库。App 先显示总数、可导入数、重复数与逐项
   错误；只有整批合法时才能确认，确认后的数据库写入使用一个 SQLite 事务。
@@ -86,7 +95,7 @@ export MATH_HARNESS_NOTARY_PROFILE="math-harness-notary"
   编辑/重新校验、例题与方法草稿复核，以及方法卡查看/废弃。只有独立验证通过的当前
   修订可以由人工确认晋级。
 - 目标建议稿不会自动求解：App 先填入表达式、变量、参数、假设、趋近点、方向、模式和
-  余项阶数，用户检查后点击“确认并求解”。MiMo 不可用时退回本地规则；无法可靠识别时
+  余项阶数，用户检查后点击“确认并验算”。MiMo 不可用时退回本地规则；无法可靠识别时
   仍允许手填或明确继续非结构化对话。
 - 草稿编辑保存前会保留旧版本，保存后重新运行验证与方法提炼。验证失败但尚未人工驳回
   的自动草稿继续显示在待复核区，不会成为不可见的死数据。
@@ -95,6 +104,7 @@ export MATH_HARNESS_NOTARY_PROFILE="math-harness-notary"
 - 现有 CLI `.math_harness/` 数据不会自动迁移；App 使用 Application Support 中的新数据
   根目录。正式迁移工具将在稳定版前补齐。
 - 数学表达式暂以可选择的等宽文本展示；离线 LaTeX 排版留到后续版本。
+- 对话回复尚未流式显示；摘要是本地确定性抽取，不是跨会话语义记忆或后台自主学习。
 - 打包脚本当前构建本机架构。首个公开 macOS 构建以 Apple Silicon 为目标，Universal 2
   和自动更新在后续版本处理。
 - 自动目标整理和自动记忆当前都是同步请求：MiMo 目标建议使用一次请求，启用 MiMo 方法

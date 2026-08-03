@@ -109,6 +109,8 @@ final class BackendProcessController {
     childEnvironment["MATH_HARNESS_TARGET_DRAFTER"] =
       AppSettings.solverProvider == .mimo ? "mimo" : "rules"
     childEnvironment["MATH_HARNESS_SOLVER"] = AppSettings.solverProvider.rawValue
+    childEnvironment["MATH_HARNESS_CONVERSATION_PROVIDER"] =
+      AppSettings.solverProvider == .mimo ? "mimo" : "offline"
     childEnvironment["MATH_HARNESS_ENV_FILE"] =
       runtimeDirectory
       .appendingPathComponent("no-local-env").path
@@ -120,6 +122,7 @@ final class BackendProcessController {
       childEnvironment["MATH_HARNESS_MIMO_BASE_URL"] = AppSettings.mimoBaseURL
       childEnvironment["MATH_HARNESS_MIMO_MODEL"] = AppSettings.mimoModel
       childEnvironment["MATH_HARNESS_MIMO_SOLVER_REASONING_EFFORT"] = "none"
+      childEnvironment["MATH_HARNESS_MIMO_CHAT_REASONING_EFFORT"] = "none"
       childEnvironment["MATH_HARNESS_VERIFICATION_REPAIR"] = "true"
       childEnvironment["MATH_HARNESS_VERIFICATION_FALLBACK"] = "true"
     }

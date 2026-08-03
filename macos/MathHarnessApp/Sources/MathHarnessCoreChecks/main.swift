@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.9.0"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.10.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.9.0", "ready version")
+require(ready.version == "0.10.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -53,6 +53,42 @@ let workspace = try JSONDecoder().decode(Workspace.self, from: workspaceData)
 require(workspace.id == "ws-1", "workspace id")
 require(workspace.name == "渐进估计", "workspace name")
 require(workspace.createdAt.hasPrefix("2026-08-01"), "workspace timestamp")
+
+let conversationData = Data(
+  #"{"id":"chat-1","workspace_id":"ws-1","title":"根式讨论","summary":"此前讨论了有理化。","summary_through_ordinal":2,"message_count":4,"created_at":"2026-08-01T01:00:00Z","updated_at":"2026-08-01T01:05:00Z"}"#
+    .utf8
+)
+let conversation = try JSONDecoder().decode(Conversation.self, from: conversationData)
+require(conversation.workspaceID == "ws-1", "conversation workspace")
+require(conversation.summaryThroughOrdinal == 2, "conversation summary cursor")
+require(conversation.messageCount == 4, "conversation message count")
+
+let messageData = Data(
+  #"{"id":"msg-1","workspace_id":"ws-1","conversation_id":"chat-1","turn_id":"turn-1","ordinal":2,"role":"assistant","kind":"solve","content":"答案为 1/2。","provider":"xiaomi_mimo","model":"mimo-v2.5-pro","attempt_id":"attempt-1","knowledge_draft_id":"ex-1","verification_status":"verified","method_keys":["rationalization"],"created_at":"2026-08-01T01:05:00Z"}"#
+    .utf8
+)
+let conversationMessage = try JSONDecoder().decode(
+  ConversationMessage.self,
+  from: messageData
+)
+require(conversationMessage.role == "assistant", "conversation message role")
+require(conversationMessage.verificationStatus == "verified", "conversation verification")
+require(conversationMessage.methodKeys == ["rationalization"], "conversation method keys")
+
+let turnRequestData = try JSONEncoder().encode(
+  ConversationTurnRequest(
+    message: "继续求下一项",
+    turnID: "turn-2",
+    mathTarget: SolveMathTargetRequest(
+      expression: "sqrt(x**2+x)-x",
+      remainderPower: 3
+    )
+  )
+)
+let turnRequestObject =
+  try JSONSerialization.jsonObject(with: turnRequestData) as? [String: Any]
+require(turnRequestObject?["turn_id"] as? String == "turn-2", "conversation turn id")
+require(turnRequestObject?["math_target"] != nil, "conversation target encoding")
 
 let importRequestData = try JSONEncoder().encode(
   BulkExampleImportRequest(

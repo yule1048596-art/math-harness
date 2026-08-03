@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 from math_harness.api import create_app
 from math_harness.errors import InvalidPortableData
 from math_harness.models import (
+    ConversationCreate,
+    ConversationTurnRequest,
     ExampleCreate,
     MathPayload,
     SolveRequest,
@@ -60,6 +62,15 @@ def _populated_service(tmp_path):
             },
         ),
     )
+    conversation = service.create_conversation(
+        workspace.id,
+        ConversationCreate(title="研究讨论"),
+    )
+    service.send_conversation_turn(
+        workspace.id,
+        conversation.id,
+        ConversationTurnRequest(message="记住我们正在研究根式抵消。"),
+    )
     return service, workspace, attempt
 
 
@@ -81,7 +92,8 @@ def test_backup_restore_round_trip_rebinds_every_workspace_reference(tmp_path):
     methods = service.list_methods(target.id)
     attempts = service.list_solution_attempts(target.id)
     events = service.list_learning_events(target.id)
-    assert examples and methods and attempts and events
+    conversations = service.list_conversations(target.id)
+    assert examples and methods and attempts and events and conversations
     assert all(example.workspace_id == target.id for example in examples)
     assert all(method.workspace_id == target.id for method in methods)
     assert all(attempt.workspace_id == target.id for attempt in attempts)
@@ -92,6 +104,10 @@ def test_backup_restore_round_trip_rebinds_every_workspace_reference(tmp_path):
         for match in attempt.recommended_methods
     )
     assert any(attempt.id == source_attempt.id for attempt in attempts)
+    assert all(conversation.workspace_id == target.id for conversation in conversations)
+    messages = service.list_conversation_messages(target.id, conversations[0].id)
+    assert len(messages) == 2
+    assert all(message.workspace_id == target.id for message in messages)
 
     # Restoring creates a copy and cannot mutate the source workspace.
     assert service.get_workspace(source.id).name == "渐进估计"
@@ -116,6 +132,46 @@ def test_archive_manifest_matches_database_digest_and_counts(tmp_path):
     assert manifest["database"]["sha256"] == hashlib.sha256(database).hexdigest()
     assert manifest["database"]["size"] == len(database)
     assert manifest["database"]["record_counts"]["examples"] >= 2
+
+
+def test_restore_accepts_v09_archive_and_backfills_attempt_conversation(tmp_path):
+    service, workspace, _ = _populated_service(tmp_path)
+    original = service.export_workspace_backup(workspace.id)
+    with zipfile.ZipFile(io.BytesIO(original)) as archive:
+        manifest = json.loads(archive.read(MANIFEST_NAME))
+        database = archive.read(DATABASE_NAME)
+
+    database_path = tmp_path / "v09-workspace.sqlite3"
+    database_path.write_bytes(database)
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute("DROP TABLE conversation_messages")
+        connection.execute("DROP TABLE conversations")
+        connection.execute("PRAGMA user_version = 0")
+        connection.commit()
+    finally:
+        connection.close()
+    legacy_database = database_path.read_bytes()
+    manifest["app_version"] = "0.9.0"
+    manifest["database"]["sha256"] = hashlib.sha256(legacy_database).hexdigest()
+    manifest["database"]["size"] = len(legacy_database)
+    manifest["database"]["record_counts"].pop("conversation_messages", None)
+    manifest["database"]["record_counts"].pop("conversations", None)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(MANIFEST_NAME, json.dumps(manifest))
+        archive.writestr(DATABASE_NAME, legacy_database)
+
+    restored = service.restore_workspace_backup(output.getvalue())
+
+    conversations = service.list_conversations(restored.workspace.id)
+    assert len(conversations) == 1
+    messages = service.list_conversation_messages(
+        restored.workspace.id,
+        conversations[0].id,
+    )
+    assert [message.role.value for message in messages] == ["user", "assistant"]
+    assert messages[-1].attempt_id is not None
 
 
 def test_restore_rejects_tampered_database_without_creating_workspace(tmp_path):

@@ -17,7 +17,12 @@ from math_harness.errors import (
 from math_harness.models import (
     BulkExampleImportRequest,
     BulkExampleImportResult,
+    Conversation,
     ConversationCaptureResult,
+    ConversationCreate,
+    ConversationMessage,
+    ConversationTurnRequest,
+    ConversationTurnResult,
     EvaluationRequest,
     EvaluationRun,
     ExampleCreate,
@@ -113,6 +118,60 @@ def create_app(
     @app.get("/workspaces/{workspace_id}", response_model=Workspace)
     def get_workspace(workspace_id: str) -> Workspace:
         return service.get_workspace(workspace_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/conversations",
+        response_model=Conversation,
+        status_code=201,
+    )
+    def create_conversation(
+        workspace_id: str,
+        request: ConversationCreate,
+    ) -> Conversation:
+        return service.create_conversation(workspace_id, request)
+
+    @app.get(
+        "/workspaces/{workspace_id}/conversations",
+        response_model=list[Conversation],
+    )
+    def list_conversations(workspace_id: str) -> list[Conversation]:
+        return service.list_conversations(workspace_id)
+
+    @app.get(
+        "/workspaces/{workspace_id}/conversations/{conversation_id}",
+        response_model=Conversation,
+    )
+    def get_conversation(
+        workspace_id: str,
+        conversation_id: str,
+    ) -> Conversation:
+        return service.get_conversation(workspace_id, conversation_id)
+
+    @app.get(
+        "/workspaces/{workspace_id}/conversations/{conversation_id}/messages",
+        response_model=list[ConversationMessage],
+    )
+    def list_conversation_messages(
+        workspace_id: str,
+        conversation_id: str,
+    ) -> list[ConversationMessage]:
+        return service.list_conversation_messages(workspace_id, conversation_id)
+
+    @app.post(
+        "/workspaces/{workspace_id}/conversations/{conversation_id}/turns",
+        response_model=ConversationTurnResult,
+        status_code=201,
+    )
+    def send_conversation_turn(
+        workspace_id: str,
+        conversation_id: str,
+        request: ConversationTurnRequest,
+    ) -> ConversationTurnResult:
+        return service.send_conversation_turn(
+            workspace_id,
+            conversation_id,
+            request,
+        )
 
     @app.get("/workspaces/{workspace_id}/backup")
     def export_workspace_backup(workspace_id: str) -> Response:

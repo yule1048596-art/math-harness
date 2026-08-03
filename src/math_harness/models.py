@@ -127,6 +127,16 @@ class SolutionAttemptStatus(StrEnum):
     GENERATION_FAILED = "generation_failed"
 
 
+class ConversationRole(StrEnum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class ConversationMessageKind(StrEnum):
+    CHAT = "chat"
+    SOLVE = "solve"
+
+
 class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=1000)
@@ -145,6 +155,73 @@ class Workspace(BaseModel):
     name: str
     description: str
     created_at: datetime
+
+
+class ConversationCreate(BaseModel):
+    title: str = Field(default="", max_length=120)
+
+    @field_validator("title")
+    @classmethod
+    def normalize_title(cls, value: str) -> str:
+        return " ".join(value.split())
+
+
+class Conversation(BaseModel):
+    id: str
+    workspace_id: str
+    title: str
+    summary: str = ""
+    summary_through_ordinal: int = Field(default=0, ge=0)
+    message_count: int = Field(default=0, ge=0)
+    created_at: datetime
+    updated_at: datetime
+
+
+class ConversationMessage(BaseModel):
+    id: str
+    workspace_id: str
+    conversation_id: str
+    turn_id: str
+    ordinal: int = Field(ge=1)
+    role: ConversationRole
+    kind: ConversationMessageKind
+    content: str = Field(min_length=1, max_length=80_000)
+    provider: str | None = Field(default=None, max_length=120)
+    model: str | None = Field(default=None, max_length=120)
+    attempt_id: str | None = None
+    knowledge_draft_id: str | None = None
+    verification_status: VerificationStatus | None = None
+    method_keys: list[str] = Field(default_factory=list, max_length=20)
+    created_at: datetime
+
+
+class ConversationTurnRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=20_000)
+    turn_id: str | None = Field(default=None, min_length=1, max_length=120)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    top_k: int = Field(default=5, ge=1, le=20)
+    math_target: SolveMathTarget | None = None
+    max_output_tokens: int = Field(default=3_000, ge=256, le=8_000)
+
+    @field_validator("message")
+    @classmethod
+    def normalize_message(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("conversation message cannot be blank")
+        return normalized
+
+    @field_validator("tags")
+    @classmethod
+    def normalize_tags(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            tag = " ".join(value.strip().lower().split())
+            if tag and tag not in seen:
+                normalized.append(tag)
+                seen.add(tag)
+        return normalized
 
 
 _SYMBOL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -706,6 +783,15 @@ class SolutionAttempt(BaseModel):
         if not self.generation.method_feedback_eligible and self.feedback_method_keys:
             raise ValueError("ineligible generation cannot credit methods")
         return self
+
+
+class ConversationTurnResult(BaseModel):
+    conversation: Conversation
+    user_message: ConversationMessage
+    assistant_message: ConversationMessage
+    attempt: SolutionAttempt | None = None
+    knowledge_draft: ProblemExample | None = None
+    summary_updated: bool = False
 
 
 class SolutionCorrection(BaseModel):
