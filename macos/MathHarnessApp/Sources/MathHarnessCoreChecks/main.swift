@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.12.1"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.13.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.12.1", "ready version")
+require(ready.version == "0.13.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",

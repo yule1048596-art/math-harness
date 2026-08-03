@@ -6,5 +6,5 @@ enum AppInfo {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? fallbackVersion
   }
 
-  static let fallbackVersion = "0.12.1"
+  static let fallbackVersion = "0.13.0"
 }

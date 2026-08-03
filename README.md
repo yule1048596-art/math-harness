@@ -9,7 +9,7 @@
 [查看全部版本](https://github.com/yule1048596-art/math-harness/releases) ·
 [MIT License](LICENSE)
 
-> 当前版本：**v0.12.1 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
+> 当前版本：**v0.13.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
 > 当前公开安装包使用 ad-hoc 签名，尚未完成 Developer ID 公证。
 
 ## 它能做什么
@@ -64,7 +64,7 @@ Math Harness 的“成长”目前指的是**可审计的记忆、方法卡、�
 安装步骤：
 
 1. 打开 [最新 Release](https://github.com/yule1048596-art/math-harness/releases/latest)。
-2. 下载文件名类似 `Math-Harness-0.12.1-macOS-arm64.dmg` 的安装镜像。
+2. 下载文件名类似 `Math-Harness-0.13.0-macOS-arm64.dmg` 的安装镜像。
 3. 打开 DMG，把 `Math Harness.app` 拖入“应用程序”文件夹。
 4. 从“应用程序”中启动 Math Harness。
 
@@ -910,6 +910,10 @@ flowchart TB
 - 数学表达式暂时以等宽文本展示，尚无原生离线 LaTeX 排版；
 - 单次 SymPy 工作仍在 helper 主进程内运行，任务取消和每题独立 worker 尚未完成；
 - 当前没有向量检索，结构检索主要依赖受限解析器提取的离散特征；
+- 检索能力的实测水平：在训练里见过的形状上 Hit@1 为 `1.000`，**换成训练中不存在的
+  新形状后降到 `0.667`**。表面算子相似但方法不同的题目最弱（Hit@1 `0.333`，不过正确
+  方法仍在 top-3 之内）。留出集只有 30 题，各切片 6–12 题，只能给方向，不能给统计
+  显著性；
 - 软记忆检索使用 SQLite FTS5 和中文 2/3 字符 n-gram，尚未使用向量数据库；
 - 方法卡成功/失败反馈是可审计统计，不是底层模型权重微调；
 - 离线求解器不是通用定理证明器，复杂或条件不足的问题应停在人工复核；

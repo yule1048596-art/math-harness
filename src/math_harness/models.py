@@ -1011,6 +1011,23 @@ class LearningEvent(BaseModel):
     created_at: datetime
 
 
+class EvaluationSlice(StrEnum):
+    """留出题的分组。
+
+    聚合分数会掩盖问题——v0.12 的检索聚合分是 1.0，而其中 78% 的题在训练集里有结构
+    完全相同的样本。按切片分开报数，「记住见过的形状」和「泛化到新形状」才区分得开。
+    """
+
+    # 训练里有结构同构样本。对照组：这一格掉分才说明检索真的坏了。
+    CONTROL = "control"
+    # 路径组合在训练集中不存在，方法仍在已知方法之内。真正的泛化测量。
+    NOVEL_SHAPE = "novel_shape"
+    # 表面算子像某个家族，正确方法却是另一个。测会不会被表面形状骗走。
+    CROSS_FAMILY = "cross_family"
+    # 需要两个以上方法。单标签下 Recall@K 恒 ≥ Hit@1，只有多标签才让它携带信息。
+    MULTI_METHOD = "multi_method"
+
+
 class EvaluationCase(BaseModel):
     id: str = Field(min_length=1, max_length=120)
     problem: str = Field(min_length=1, max_length=20_000)
@@ -1018,6 +1035,10 @@ class EvaluationCase(BaseModel):
     expected_method_keys: list[str] = Field(min_length=1, max_length=20)
     # 带上结构化目标后，检索才能用数学结构而不只是词面来匹配方法。
     math_target: SolveMathTarget | None = None
+    # 可选：旧的方法卡改写句留出集没有切片，仍然要能跑。
+    slice: EvaluationSlice | None = None
+    # 方法标签的判定理由，供人工复核时核对。
+    rationale: str = Field(default="", max_length=500)
 
     @field_validator("expected_method_keys", mode="before")
     @classmethod

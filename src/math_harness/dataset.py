@@ -403,6 +403,7 @@ FAMILIES: tuple[ProblemFamily, ...] = (
 # 参数网格会把留出题「顺手」覆盖掉，那样评测测的是记忆而不是检索。
 HOLDOUT_FILES: tuple[str, ...] = (
     "data/pilot/asymptotic_retrieval_v2.jsonl",
+    "data/pilot/asymptotic_retrieval_v3.jsonl",
     "data/pilot/asymptotic_solve_holdout.jsonl",
     "data/pilot/asymptotic_holdout.jsonl",
 )

@@ -222,11 +222,19 @@ def _collect_flags(
 
     top_level = sp.Add.make_args(expression)
     if len(top_level) >= 2:
-        if any(term.could_extract_minus_sign() for term in top_level):
+        signed = any(term.could_extract_minus_sign() for term in top_level)
+        if signed:
             flags.add("cancellation_risk")
-        # 根式作为多个加项之一出现，就是有理化的触发形状。这里刻意不看符号：
-        # sqrt(x^2+2x)+x 在 x→-∞ 同样是 ∞-∞ 抵消，按符号判断会漏掉。
-        if any("radical" in _collect_operators(term, variable) for term in top_level):
+        # 有理化的触发形状是「根式参与的主项抵消」，不是「出现了根式加项」。
+        #
+        # 早先这里刻意不看符号，理由是 sqrt(x^2+2x)+x 在 x→-∞ 同样是 ∞-∞。那个理由
+        # 只在负无穷方向成立：在 +∞ 处 sqrt(x^2+1)+sqrt(x^2+2) 各项同号，没有任何
+        # 抵消，有理化用不上。放宽到「有根式加项就算」会把这类题错误地推向有理化——
+        # cross_family 切片上量到的正是这个失败。
+        radical_addend = any(
+            "radical" in _collect_operators(term, variable) for term in top_level
+        )
+        if radical_addend and (signed or point_kind == "neg_infinity"):
             flags.add("radical_difference")
     return flags
 

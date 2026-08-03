@@ -10,8 +10,10 @@ from pydantic import BaseModel
 from math_harness.methods import MethodExtractor
 from math_harness.models import (
     EvaluationCase,
+    EvaluationCaseResult,
     EvaluationMetrics,
     EvaluationRequest,
+    EvaluationRun,
     ExampleCreate,
     SolveEvaluationCase,
     SolveEvaluationRequest,
@@ -20,6 +22,7 @@ from math_harness.models import (
 )
 from math_harness.service import MathHarnessService
 from math_harness.solving import OfflineSympySolutionGenerator
+from math_harness.structure import extract_features
 
 
 def _load_jsonl[ModelT: BaseModel](path: Path, model: type[ModelT]) -> list[ModelT]:
@@ -49,6 +52,43 @@ def _delta(before: EvaluationMetrics, after: EvaluationMetrics) -> dict[str, flo
     }
 
 
+def _aggregate(results: Sequence[EvaluationCaseResult]) -> EvaluationMetrics:
+    count = len(results)
+    return EvaluationMetrics(
+        case_count=count,
+        hit_at_1=round(sum(result.hit_at_1 for result in results) / count, 6),
+        recall_at_k=round(sum(result.recall_at_k for result in results) / count, 6),
+        mean_reciprocal_rank=round(
+            sum(result.reciprocal_rank for result in results) / count, 6
+        ),
+        zero_result_rate=round(
+            sum(1 for result in results if not result.returned_method_keys) / count, 6
+        ),
+    )
+
+
+def _metrics_by_slice(
+    cases: Sequence[EvaluationCase],
+    run: EvaluationRun,
+) -> dict[str, dict[str, object]]:
+    """按切片分开给指标。
+
+    切片是评测报表的概念，不进存储层——这里按 case id 关联回输入即可。空切片会被
+    省略，因为 `EvaluationMetrics.case_count` 要求至少 1。
+    """
+
+    slices = {case.id: case.slice for case in cases if case.slice is not None}
+    grouped: dict[str, list[EvaluationCaseResult]] = {}
+    for result in run.cases:
+        name = slices.get(result.case_id)
+        if name is not None:
+            grouped.setdefault(name.value, []).append(result)
+    return {
+        name: _aggregate(results).model_dump(mode="json")
+        for name, results in sorted(grouped.items())
+    }
+
+
 def _target_fingerprint(target: SolveMathTarget) -> str:
     """Identify one mathematical task while ignoring its known training answer."""
 
@@ -57,6 +97,61 @@ def _target_fingerprint(target: SolveMathTarget) -> str:
     payload["expression"] = "".join(target.expression.split())
     payload["point"] = "".join(target.point.split())
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+
+
+# 允许的结构同构比例上限。
+#
+# 不设为 0 是刻意的：留出集里保留一个小的同构对照切片，才有基线可比——对照切片掉分
+# 才说明检索真的坏了。超过这个比例，指标衡量的就主要是记忆而不是泛化。
+MAX_STRUCTURAL_OVERLAP = 0.40
+
+
+def _structural_fingerprint(target: SolveMathTarget) -> frozenset[str] | None:
+    """一道题在检索器眼里的形状：算子树上的叶到根路径集合。"""
+
+    paths = extract_features(target).paths
+    return frozenset(paths) if paths else None
+
+
+def _validate_structural_isolation(
+    training_examples: Sequence[ExampleCreate],
+    holdout_cases: Sequence[EvaluationCase | SolveEvaluationCase],
+) -> None:
+    """留出集与训练集在**结构**上重叠过多时让评测失败。
+
+    字面指纹拦不住这个：路径表示对系数不敏感，数字统一归为 `NUM`，所以
+    `sqrt(x**2+3*x)-x` 和 `sqrt(x**2+5*x)-x` 能通过表达式判重，却是检索器眼中的
+    同一道题。v0.12 的留出集有 78% 属于这种情况，聚合分数因此被顶到 1.0。
+    """
+
+    training_shapes = {
+        shape
+        for example in training_examples
+        if example.math_payload is not None
+        and (shape := _structural_fingerprint(example.math_payload)) is not None
+    }
+    if not training_shapes:
+        return
+
+    checkable = [case for case in holdout_cases if case.math_target is not None]
+    if not checkable:
+        return
+
+    identical = [
+        case
+        for case in checkable
+        if _structural_fingerprint(case.math_target) in training_shapes
+    ]
+    ratio = len(identical) / len(checkable)
+    if ratio > MAX_STRUCTURAL_OVERLAP:
+        listed = ", ".join(sorted(case.id for case in identical)[:10])
+        raise ValueError(
+            "dataset isolation failed; "
+            f"{len(identical)}/{len(checkable)} holdout cases ({ratio:.0%}) have a "
+            f"structurally identical training example, above the "
+            f"{MAX_STRUCTURAL_OVERLAP:.0%} limit — the metric would measure recall of "
+            f"seen shapes, not generalization: {listed}"
+        )
 
 
 def _validate_dataset_isolation(
@@ -127,6 +222,10 @@ def run_growth_evaluation(
         training_examples,
         [*cases, *retrieval_cases, *solve_cases],
     )
+    # 结构守卫只管检索口径。求解门禁跑的是确定性 SymPy，它完全不从训练集学习，
+    # 结构重叠不会抬高它的分数；把它算进来只会得出误导性的比例。
+    # 旧的方法卡改写句留出集没有 math_target，自然被跳过。
+    _validate_structural_isolation(training_examples, retrieval_cases)
 
     # Evaluation is hermetic: local .env provider choices must never turn a
     # reproducibility check into a paid/networked model call.
@@ -150,7 +249,7 @@ def run_growth_evaluation(
         service.evaluate_workspace(
             workspace.id,
             EvaluationRequest(
-                name="retrieval_v2_before", cases=retrieval_cases, top_k=top_k
+                name="retrieval_before", cases=retrieval_cases, top_k=top_k
             ),
         )
         if retrieval_cases
@@ -167,7 +266,7 @@ def run_growth_evaluation(
         service.evaluate_workspace(
             workspace.id,
             EvaluationRequest(
-                name="retrieval_v2_after", cases=retrieval_cases, top_k=top_k
+                name="retrieval_after", cases=retrieval_cases, top_k=top_k
             ),
         )
         if retrieval_cases
@@ -222,11 +321,13 @@ def run_growth_evaluation(
             solve_gate.metrics.model_dump(mode="json") if solve_gate else None
         ),
         "delta": _delta(baseline.metrics, after.metrics),
-        "retrieval_v2": (
+        "retrieval": (
             {
                 "before": retrieval_baseline.metrics.model_dump(mode="json"),
                 "after": retrieval_after.metrics.model_dump(mode="json"),
                 "delta": _delta(retrieval_baseline.metrics, retrieval_after.metrics),
+                # 聚合数字单独看不再可信：v0.12 的 1.0 就是被聚合掩盖的。
+                "by_slice": _metrics_by_slice(retrieval_cases, retrieval_after),
             }
             if retrieval_baseline and retrieval_after
             else None
@@ -264,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--retrieval-set",
         type=Path,
-        default=Path("data/pilot/asymptotic_retrieval_v2.jsonl"),
+        default=Path("data/pilot/asymptotic_retrieval_v3.jsonl"),
         help="真实题面的检索留出集，与旧口径并跑做对照。",
     )
     parser.add_argument("--top-k", type=int, default=3, choices=range(1, 21))

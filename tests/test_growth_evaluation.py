@@ -76,7 +76,7 @@ def test_growth_evaluation_improves_on_pilot_holdout(tmp_path):
         holdout_path=PROJECT_ROOT / "data/pilot/asymptotic_holdout.jsonl",
         top_k=3,
         solve_holdout_path=(PROJECT_ROOT / "data/pilot/asymptotic_solve_holdout.jsonl"),
-        retrieval_set_path=(PROJECT_ROOT / "data/pilot/asymptotic_retrieval_v2.jsonl"),
+        retrieval_set_path=(PROJECT_ROOT / "data/pilot/asymptotic_retrieval_v3.jsonl"),
     )
 
     # 训练集整体必须可验证：任何一条过不了 SymPy，它的方法就不会晋级，
@@ -105,20 +105,39 @@ def test_real_problem_retrieval_set_is_reported_alongside_legacy_holdout(tmp_pat
         ],
         holdout_path=PROJECT_ROOT / "data/pilot/asymptotic_holdout.jsonl",
         top_k=3,
-        retrieval_set_path=(PROJECT_ROOT / "data/pilot/asymptotic_retrieval_v2.jsonl"),
+        retrieval_set_path=(PROJECT_ROOT / "data/pilot/asymptotic_retrieval_v3.jsonl"),
     )
 
     legacy = report["after"]
-    real = report["retrieval_v2"]["after"]
+    real = report["retrieval"]["after"]
+    by_slice = report["retrieval"]["by_slice"]
 
-    assert report["retrieval_v2"]["before"]["hit_at_1"] == 0
-    # v0.4.0 时这里断言 real < legacy，用来钉住旧口径的水分。v0.5.0 加入
-    # leaf-root path 与生成语料后真实口径追平到 1.0，那条断言已经过时。
-    # 现在守住的是两件仍然要紧的事：真实口径不得回退，且不得反超旧口径——
-    # 真实题面比方法卡改写句更难，反超只可能来自泄漏。
-    assert real["hit_at_1"] >= 0.888888
-    assert real["hit_at_1"] <= legacy["hit_at_1"]
+    assert report["retrieval"]["before"]["hit_at_1"] == 0
     assert real["zero_result_rate"] == 0
+    assert real["hit_at_1"] <= legacy["hit_at_1"]
+
+    # 这里曾经断言聚合 hit@1 >= 0.888888（v0.5.0 加的防回退）。v0.13.0 换上有区分度
+    # 的留出集后它必然失败，而且**应当**失败：那个 0.889 是被同构样本顶起来的。
+    #
+    # 回退防护改挂在对照切片上——它与训练同构，掉分才说明检索真的坏了。其余切片只
+    # 记录基线、不设下限，否则下次又会有人靠放宽留出集难度来让测试变绿。
+    assert by_slice["control"]["hit_at_1"] == 1.0
+    assert by_slice["control"]["zero_result_rate"] == 0
+
+    # 泛化切片的分数明显低于对照切片，这正是旧标尺掩盖掉的差距。
+    assert by_slice["novel_shape"]["hit_at_1"] < by_slice["control"]["hit_at_1"]
+
+    # 多方法切片让 Recall@K 重新携带信息：单标签时它恒 >= Hit@1，只有多标签才可能
+    # 出现「首位命中但召不全」。
+    assert by_slice["multi_method"]["recall_at_k"] < 1.0
+
+    # 四个切片都要有数，缺哪个都说明数据集或分组坏了。
+    assert set(by_slice) == {
+        "control",
+        "novel_shape",
+        "cross_family",
+        "multi_method",
+    }
 
 
 def test_evaluations_and_manual_status_changes_are_audited(

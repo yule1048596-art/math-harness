@@ -9,7 +9,7 @@ def test_api_vertical_slice(tmp_path):
     client = TestClient(create_app(tmp_path))
     response = client.get("/health")
     assert response.status_code == 200
-    assert response.json()["version"] == "0.12.1"
+    assert response.json()["version"] == "0.13.0"
 
     response = client.post(
         "/workspaces",
