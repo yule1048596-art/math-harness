@@ -50,6 +50,14 @@ DETERMINISTIC_LEVELS = frozenset(
     {ConclusionConfidence.VERIFIED, ConclusionConfidence.PROOF_VERIFIED}
 )
 
+#: 有资格把结论判成 `refuted` 的层。
+#
+# 证伪要靠**证据**，不能靠意见。这三层失败时都拿得出具体反例或恒不为零的残差；
+# 复核模型说「这看着不对」拿不出任何东西。不做这个区分的话，一条被 SymPy 符号验证
+# 过的解会被另一个模型的一句话打成「已找到反例」——那是让模型意见压过确定性判定，
+# 恰好把信任边界反过来了。
+_MAY_REFUTE = frozenset({"symbolic_equality", "instantiation", "step_instantiation"})
+
 
 def granted_level(check_name: str, tier: CheckTier) -> ConclusionConfidence:
     """某条检查通过时该给的档位。
@@ -73,6 +81,9 @@ class ConfidenceAssessment(BaseModel):
     conclusion_source: str = ""
     #: 反例。有它用户才分得清「真错」和「缺前提」。
     counterexample: dict[str, str] = {}
+    #: 提出异议但没有资格证伪的层留下的说明（比如复核模型不同意）。
+    #: 它不改变档位，但用户应该看得到。
+    dissent: list[str] = []
 
     @property
     def may_extract_methods(self) -> bool:
@@ -101,6 +112,7 @@ def assess(report: CheckReport) -> ConfidenceAssessment:
     conclusion = ConclusionConfidence.UNCHECKED
     source = ""
     counterexample: dict[str, str] = {}
+    dissent: list[str] = []
     process = ProcessConfidence.STEP_UNCHECKED
     refuted = False
 
@@ -117,7 +129,12 @@ def assess(report: CheckReport) -> ConfidenceAssessment:
             continue
 
         if result.outcome is CheckOutcome.FAILED:
-            # 任何一条结论检查给出反例，结论就是错的。别的层通过不能把它救回来——
+            if result.check not in _MAY_REFUTE:
+                # 有异议但拿不出证据：记下来给用户看，**不动档位**。
+                if result.detail:
+                    dissent.append(f"{result.check}：{result.detail}")
+                continue
+            # 拿得出证据的层给出反例，结论就是错的。别的层通过不能把它救回来——
             # 一个反例足以证伪，多少次通过都不足以证明。
             refuted = True
             if not counterexample:
@@ -132,19 +149,12 @@ def assess(report: CheckReport) -> ConfidenceAssessment:
             conclusion = level
             source = result.check
 
-    if refuted:
-        return ConfidenceAssessment(
-            conclusion=ConclusionConfidence.REFUTED,
-            process=process,
-            conclusion_source=source,
-            counterexample=counterexample,
-        )
-
     return ConfidenceAssessment(
-        conclusion=conclusion,
+        conclusion=ConclusionConfidence.REFUTED if refuted else conclusion,
         process=process,
         conclusion_source=source,
         counterexample=counterexample,
+        dissent=dissent,
     )
 
 

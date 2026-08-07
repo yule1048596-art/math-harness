@@ -18,12 +18,16 @@ from math_harness.bulk_import import (
 from math_harness.checks import (
     CheckContext,
     ConfidenceAssessment,
+    IndependentRecomputeCheck,
     InstantiationCheck,
+    PeerReviewCheck,
     StepInstantiationCheck,
     SymbolicEqualityCheck,
     assess,
     run_checks,
 )
+from math_harness.checks.peer_review import ReviewerProtocol
+from math_harness.checks.recompute import ToolClientProtocol
 from math_harness.claim_drafting import ClaimDrafterProtocol, RuleBasedClaimDrafter
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
@@ -148,6 +152,7 @@ from math_harness.provider_config import (
     ResolvedRole,
     resolve_override,
 )
+from math_harness.providers.openai_reviewer import build_reviewer_from_env
 from math_harness.retrieval import MethodRetriever
 from math_harness.solving import (
     SolutionGeneratorProtocol,
@@ -161,6 +166,7 @@ from math_harness.target_drafting import (
     build_target_drafter_from_env,
     build_target_drafter_from_resolved,
 )
+from math_harness.tools import build_mcp_client_from_env
 from math_harness.verifier import SolutionVerifier
 
 
@@ -192,6 +198,8 @@ class MathHarnessService:
         normalizer: CandidateSolutionNormalizer | None = None,
         target_drafter: TargetDrafterProtocol | None = None,
         claim_drafter: ClaimDrafterProtocol | None = None,
+        reviewer: ReviewerProtocol | None = None,
+        tool_client: ToolClientProtocol | None = None,
         conversation_responder: ConversationResponderProtocol | None = None,
         conversation_summarizer: ExtractiveConversationSummarizer | None = None,
         memory_extractor: MemoryExtractorProtocol | None = None,
@@ -207,6 +215,11 @@ class MathHarnessService:
         # 规则版不调模型：数学回答里本来就大量存在能直接解析的等式，抽这些一次调用
         # 都不用花。模型版抽断言留给以后接。
         self.claim_drafter = claim_drafter or RuleBasedClaimDrafter()
+        # 这两层都默认关闭，各有各的理由：
+        #   复核要额外花一次模型调用，而且只有绑到**另一个** provider 才有价值；
+        #   独立重算要发网络请求，离线路径「不发请求」的承诺不能因为加了它而变。
+        self.reviewer = reviewer or build_reviewer_from_env()
+        self.tool_client = tool_client or build_mcp_client_from_env()
         self.conversation_responder = (
             conversation_responder or build_conversation_responder_from_env()
         )
@@ -894,7 +907,11 @@ class MathHarnessService:
 
         # 聊天路径也过检查。以前这条路一次检查都不做，于是「只有渐进题能被验证」——
         # 而模型本来就答得了各领域的题，卡住的从来不是模型，是这道闸。
-        assessment, checked_claims = self._check_assistant_answer(assistant_content)
+        assessment, checked_claims = self._check_assistant_answer(
+            request.message,
+            assistant_content,
+            answer_profile_id=provider,
+        )
 
         assistant_message = store.append_conversation_message(
             conversation_id,
@@ -946,7 +963,11 @@ class MathHarnessService:
         )
 
     def _check_assistant_answer(
-        self, answer: str
+        self,
+        problem: str,
+        answer: str,
+        *,
+        answer_profile_id: str | None = None,
     ) -> tuple[ConfidenceAssessment | None, list[str]]:
         """从回答里抽出断言，跑一遍检查流水线。
 
@@ -958,16 +979,33 @@ class MathHarnessService:
         """
 
         try:
-            draft = self.claim_drafter.draft("", answer)
+            draft = self.claim_drafter.draft(problem, answer)
             if not draft.is_checkable:
                 return None, []
+            checks = [
+                SymbolicEqualityCheck(),
+                InstantiationCheck(),
+                StepInstantiationCheck(),
+            ]
+            # 后两层各自默认关闭：没配 Wolfram 就没有独立重算，没配第二个 provider
+            # 就没有复核。两者都只在真的能带来独立信息时才跑。
+            if self.tool_client is not None:
+                checks.append(IndependentRecomputeCheck(client=self.tool_client))
+            if self.reviewer is not None:
+                checks.append(
+                    PeerReviewCheck(
+                        reviewer=self.reviewer,
+                        answer_profile_id=answer_profile_id,
+                    )
+                )
             report = run_checks(
-                [
-                    SymbolicEqualityCheck(),
-                    InstantiationCheck(),
-                    StepInstantiationCheck(),
-                ],
-                CheckContext(claim=draft.claim, steps=draft.steps, answer_text=answer),
+                checks,
+                CheckContext(
+                    problem=problem,
+                    claim=draft.claim,
+                    steps=draft.steps,
+                    answer_text=answer,
+                ),
             )
             claims = [f"{item.lhs} = {item.rhs}" for item in draft.steps if item.rhs]
             return assess(report), claims

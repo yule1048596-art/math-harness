@@ -26,9 +26,19 @@ from math_harness.checks.instantiation import (
     InstantiationCheck,
     StepInstantiationCheck,
 )
+from math_harness.checks.peer_review import (
+    REVIEW_SYSTEM_PROMPT,
+    PeerReviewCheck,
+)
+from math_harness.checks.recompute import (
+    IndependentRecomputeCheck,
+    is_translatable,
+    to_wolfram,
+)
 from math_harness.checks.symbolic import SymbolicEqualityCheck
 
 __all__ = [
+    "REVIEW_SYSTEM_PROMPT",
     "Binding",
     "Check",
     "CheckContext",
@@ -40,7 +50,9 @@ __all__ = [
     "ClaimKind",
     "ConclusionConfidence",
     "ConfidenceAssessment",
+    "IndependentRecomputeCheck",
     "InstantiationCheck",
+    "PeerReviewCheck",
     "ProcessConfidence",
     "SamplingDomain",
     "StepInstantiationCheck",
@@ -48,8 +60,10 @@ __all__ = [
     "assess",
     "conclusion_rank",
     "granted_level",
+    "is_translatable",
     "retrieval_weight",
     "run_checks",
+    "to_wolfram",
 ]
 
 from math_harness.checks.sandbox import (
