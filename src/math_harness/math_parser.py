@@ -44,9 +44,20 @@ class SafeMathParser:
     """
 
     MAX_TEXT_LENGTH = 1000
-    MAX_AST_NODES = 250
+    # 矩阵与求和的字面量本身就要占不少节点，250 装不下现实输入。仍然有界。
+    MAX_AST_NODES = 600
     MAX_INTEGER_DIGITS = 80
     MAX_LITERAL_EXPONENT = 100
+    #: 列表/元组的长度上限，挡住用容器堆出巨大表达式。
+    MAX_CONTAINER_ITEMS = 32
+    #: 矩阵元素总数上限。本机实测 12×12 符号行列式就能跑过 8 秒。
+    MAX_MATRIX_ELEMENTS = 64
+    #: `Sum` / `Product` 数值上下界的跨度上限。
+    #:
+    #: 这条是真正挡住挂死的那一条：`Sum(1/k**2, (k, 1, 10**7))` 的字面量指数只有 7，
+    #: 长度也很短，既有的节点数与指数上限全都拦不住它，但求值会跑到分钟级。
+    #: 符号上下界不受限——`Sum(f, (k, 1, n))` 正是要求闭式的常见写法。
+    MAX_SERIES_TERMS = 10_000
 
     FUNCTIONS: Mapping[str, object] = {
         "sqrt": sp.sqrt,
@@ -67,12 +78,66 @@ class SafeMathParser:
         "Min": sp.Min,
         "Max": sp.Max,
         "Rational": sp.Rational,
+        # 组合数学
+        "binomial": sp.binomial,
+        # 复变与复数法平面几何：把几何化归成代数之后就可实例化检验
+        "re": sp.re,
+        "im": sp.im,
+        "conjugate": sp.conjugate,
+        "arg": sp.arg,
+        "sign": sp.sign,
+        # 数论与取整
+        "gcd": sp.gcd,
+        "lcm": sp.lcm,
+        "floor": sp.floor,
+        "ceiling": sp.ceiling,
+        "Mod": sp.Mod,
+        # 线性代数
+        "Matrix": sp.Matrix,
+        "eye": sp.eye,
+        "zeros": sp.zeros,
+        "det": lambda m: m.det(),
+        "trace": lambda m: m.trace(),
+        "transpose": lambda m: m.T,
+        # 微积分。
+        #
+        # 只放 `diff`，**不放 `integrate`**：验证积分的方式是把答案求导回去比对，
+        # 从来不需要真的算积分，而 `integrate` 恰恰是最容易挂死的那个函数。
+        # `Integral` 是未求值类，只用于把命题写出来，不触发求值。
+        "diff": sp.diff,
+        "Integral": sp.Integral,
+        "Derivative": sp.Derivative,
+        "Sum": sp.Sum,
+        "Product": sp.Product,
+        "limit": sp.limit,
+        # 逻辑
+        "And": sp.And,
+        "Or": sp.Or,
+        "Not": sp.Not,
+        "Implies": sp.Implies,
+        "Equivalent": sp.Equivalent,
+        "Eq": sp.Eq,
     }
 
     CONSTANTS: Mapping[str, object] = {
         "pi": sp.pi,
         "E": sp.E,
         "oo": sp.oo,
+        "I": sp.I,
+        "true": sp.true,
+        "false": sp.false,
+    }
+
+    #: 关系运算符 → SymPy 关系类。谓词断言（`im(z) == 0`、`x > 0`）要用它们。
+    #:
+    #: 必须显式建 `Eq`：SymPy 对象上的 `==` 返回 Python 布尔的结构相等，不是命题。
+    COMPARISONS: Mapping[type[ast.cmpop], object] = {
+        ast.Eq: sp.Eq,
+        ast.NotEq: sp.Ne,
+        ast.Lt: sp.Lt,
+        ast.LtE: sp.Le,
+        ast.Gt: sp.Gt,
+        ast.GtE: sp.Ge,
     }
 
     _SYMBOL_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -162,6 +227,23 @@ class SafeMathParser:
                 return left**right
             raise UnsafeExpression("unsupported binary operator")
 
+        # 列表与元组：矩阵的行、`Sum` 的 (变量, 下界, 上界) 都要用。
+        # 它们只作为容器存在，不引入任何求值能力。
+        if isinstance(node, (ast.List, ast.Tuple)):
+            if len(node.elts) > self.MAX_CONTAINER_ITEMS:
+                raise UnsafeExpression("container is too large")
+            return [self._convert(item, symbols) for item in node.elts]
+
+        if isinstance(node, ast.Compare):
+            if len(node.ops) != 1 or len(node.comparators) != 1:
+                raise UnsafeExpression("only a single comparison is allowed")
+            operator = self.COMPARISONS.get(type(node.ops[0]))
+            if operator is None:
+                raise UnsafeExpression("unsupported comparison operator")
+            left = self._convert(node.left, symbols)
+            right = self._convert(node.comparators[0], symbols)
+            return operator(left, right)  # type: ignore[operator, no-any-return]
+
         if isinstance(node, ast.Call):
             if (
                 not isinstance(node.func, ast.Name)
@@ -173,10 +255,58 @@ class SafeMathParser:
             args = [self._convert(arg, symbols) for arg in node.args]
             if len(args) > 4:
                 raise UnsafeExpression("too many function arguments")
+            self._enforce_call_limits(node.func.id, args)
             function = self.FUNCTIONS[node.func.id]
             try:
                 return function(*args)  # type: ignore[operator, no-any-return]
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, AttributeError, IndexError) as exc:
                 raise UnsafeExpression(f"invalid arguments for {node.func.id}") from exc
 
         raise UnsafeExpression(f"unsupported syntax: {node.__class__.__name__}")
+
+    def _enforce_call_limits(self, name: str, args: list[object]) -> None:
+        """对能引爆求值代价的调用单独限规模。
+
+        节点数和字符数上限管的是**表达式有多大**，管不住**求值有多贵**。这两类的代价
+        全在求值：一个 12×12 符号矩阵和一个上界 1e7 的求和，写出来都很短。
+        """
+
+        if name in {"Matrix", "eye", "zeros"}:
+            self._enforce_matrix_limit(name, args)
+        elif name in {"Sum", "Product"}:
+            self._enforce_series_limit(args)
+
+    def _enforce_matrix_limit(self, name: str, args: list[object]) -> None:
+        if name in {"eye", "zeros"}:
+            for arg in args:
+                if isinstance(arg, sp.Integer) and int(arg) ** 2 > (
+                    self.MAX_MATRIX_ELEMENTS
+                ):
+                    raise UnsafeExpression("matrix is too large")
+            return
+        if not args or not isinstance(args[0], list):
+            return
+        rows = args[0]
+        columns = max(
+            (len(row) if isinstance(row, list) else 1 for row in rows),
+            default=0,
+        )
+        if len(rows) * max(columns, 1) > self.MAX_MATRIX_ELEMENTS:
+            raise UnsafeExpression("matrix is too large")
+
+    def _enforce_series_limit(self, args: list[object]) -> None:
+        """求和/连乘的数值上下界跨度必须有界。
+
+        符号上下界放行——`Sum(f, (k, 1, n))` 正是求闭式的写法，本身不触发求值。
+        """
+
+        for arg in args[1:]:
+            if not isinstance(arg, list) or len(arg) != 3:
+                continue
+            low, high = arg[1], arg[2]
+            if (
+                isinstance(low, sp.Integer)
+                and isinstance(high, sp.Integer)
+                and int(high) - int(low) > self.MAX_SERIES_TERMS
+            ):
+                raise UnsafeExpression("series range is too large")
