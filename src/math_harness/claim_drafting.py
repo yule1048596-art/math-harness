@@ -85,6 +85,57 @@ class ClaimDrafterProtocol(Protocol):
     def draft(self, problem: str, answer: str) -> ClaimDraft: ...
 
 
+#: 隐式乘法。`9x`、`25x^2`、`2(a+b)`、`(a+b)(a-b)` 是人写数学的常态，却都不是合法
+#: Python。**数字后面跟字母**和**右括号后面跟标识符或左括号**这两种是无歧义的；
+#: 反过来「字母后面跟数字」不能碰——`x2` 是一个变量名，不是 `x*2`。
+_IMPLICIT_AFTER_NUMBER = re.compile(r"(?<=\d)(?=[A-Za-z(])")
+_IMPLICIT_AFTER_PAREN = re.compile(r"(?<=\))(?=[A-Za-z0-9(])")
+
+
+def insert_implicit_multiplication(text: str) -> str:
+    """把 `9x` 这类写法补成 `9*x`。
+
+    不补的话，人写的题面几乎全军覆没：实测真实评测集的题面里，`sqrt(x^2+9x)-x`、
+    `log(1+7x)`、`sqrt(25x^2+7x)` 一条都解析不出来。
+    """
+
+    # 先避开科学计数法：`1e5` 里的 `e` 不是符号。
+    protected = re.sub(r"(?<=\d)[eE](?=[-+]?\d)", "\0", text)
+    inserted = _IMPLICIT_AFTER_PAREN.sub(
+        "*", _IMPLICIT_AFTER_NUMBER.sub("*", protected)
+    )
+    return inserted.replace("\0", "e")
+
+
+#: 人写数学的函数名 → SymPy 的标识符。
+#
+# 这是**记号习惯**的差异，不是解析能力的差异：`Γ`/`Gamma` 是数学里写伽马函数的方式，
+# `gamma` 是 SymPy 里的名字；`ln` 是中文数学写自然对数的方式，SymPy 只有 `log`。
+# 不映射的话，实测评测集里三道 Gamma 题的题面一条都解析不出来。
+#
+# 只在**函数调用位置**替换（后面必须跟左括号），免得改掉同名的变量。
+# 只放无歧义的。刻意不放的两个：
+#   `C(n,k)` —— 组合数是这么写，但解析几何里 `C(1,2)` 是点 C 的坐标。两种都解析得
+#     成功，猜错了不会报错，只会安静地换成另一个表达式。
+#   `lg` —— 常用对数，映射到 SymPy 的自然对数 `log` 数学上就是错的。
+_NOTATION_ALIASES = {
+    "Γ": "gamma", "Gamma": "gamma",
+    "ln": "log",
+    "arcsin": "asin", "arccos": "acos", "arctan": "atan",
+    "abs": "Abs", "Re": "re", "Im": "im",
+}  # fmt: skip
+
+_ALIAS_PATTERN = re.compile(
+    r"\b("
+    + "|".join(sorted(map(re.escape, _NOTATION_ALIASES), key=len, reverse=True))
+    + r")\s*\("
+)
+
+
+def apply_notation_aliases(text: str) -> str:
+    return _ALIAS_PATTERN.sub(lambda m: f"{_NOTATION_ALIASES[m.group(1)]}(", text)
+
+
 def normalize_math_text(text: str) -> str:
     """把常见的书写形式收敛成安全解析器认得的写法。
 
@@ -98,7 +149,7 @@ def normalize_math_text(text: str) -> str:
     cleaned = cleaned.replace("^", "**")
     cleaned = cleaned.replace("×", "*").replace("÷", "/")
     cleaned = cleaned.replace("−", "-").replace("–", "-")
-    return cleaned.strip()
+    return apply_notation_aliases(insert_implicit_multiplication(cleaned.strip()))
 
 
 def infer_bindings(texts: list[str], parser: SafeMathParser) -> list[Binding]:
@@ -229,6 +280,52 @@ def _substitute(
         # 代入后反而解析不了：返回 None，调用方保留代入前的原样，不把这条断言丢掉。
         return None
     return new_left, new_right, new_bindings
+
+
+#: 一段可能是数学的连续字符。中文、标点和引号都不在里面，自然成为切分边界。
+_MATH_RUN = re.compile(r"[A-Za-z0-9_^*/+\-()\[\]、., ]{2,}")
+
+#: 表达式里至少要有一处结构，否则它只是个名字或一个数字。
+#: 光秃秃的 `x` 或 `12` 当签名用没有任何区分度，反而会把所有题连成一片。
+_HAS_STRUCTURE = re.compile(r"[-+*/^]|\w\s*\(")
+
+
+def extract_expressions(
+    text: str,
+    parser: SafeMathParser | None = None,
+    limit: int = 12,
+) -> list[str]:
+    """从自然语言里挑出能安全解析的数学表达式。
+
+    抽断言要求一行里有等号，**提问里通常没有**——「求 sqrt(x^2+9x)-x 在 x→∞ 的渐进
+    展开」是个祈使句，不是等式。但结构检索要的只是算子树，不需要等式。所以这里比
+    `extract_claims` 宽一档：任何能安全解析、且带结构的片段都算数。
+
+    准入条件仍然只有一条：**能过安全解析器**。
+    """
+
+    safe_parser = parser or SafeMathParser()
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _MATH_RUN.finditer(text):
+        candidate = _strip_prose(normalize_math_text(match.group(0)))
+        # 顿号是中文的并列符号，不是数学的一部分。
+        candidate = candidate.replace("、", " ").strip(" ,.")
+        if not candidate or not _HAS_STRUCTURE.search(candidate):
+            continue
+        if candidate in seen:
+            continue
+        bindings = infer_bindings([candidate], safe_parser)
+        table = {binding.symbol: sp.Symbol(binding.symbol) for binding in bindings}
+        try:
+            safe_parser.parse(candidate, table)
+        except (UnsafeExpression, ValueError, TypeError, SyntaxError):
+            continue
+        seen.add(candidate)
+        found.append(candidate)
+        if len(found) >= limit:
+            break
+    return found
 
 
 class RuleBasedClaimDrafter:

@@ -972,6 +972,62 @@ class MathHarnessService:
             memory_job=memory_job,
         )
 
+    #: 允许晋级的结论档位。
+    #
+    # 判据是「**有程序**查过」，不是「有人说对」。这四档都来自一段代码给出的结论：
+    # 符号化简、随机实例化、独立引擎重算。`peer_reviewed` 不在里面——另一个模型同意
+    # 仍然只是意见，而晋级意味着以后会被检索出来当依据用。
+    _PROMOTABLE_CONCLUSIONS = frozenset(
+        {
+            ConclusionConfidence.PROOF_VERIFIED,
+            ConclusionConfidence.VERIFIED,
+            ConclusionConfidence.NUMERICALLY_CHECKED,
+            ConclusionConfidence.CROSS_CHECKED,
+        }
+    )
+
+    def _verify_for_ingestion(self, request: ExampleCreate) -> VerificationReport:
+        """入库时取一次验证结论。
+
+        有渐进目标的走原来的验证器，逐字不变。
+
+        没有目标的走检查流水线。以前这条路只会得到「未提供结构化数学表达式」——手工
+        录入和批量导入的跨领域知识因此永远停在待复核，和聊天路径 v0.15 之前的处境
+        一模一样。检查流水线本来就不认领域，没有理由只给聊天路径用。
+        """
+
+        if request.math_payload is not None:
+            return self.verifier.verify(request.math_payload)
+
+        assessment, _ = self._check_assistant_answer(request.problem, request.solution)
+        if assessment is None:
+            return self.verifier.verify(None)
+        return self._report_from(assessment)
+
+    def _verification_for_promotion(
+        self, example: ProblemExample
+    ) -> VerificationReport:
+        """晋级前重新取一次验证结论。
+
+        有渐进目标的走原来的验证器，逐字不变——那条路被大量测试覆盖着。
+
+        没有目标的走已经存过的双轴结论。以前这里无条件调 `verify(example.math_payload)`，
+        聊天路径的 `math_payload` 恒为 `None`，于是**一条已经被 SymPy 符号验证过的解答
+        照样晋级失败**：门禁把 v0.15 已经得出的结论整个丢掉，重新用只认渐进形状的验证器
+        再验一遍。结果是跨领域的知识永远停在待复核，永远进不了检索。
+        """
+
+        if example.math_payload is not None:
+            return self.verifier.verify(example.math_payload)
+
+        stored = example.verification
+        if (
+            stored.conclusion in self._PROMOTABLE_CONCLUSIONS
+            and stored.process_confidence is not ProcessConfidence.STEP_FAILED
+        ):
+            return stored.model_copy(update={"status": VerificationStatus.VERIFIED})
+        return stored.model_copy(update={"status": VerificationStatus.NEEDS_REVIEW})
+
     def _capture_chat_knowledge(
         self,
         workspace_id: str,
@@ -1373,9 +1429,7 @@ class MathHarnessService:
         verification_override: VerificationReport | None = None,
         extractor: MethodExtractorProtocol | None = None,
     ) -> _PreparedIngestion:
-        verification = verification_override or self.verifier.verify(
-            request.math_payload
-        )
+        verification = verification_override or self._verify_for_ingestion(request)
         promotion_approved = (
             verification.status is VerificationStatus.VERIFIED and request.reviewed
         )
@@ -1791,10 +1845,11 @@ class MathHarnessService:
                     "来源求解记录未完整通过独立数学验证，不能晋级这条例题。"
                 )
 
-        fresh_verification = self.verifier.verify(example.math_payload)
+        fresh_verification = self._verification_for_promotion(example)
         if fresh_verification.status is not VerificationStatus.VERIFIED:
             raise InvalidKnowledgeState(
-                "只有独立数学验证通过的例题才能晋级；请先补充可验证数学目标。"
+                "只有独立数学验证通过的例题才能晋级；请先补充可验证数学目标，"
+                "或让检查流水线给出程序级证据。"
             )
 
         drafts = store.get_example_method_drafts(example.id)

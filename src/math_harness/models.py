@@ -1150,6 +1150,9 @@ class EvaluationSlice(StrEnum):
     CROSS_FAMILY = "cross_family"
     # 需要两个以上方法。单标签下 Recall@K 恒 ≥ Hit@1，只有多标签才让它携带信息。
     MULTI_METHOD = "multi_method"
+    # 题面里没有可解析的表达式，只能走词面与标签回退。纯自然语言提问是常态，
+    # 这一格量的就是「没有结构信号时还剩多少能力」。
+    TEXT_ONLY = "text_only"
 
 
 class EvaluationCase(BaseModel):
