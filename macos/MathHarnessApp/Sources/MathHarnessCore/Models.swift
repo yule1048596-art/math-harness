@@ -161,19 +161,136 @@ public struct ConversationMessage: Codable, Identifiable, Equatable, Sendable {
   public let attemptID: String?
   public let knowledgeDraftID: String?
   public let verificationStatus: String?
+  /// 结论轴。为 nil 表示这条回答里没有可机检的内容——那是「没查」，不是「没通过」。
+  public let conclusionConfidence: String?
+  /// 过程轴。推导站不站得住，和结论对不对是两件事。
+  public let processConfidence: String?
+  /// 反例。有它用户才分得清「真错」和「缺前提」。
+  public let counterexample: [String: String]
+  /// 实际被检查的断言。抽错题的风险始终存在，处理方式是让它可见。
+  public let checkedClaims: [String]
   public let methodKeys: [String]
   public let createdAt: String
 
   enum CodingKeys: String, CodingKey {
-    case id, ordinal, role, kind, content, provider, model
+    case id, ordinal, role, kind, content, provider, model, counterexample
     case workspaceID = "workspace_id"
     case conversationID = "conversation_id"
     case turnID = "turn_id"
     case attemptID = "attempt_id"
     case knowledgeDraftID = "knowledge_draft_id"
     case verificationStatus = "verification_status"
+    case conclusionConfidence = "conclusion_confidence"
+    case processConfidence = "process_confidence"
+    case checkedClaims = "checked_claims"
     case methodKeys = "method_keys"
     case createdAt = "created_at"
+  }
+
+  /// 手写解码，因为 Swift 合成的 `Decodable` **不会**使用属性默认值：缺字段就抛错。
+  ///
+  /// v0.15 之前的 helper 不返回这几个字段，而 App 和 helper 是各自升级的——照合成
+  /// 版走，用户装了新 App 配旧 helper 就会在解码整条消息时崩掉，连回答都看不到。
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    workspaceID = try container.decode(String.self, forKey: .workspaceID)
+    conversationID = try container.decode(String.self, forKey: .conversationID)
+    turnID = try container.decode(String.self, forKey: .turnID)
+    ordinal = try container.decode(Int.self, forKey: .ordinal)
+    role = try container.decode(String.self, forKey: .role)
+    kind = try container.decode(String.self, forKey: .kind)
+    content = try container.decode(String.self, forKey: .content)
+    provider = try container.decodeIfPresent(String.self, forKey: .provider)
+    model = try container.decodeIfPresent(String.self, forKey: .model)
+    attemptID = try container.decodeIfPresent(String.self, forKey: .attemptID)
+    knowledgeDraftID = try container.decodeIfPresent(
+      String.self, forKey: .knowledgeDraftID)
+    verificationStatus = try container.decodeIfPresent(
+      String.self, forKey: .verificationStatus)
+    conclusionConfidence = try container.decodeIfPresent(
+      String.self, forKey: .conclusionConfidence)
+    processConfidence = try container.decodeIfPresent(
+      String.self, forKey: .processConfidence)
+    counterexample =
+      try container.decodeIfPresent([String: String].self, forKey: .counterexample) ?? [:]
+    checkedClaims =
+      try container.decodeIfPresent([String].self, forKey: .checkedClaims) ?? []
+    methodKeys = try container.decodeIfPresent([String].self, forKey: .methodKeys) ?? []
+    createdAt = try container.decode(String.self, forKey: .createdAt)
+  }
+}
+
+/// 结论轴的展示形态。后端还会加档位，所以未知值必须能安全落地而不是崩掉。
+public enum ConclusionConfidence: String, Sendable {
+  case proofVerified = "proof_verified"
+  case verified
+  case numericallyChecked = "numerically_checked"
+  case crossChecked = "cross_checked"
+  case peerReviewed = "peer_reviewed"
+  case unchecked
+  case refuted
+
+  public var title: String {
+    switch self {
+    case .proofVerified: "形式化证明"
+    case .verified: "符号验证"
+    case .numericallyChecked: "数值检验"
+    case .crossChecked: "独立重算一致"
+    case .peerReviewed: "异模型复核"
+    case .unchecked: "未检查"
+    case .refuted: "已找到反例"
+    }
+  }
+
+  /// 一句话说明这个档位到底意味着什么。
+  ///
+  /// 分级只有在用户看得懂的时候才有用。「数值检验」听着像「验过了」，但它是强证据
+  /// 不是证明——不写清楚，用户就会把它当成和符号验证一回事。
+  public var explanation: String {
+    switch self {
+    case .proofVerified: "形式化证明通过。"
+    case .verified: "SymPy 符号化简判定两边恒等，这是确定性结论。"
+    case .numericallyChecked: "在多组随机取值下都成立。这是强证据，不是证明。"
+    case .crossChecked: "另一个独立引擎算出了一致的结果。"
+    case .peerReviewed: "换一个模型复核通过。模型意见不等于验证。"
+    case .unchecked: "这条回答里没有能自动检查的内容。"
+    case .refuted: "找到了使等式不成立的取值。"
+    }
+  }
+
+  public var symbol: String {
+    switch self {
+    case .proofVerified, .verified: "checkmark.seal.fill"
+    case .numericallyChecked: "function"
+    case .crossChecked: "arrow.triangle.2.circlepath"
+    case .peerReviewed: "person.2"
+    case .unchecked: "questionmark.circle"
+    case .refuted: "xmark.octagon.fill"
+    }
+  }
+}
+
+/// 过程轴的展示形态。
+public enum ProcessConfidence: String, Sendable {
+  case stepChecked = "step_checked"
+  case stepFailed = "step_failed"
+  case stepUnchecked = "step_unchecked"
+
+  public var title: String {
+    switch self {
+    case .stepChecked: "推导逐步通过"
+    case .stepFailed: "推导有步骤不成立"
+    case .stepUnchecked: "推导未逐步检查"
+    }
+  }
+
+  public var explanation: String {
+    switch self {
+    case .stepChecked: "每一个中间步骤都单独验过。"
+    case .stepFailed: "结论可能是对的，但中间某一步不成立——这样的推导不会用来学方法。"
+    case .stepUnchecked: "这段解答没有可以逐步检查的步骤。"
+    }
   }
 }
 

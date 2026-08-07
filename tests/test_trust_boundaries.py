@@ -6,7 +6,9 @@ from math_harness.models import (
     ApproachDirection,
     CandidateSolution,
     CandidateStep,
+    ConclusionConfidence,
     ExampleCreate,
+    ExampleOrigin,
     ExtractionStatus,
     GenerationStatus,
     KnowledgeStatus,
@@ -15,6 +17,7 @@ from math_harness.models import (
     MethodExtractionResult,
     MethodExtractionTrace,
     MethodStatusUpdate,
+    ProcessConfidence,
     SolutionAttemptStatus,
     SolutionCorrection,
     SolutionGenerationResult,
@@ -23,6 +26,7 @@ from math_harness.models import (
     SolveRequest,
     SymbolProperty,
     VerificationMode,
+    VerificationReport,
     VerificationStatus,
     WorkspaceCreate,
 )
@@ -681,3 +685,97 @@ def test_non_expression_model_correction_stops_before_sympy_fallback(tmp_path):
         "initial",
         "correction",
     ]
+
+
+# --- 双轴可信度：过程轴门禁 -------------------------------------------
+#
+# 阶段 H 实测：39 个「结论正确、某一中间步写错」的变异体，只查结论的层一个都没抓到。
+# 方法卡是从推导提取的，所以推导被推翻时提取必须停下——否则学到的就是一个错方法，
+# 而且以后还会被检索复用。
+
+
+def test_a_refuted_derivation_yields_no_method_cards(tmp_path):
+    """结论查得过、推导被反例推翻的解：例题照常入库，方法卡必须一张都不出。"""
+
+    service = MathHarnessService(tmp_path, extractor=MethodExtractor())
+    workspace = service.create_workspace(WorkspaceCreate(name="过程轴门禁"))
+
+    verified_but_broken = VerificationReport(
+        status=VerificationStatus.VERIFIED,
+        summary="结论成立，但推导第 2 步被反例推翻。",
+        conclusion_confidence=ConclusionConfidence.VERIFIED,
+        process_confidence=ProcessConfidence.STEP_FAILED,
+        counterexample={"a": "7", "b": "-4"},
+    )
+
+    # 走内部入库路径：真实流程里，双轴由求解阶段的检查流水线产出，再作为验证报告
+    # 传进来，正是这条路。
+    result = service._ingest_example(
+        workspace.id,
+        ExampleCreate(
+            problem="求根式渐进展开",
+            solution="使用 Stirling 公式，中间某一步符号写错，但最终答案正确。",
+            math_payload=MathPayload(
+                expression="sqrt(x**2 + x) - x",
+                expected="1/2 - 1/(8*x)",
+                point="oo",
+                remainder_power=2,
+            ),
+        ),
+        origin=ExampleOrigin.MANUAL,
+        verification_override=verified_but_broken,
+    )
+
+    assert result.example.verification.status is VerificationStatus.VERIFIED
+    assert result.example.method_drafts == []
+    assert result.learned_methods == []
+    assert result.example.extraction.status is ExtractionStatus.SKIPPED
+    # 例题本身仍然入库：结论确实成立，只是不能从这段推导里学方法。
+    assert result.example.status is KnowledgeStatus.PENDING_REVIEW
+    assert result.example.verification.counterexample == {"a": "7", "b": "-4"}
+
+
+def test_a_checked_derivation_still_yields_method_cards(tmp_path):
+    """门禁只拦被推翻的推导，不能顺手把正常路径也拦掉。"""
+
+    service = MathHarnessService(tmp_path, extractor=MethodExtractor())
+    workspace = service.create_workspace(WorkspaceCreate(name="过程轴放行"))
+
+    result = service.ingest_example(
+        workspace.id,
+        ExampleCreate(
+            problem="求根式渐进展开",
+            solution="使用 Stirling 公式展开。",
+            math_payload=MathPayload(
+                expression="sqrt(x**2 + x) - x",
+                expected="1/2 - 1/(8*x)",
+                point="oo",
+                remainder_power=2,
+            ),
+        ),
+    )
+
+    assert [method.key for method in result.learned_methods] == ["stirling"]
+
+
+# --- 旧记录的兼容 -----------------------------------------------------
+
+
+def test_a_legacy_report_without_the_new_fields_still_grades():
+    """新流水线之前写的记录没有这两个字段，不能一律显示成「未检查」。"""
+
+    legacy = VerificationReport.model_validate_json(
+        '{"status": "verified", "summary": "旧记录", "checks": [], "computed": {}}'
+    )
+
+    assert legacy.conclusion is ConclusionConfidence.VERIFIED
+    assert legacy.process_confidence is ProcessConfidence.STEP_UNCHECKED
+    assert not legacy.may_extract_methods
+
+
+def test_a_legacy_rejection_is_refuted_not_unchecked():
+    """旧的 `rejected` 是查出来错了，不是没查。"""
+
+    legacy = VerificationReport(status=VerificationStatus.REJECTED, summary="被拒")
+
+    assert legacy.conclusion is ConclusionConfidence.REFUTED

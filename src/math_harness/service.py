@@ -15,6 +15,20 @@ from math_harness.bulk_import import (
     problem_preview,
     stored_example_fingerprint,
 )
+from math_harness.checks import (
+    CheckContext,
+    ConfidenceAssessment,
+    IndependentRecomputeCheck,
+    InstantiationCheck,
+    PeerReviewCheck,
+    StepInstantiationCheck,
+    SymbolicEqualityCheck,
+    assess,
+    run_checks,
+)
+from math_harness.checks.peer_review import ReviewerProtocol
+from math_harness.checks.recompute import ToolClientProtocol
+from math_harness.claim_drafting import ClaimDrafterProtocol, RuleBasedClaimDrafter
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
 from math_harness.conversation import (
@@ -51,6 +65,7 @@ from math_harness.models import (
     BulkImportItemStatus,
     CandidateSolution,
     CandidateStep,
+    ConclusionConfidence,
     Conversation,
     ConversationCaptureResult,
     ConversationCreate,
@@ -103,6 +118,7 @@ from math_harness.models import (
     MethodStatusUpdate,
     MethodVersion,
     ProblemExample,
+    ProcessConfidence,
     ProviderOverride,
     SolutionAttempt,
     SolutionAttemptStatus,
@@ -137,6 +153,7 @@ from math_harness.provider_config import (
     ResolvedRole,
     resolve_override,
 )
+from math_harness.providers.openai_reviewer import build_reviewer_from_env
 from math_harness.retrieval import MethodRetriever
 from math_harness.solving import (
     SolutionGeneratorProtocol,
@@ -150,6 +167,7 @@ from math_harness.target_drafting import (
     build_target_drafter_from_env,
     build_target_drafter_from_resolved,
 )
+from math_harness.tools import build_mcp_client_from_env
 from math_harness.verifier import SolutionVerifier
 
 
@@ -180,6 +198,9 @@ class MathHarnessService:
         generator: SolutionGeneratorProtocol | None = None,
         normalizer: CandidateSolutionNormalizer | None = None,
         target_drafter: TargetDrafterProtocol | None = None,
+        claim_drafter: ClaimDrafterProtocol | None = None,
+        reviewer: ReviewerProtocol | None = None,
+        tool_client: ToolClientProtocol | None = None,
         conversation_responder: ConversationResponderProtocol | None = None,
         conversation_summarizer: ExtractiveConversationSummarizer | None = None,
         memory_extractor: MemoryExtractorProtocol | None = None,
@@ -192,6 +213,14 @@ class MathHarnessService:
         self.generator = generator or build_solution_generator_from_env()
         self.normalizer = normalizer or CandidateSolutionNormalizer()
         self.target_drafter = target_drafter or build_target_drafter_from_env()
+        # 规则版不调模型：数学回答里本来就大量存在能直接解析的等式，抽这些一次调用
+        # 都不用花。模型版抽断言留给以后接。
+        self.claim_drafter = claim_drafter or RuleBasedClaimDrafter()
+        # 这两层都默认关闭，各有各的理由：
+        #   复核要额外花一次模型调用，而且只有绑到**另一个** provider 才有价值；
+        #   独立重算要发网络请求，离线路径「不发请求」的承诺不能因为加了它而变。
+        self.reviewer = reviewer or build_reviewer_from_env()
+        self.tool_client = tool_client or build_mcp_client_from_env()
         self.conversation_responder = (
             conversation_responder or build_conversation_responder_from_env()
         )
@@ -877,6 +906,23 @@ class MathHarnessService:
             model = generation.model
             verification_status = None
 
+        # 聊天路径也过检查。以前这条路一次检查都不做，于是「只有渐进题能被验证」——
+        # 而模型本来就答得了各领域的题，卡住的从来不是模型，是这道闸。
+        assessment, checked_claims = self._check_assistant_answer(
+            request.message,
+            assistant_content,
+            answer_profile_id=provider,
+        )
+        if knowledge_draft is None:
+            knowledge_draft = self._capture_chat_knowledge(
+                workspace_id,
+                store,
+                problem=request.message,
+                answer=assistant_content,
+                tags=request.tags,
+                assessment=assessment,
+            )
+
         assistant_message = store.append_conversation_message(
             conversation_id,
             turn_id,
@@ -888,6 +934,10 @@ class MathHarnessService:
             attempt_id=attempt.id if attempt else None,
             knowledge_draft_id=knowledge_draft.id if knowledge_draft else None,
             verification_status=verification_status,
+            conclusion_confidence=assessment.conclusion if assessment else None,
+            process_confidence=assessment.process if assessment else None,
+            counterexample=assessment.counterexample if assessment else {},
+            checked_claims=checked_claims,
             method_keys=method_keys,
         )
         summary_updated = self._compact_conversation(store, conversation_id)
@@ -921,6 +971,119 @@ class MathHarnessService:
             summary_updated=summary_updated,
             memory_job=memory_job,
         )
+
+    def _capture_chat_knowledge(
+        self,
+        workspace_id: str,
+        store: WorkspaceStore,
+        *,
+        problem: str,
+        answer: str,
+        tags: list[str],
+        assessment: ConfidenceAssessment | None,
+    ) -> ProblemExample | None:
+        """把一次聊天问答存成待复核的知识草稿。
+
+        入库门禁刻意收得很紧：**只有真的抽出了可检验内容、而且没被反例推翻的回合才
+        进库**。每个回合都建草稿会把知识库淹掉，而纯讲解的回合本来也没有可复用的东西
+        ——这正是「不会记住无关紧要的信息防止污染」的落点。
+
+        草稿一律是 `pending_review`：这条路上的答案再怎么查也是概率性检查，
+        晋级仍然要人工确认。
+        """
+
+        if assessment is None or not assessment.may_enter_knowledge_base:
+            return None
+        try:
+            return self._ingest_example(
+                workspace_id,
+                ExampleCreate(
+                    problem=problem,
+                    solution=answer,
+                    tags=tags,
+                    reviewed=False,
+                ),
+                origin=ExampleOrigin.CONVERSATION,
+                verification_override=self._report_from(assessment),
+                store=store,
+            ).example
+        except Exception:  # noqa: BLE001
+            # 入库是附加价值，不是前置条件。存不进去也不能把这一轮对话弄丢。
+            return None
+
+    @staticmethod
+    def _report_from(assessment: ConfidenceAssessment) -> VerificationReport:
+        """把双轴折算成旧的三值状态，同时把两轴原样保留。
+
+        **只有确定性的符号判定才映射到 `VERIFIED`**。三值状态是晋级门禁看的东西，
+        把概率性检查折算进去，等于让「随机取值都对」拿到和符号证明一样的待遇。
+        """
+
+        deterministic = assessment.conclusion in {
+            ConclusionConfidence.VERIFIED,
+            ConclusionConfidence.PROOF_VERIFIED,
+        }
+        return VerificationReport(
+            status=(
+                VerificationStatus.VERIFIED
+                if deterministic
+                else VerificationStatus.NEEDS_REVIEW
+            ),
+            summary=f"聊天路径检查：{assessment.conclusion.value} / {assessment.process.value}",
+            conclusion_confidence=assessment.conclusion,
+            process_confidence=assessment.process,
+            counterexample=assessment.counterexample,
+        )
+
+    def _check_assistant_answer(
+        self,
+        problem: str,
+        answer: str,
+        *,
+        answer_profile_id: str | None = None,
+    ) -> tuple[ConfidenceAssessment | None, list[str]]:
+        """从回答里抽出断言，跑一遍检查流水线。
+
+        抽不出可检验内容时返回 `(None, [])`——那不是失败，只是这条回答没有可机检的
+        部分，照样正常展示。检查本身出问题也不能把用户的回答弄丢，所以整段兜住异常。
+
+        返回的断言原文要展示给用户：抽错题的风险始终存在（会验证一个你没问的命题），
+        处理方式是让它**可见**，而不是事前拦着不让走。
+        """
+
+        try:
+            draft = self.claim_drafter.draft(problem, answer)
+            if not draft.is_checkable:
+                return None, []
+            checks = [
+                SymbolicEqualityCheck(),
+                InstantiationCheck(),
+                StepInstantiationCheck(),
+            ]
+            # 后两层各自默认关闭：没配 Wolfram 就没有独立重算，没配第二个 provider
+            # 就没有复核。两者都只在真的能带来独立信息时才跑。
+            if self.tool_client is not None:
+                checks.append(IndependentRecomputeCheck(client=self.tool_client))
+            if self.reviewer is not None:
+                checks.append(
+                    PeerReviewCheck(
+                        reviewer=self.reviewer,
+                        answer_profile_id=answer_profile_id,
+                    )
+                )
+            report = run_checks(
+                checks,
+                CheckContext(
+                    problem=problem,
+                    claim=draft.claim,
+                    steps=draft.steps,
+                    answer_text=answer,
+                ),
+            )
+            claims = [f"{item.lhs} = {item.rhs}" for item in draft.steps if item.rhs]
+            return assess(report), claims
+        except Exception:  # noqa: BLE001
+            return None, []
 
     def _build_conversation_context(
         self,
@@ -1227,6 +1390,7 @@ class MathHarnessService:
             request,
             verification.status,
             extractor=extractor,
+            verification=verification,
         )
         if origin is ExampleOrigin.CONVERSATION:
             extraction_result = self._filter_conversation_extraction(extraction_result)
@@ -1302,6 +1466,7 @@ class MathHarnessService:
         verification_status: VerificationStatus,
         *,
         extractor: MethodExtractorProtocol | None = None,
+        verification: VerificationReport | None = None,
     ) -> MethodExtractionResult:
         selected_extractor = extractor or self.extractor
         provider = getattr(
@@ -1316,6 +1481,27 @@ class MathHarnessService:
                     provider=provider,
                     prompt_version=prompt_version,
                     status=ExtractionStatus.SKIPPED,
+                    extracted_method_keys=[],
+                )
+            )
+        # 过程轴门禁：推导被反例推翻时不提取方法卡。
+        #
+        # 阶段 H 实测，结论正确、某一中间步写错的解会通过全部只查结论的层。方法卡是从
+        # 推导提取的，学下来就是一个错方法，还会被后续检索复用。
+        #
+        # 只在 `step_failed` 时拦截，不在 `step_unchecked` 时拦：旧的渐进路径压根没有
+        # 步骤断言，一律按未检查处理会把方法提取整个停掉。等阶段 G 把所有输入接进新
+        # 流水线，这条才谈得上全局生效。
+        if (
+            verification is not None
+            and verification.process_confidence is ProcessConfidence.STEP_FAILED
+        ):
+            return MethodExtractionResult(
+                trace=MethodExtractionTrace(
+                    provider=provider,
+                    prompt_version=prompt_version,
+                    status=ExtractionStatus.SKIPPED,
+                    error="推导中有步骤被反例推翻，不从中提取方法。",
                     extracted_method_keys=[],
                 )
             )

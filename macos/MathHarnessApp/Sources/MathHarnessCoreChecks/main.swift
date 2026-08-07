@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.14.1"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.15.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.14.1", "ready version")
+require(ready.version == "0.15.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -74,6 +74,31 @@ let conversationMessage = try JSONDecoder().decode(
 require(conversationMessage.role == "assistant", "conversation message role")
 require(conversationMessage.verificationStatus == "verified", "conversation verification")
 require(conversationMessage.methodKeys == ["rationalization"], "conversation method keys")
+// v0.15 之前的 helper 不返回这几个字段。App 和 helper 各自升级，新 App 配旧 helper
+// 必须还能读出消息——解码整条崩掉的话，用户连回答都看不到。
+require(conversationMessage.counterexample.isEmpty, "legacy message decodes without counterexample")
+require(conversationMessage.checkedClaims.isEmpty, "legacy message decodes without claims")
+require(conversationMessage.conclusionConfidence == nil, "legacy message has no conclusion axis")
+
+let gradedMessageData = Data(
+  #"{"id":"msg-2","workspace_id":"ws-1","conversation_id":"chat-1","turn_id":"turn-2","ordinal":4,"role":"assistant","kind":"chat","content":"(a+b)^2 - (a-b)^2 = 4ab","provider":"mimo","model":"mimo-7b","attempt_id":null,"knowledge_draft_id":null,"verification_status":null,"conclusion_confidence":"verified","process_confidence":"step_failed","counterexample":{"a":"7","b":"-4"},"checked_claims":["(a+b)**2 = a**2 + 2*a*b + b**2"],"method_keys":[],"created_at":"2026-08-07T01:00:00Z"}"#
+    .utf8
+)
+let gradedMessage = try JSONDecoder().decode(ConversationMessage.self, from: gradedMessageData)
+// 结论对、推导错必须能分别读出来。合成一个标签就会把它显示成「对」，而这恰恰是
+// 最该被看见的一种。
+require(
+  ConclusionConfidence(rawValue: gradedMessage.conclusionConfidence ?? "") == .verified,
+  "graded message conclusion axis"
+)
+require(
+  ProcessConfidence(rawValue: gradedMessage.processConfidence ?? "") == .stepFailed,
+  "graded message process axis"
+)
+require(gradedMessage.counterexample["a"] == "7", "graded message counterexample")
+require(gradedMessage.checkedClaims.count == 1, "graded message checked claims")
+// 后端以后还会加档位，未知值必须安全落地而不是崩掉。
+require(ConclusionConfidence(rawValue: "brand_new_tier") == nil, "unknown tier stays nil")
 
 let memoryData = Data(
   #"{"id":"memory-1","workspace_id":"ws-1","kind":"explanation_preference","content":"先讲直觉，再给严格证明","tags":["严谨"],"status":"active","pinned":true,"source":"automatic","conversation_id":"chat-1","source_message_id":"msg-user-1","evidence":"我喜欢先讲直觉","supersedes_id":null,"created_at":"2026-08-01T01:05:00Z","updated_at":"2026-08-01T01:05:00Z"}"#

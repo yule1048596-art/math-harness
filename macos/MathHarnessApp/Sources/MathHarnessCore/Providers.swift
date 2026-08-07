@@ -149,7 +149,7 @@ public enum ProviderPreset: String, CaseIterable, Identifiable, Sendable {
   }
 }
 
-/// 后端的五个模型角色。分开配置的主要价值：记忆提取和目标整理是高频低难度调用，
+/// 后端的模型角色。分开配置的主要价值：记忆提取和目标整理是高频低难度调用，
 /// 配便宜模型能明显省钱；求解配强模型。
 public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
   case conversation
@@ -157,6 +157,7 @@ public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
   case targetDrafter = "target_drafter"
   case methodExtractor = "method_extractor"
   case memoryExtractor = "memory_extractor"
+  case reviewer
 
   public var id: String { rawValue }
 
@@ -167,6 +168,7 @@ public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
     case .targetDrafter: "目标整理"
     case .methodExtractor: "方法提炼"
     case .memoryExtractor: "记忆提取"
+    case .reviewer: "异模型复核"
     }
   }
 
@@ -177,6 +179,9 @@ public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
     case .targetDrafter: "把自然语言题目整理成可验证目标，供你确认。"
     case .methodExtractor: "从已验证解答中提炼方法卡。"
     case .memoryExtractor: "从对话中整理用户画像、学习目标和讲解偏好。"
+    case .reviewer:
+      "换一个模型复核答案。必须绑到与「对话」「求解」不同的档案——同模型自查是负收益，"
+        + "相同时这一层会自动跳过。"
     }
   }
 
@@ -184,6 +189,8 @@ public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
   public var supportsOffline: Bool {
     switch self {
     case .solver, .methodExtractor, .targetDrafter, .memoryExtractor, .conversation: true
+    // 复核没有离线实现：本地 SymPy 已经在别的层跑过了，再「离线复核」一遍是空转。
+    case .reviewer: false
     }
   }
 

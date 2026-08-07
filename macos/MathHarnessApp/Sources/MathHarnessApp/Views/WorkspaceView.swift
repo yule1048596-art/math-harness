@@ -249,7 +249,10 @@ private struct ConversationTimeline: View {
             ContentUnavailableView {
               Label("这是一段新会话", systemImage: "sparkles")
             } description: {
-              Text("可以自然聊天，也可以切换到“验算求解”生成可复核的数学知识草稿。")
+              Text(
+                "直接用自然语言提问，任何数学领域都可以。系统会从回答里找出可检验的"
+                  + "断言，自己验一遍并标注可信度。"
+              )
             }
             .frame(maxWidth: .infinity, minHeight: 320)
           } else {
@@ -349,7 +352,33 @@ private struct ConversationMessageRow: View {
               .font(.subheadline.weight(.semibold))
             if let verification = message.verificationStatus {
               VerificationPill(status: verification)
-            } else if message.kind == "chat" {
+            }
+            // 两轴分开显示。结论对不对和推导站不站得住是两件事，合成一个标签
+            // 就会把「结论对、推导错」显示成「对」——而那正是最该被看见的一种。
+            if let conclusion = message.conclusionConfidence.flatMap(
+              ConclusionConfidence.init(rawValue:)
+            ) {
+              ConfidencePill(
+                title: conclusion.title,
+                symbol: conclusion.symbol,
+                tint: conclusionTint(conclusion),
+                help: conclusion.explanation
+              )
+            }
+            if let process = message.processConfidence.flatMap(
+              ProcessConfidence.init(rawValue:)
+            ), process != .stepUnchecked {
+              ConfidencePill(
+                title: process.title,
+                symbol: process == .stepChecked
+                  ? "list.bullet.indent" : "exclamationmark.triangle.fill",
+                tint: process == .stepChecked ? .secondary : .orange,
+                help: process.explanation
+              )
+            }
+            if message.verificationStatus == nil, message.conclusionConfidence == nil,
+              message.kind == "chat"
+            {
               Text("对话")
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(.secondary)
@@ -366,6 +395,38 @@ private struct ConversationMessageRow: View {
           Text(message.content)
             .textSelection(.enabled)
             .lineSpacing(3)
+
+          if !message.counterexample.isEmpty {
+            // 反例是这套检查最有用的产物：用户据此才分得清「真错」还是「我少说了
+            // 一个前提」。
+            Label(
+              "反例：\(formattedCounterexample)",
+              systemImage: "exclamationmark.magnifyingglass"
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .textSelection(.enabled)
+          }
+
+          if !message.checkedClaims.isEmpty {
+            // 抽错题的风险始终存在——系统可能验了一个你没问的命题。做法是让它
+            // 看得见，而不是发送前拦一道确认。
+            DisclosureGroup {
+              VStack(alignment: .leading, spacing: 3) {
+                ForEach(message.checkedClaims, id: \.self) { claim in
+                  Text(claim)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                }
+              }
+              .frame(maxWidth: .infinity, alignment: .leading)
+              .padding(.top, 4)
+            } label: {
+              Text("检查了 \(message.checkedClaims.count) 条断言")
+                .font(.caption)
+            }
+            .foregroundStyle(.secondary)
+          }
 
           if message.knowledgeDraftID != nil || !message.methodKeys.isEmpty {
             Divider()
@@ -397,6 +458,41 @@ private struct ConversationMessageRow: View {
     message.methodKeys.map { key in
       model.methods.first(where: { $0.key == key })?.name ?? key
     }
+  }
+
+  private var formattedCounterexample: String {
+    message.counterexample
+      .sorted { $0.key < $1.key }
+      .map { "\($0.key) = \($0.value)" }
+      .joined(separator: "，")
+  }
+
+  private func conclusionTint(_ level: ConclusionConfidence) -> Color {
+    switch level {
+    case .proofVerified, .verified: .green
+    case .numericallyChecked, .crossChecked: .blue
+    case .peerReviewed: .teal
+    case .unchecked: .secondary
+    case .refuted: .red
+    }
+  }
+}
+
+/// 可信度徽章。悬停给出这个档位到底意味着什么——分级只有在用户看得懂时才有用。
+private struct ConfidencePill: View {
+  let title: String
+  let symbol: String
+  let tint: Color
+  let help: String
+
+  var body: some View {
+    Label(title, systemImage: symbol)
+      .font(.caption2.weight(.medium))
+      .foregroundStyle(tint)
+      .padding(.horizontal, 7)
+      .padding(.vertical, 3)
+      .background(tint.opacity(0.13), in: Capsule())
+      .help(help)
   }
 }
 
@@ -464,23 +560,39 @@ private struct ConversationComposer: View {
 
   var body: some View {
     VStack(spacing: 10) {
-      HStack {
-        Picker("发送模式", selection: $composerMode) {
-          ForEach(ComposerMode.allCases) { mode in
-            Text(mode.title).tag(mode)
+      // 主交互就是一个输入框。直接问，系统自己从回答里找出可检验的断言并标注
+      // 可信度——不需要先选模式、也不需要先确认目标。
+      //
+      // 「验算求解」不再是并列的一半，而是一个可选的收紧：当你确实想指定验算目标、
+      // 拿确定性的 verified 时才展开它。
+      HStack(spacing: 10) {
+        if composerMode == .verifiedSolve {
+          Button {
+            composerMode = .chat
+            resetTargetFields()
+          } label: {
+            Label("返回提问", systemImage: "chevron.left")
+              .font(.caption)
           }
-        }
-        .pickerStyle(.segmented)
-        .frame(width: 250)
-        Spacer()
-        if composerMode == .chat {
-          Label("使用会话记忆与已晋级方法", systemImage: "brain.head.profile")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-        } else {
+          .buttonStyle(.borderless)
           Label("候选答案由独立验证器验收", systemImage: "checkmark.shield")
             .font(.caption)
             .foregroundStyle(.secondary)
+        } else {
+          Label("回答会自动检查并标注可信度", systemImage: "checkmark.seal")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        Spacer()
+        if composerMode == .chat {
+          Button {
+            composerMode = .verifiedSolve
+          } label: {
+            Label("指定验算目标", systemImage: "target")
+              .font(.caption)
+          }
+          .buttonStyle(.borderless)
+          .help("需要确定性的符号验证时用它。平时直接提问即可。")
         }
       }
 
@@ -508,7 +620,7 @@ private struct ConversationComposer: View {
           if message.isEmpty {
             Text(
               composerMode == .chat
-                ? "输入消息，可以继续追问上下文……"
+                ? "问任何数学问题——微积分、线性代数、几何、组合、证明……"
                 : "输入需要独立验算的数学问题……"
             )
             .foregroundStyle(.tertiary)

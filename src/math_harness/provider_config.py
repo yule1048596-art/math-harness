@@ -31,6 +31,9 @@ ROLE_SOLVER = "solver"
 ROLE_TARGET_DRAFTER = "target_drafter"
 ROLE_METHOD_EXTRACTOR = "method_extractor"
 ROLE_MEMORY_EXTRACTOR = "memory_extractor"
+#: 复核角色。绑到**另一个** provider 才有意义——同模型自查是负收益，检查层会在
+#: 复核方与作答方是同一个档案时直接跳过。
+ROLE_REVIEWER = "reviewer"
 
 ROLES: tuple[str, ...] = (
     ROLE_CONVERSATION,
@@ -38,6 +41,7 @@ ROLES: tuple[str, ...] = (
     ROLE_TARGET_DRAFTER,
     ROLE_METHOD_EXTRACTOR,
     ROLE_MEMORY_EXTRACTOR,
+    ROLE_REVIEWER,
 )
 
 # 绑定到这个值表示该角色走零成本的离线路径（求解用 SymPy，提炼用规则）。

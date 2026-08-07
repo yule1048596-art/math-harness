@@ -17,6 +17,7 @@ from math_harness.memory import (
 )
 from math_harness.merging import merge_method_content, sanitize_method_draft
 from math_harness.models import (
+    ConclusionConfidence,
     Conversation,
     ConversationMessage,
     ConversationMessageKind,
@@ -41,6 +42,7 @@ from math_harness.models import (
     MethodMergeProposal,
     MethodVersion,
     ProblemExample,
+    ProcessConfidence,
     ProviderOverride,
     SolutionAttempt,
     SolutionAttemptStatus,
@@ -55,6 +57,17 @@ from math_harness.structure import MethodSignature, StructuralFeatures
 
 def _dump(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _optional_column(row: sqlite3.Row, column: str) -> object | None:
+    """读一个可能还不存在的列。
+
+    `_ensure_column` 会在打开库时补上，但同一个进程里可能还持有更早查出来的行——
+    直接下标访问会抛 IndexError，把「这条记录没这个字段」变成一次崩溃。
+    """
+
+    # `sqlite3.Row` 的 `in` 遍历的是**值**不是键，去掉 `.keys()` 会静默判错。
+    return row[column] if column in row.keys() else None  # noqa: SIM118
 
 
 class WorkspaceManager:
@@ -634,6 +647,20 @@ class WorkspaceStore:
                 "origin",
                 "TEXT NOT NULL DEFAULT 'manual'",
             )
+            # v0.15 双轴可信度。聊天路径也开始产出检查结果，旧消息这几列为空——
+            # 那表示「当时没查」，不是「查了没过」。
+            self._ensure_column(
+                connection, "conversation_messages", "conclusion_confidence", "TEXT"
+            )
+            self._ensure_column(
+                connection, "conversation_messages", "process_confidence", "TEXT"
+            )
+            self._ensure_column(
+                connection, "conversation_messages", "counterexample_json", "TEXT"
+            )
+            self._ensure_column(
+                connection, "conversation_messages", "checked_claims_json", "TEXT"
+            )
             self._ensure_column(connection, "examples", "source_attempt_id", "TEXT")
             self._ensure_column(connection, "examples", "reviewed_at", "TEXT")
             self._ensure_column(
@@ -1015,6 +1042,10 @@ class WorkspaceStore:
         attempt_id: str | None = None,
         knowledge_draft_id: str | None = None,
         verification_status: VerificationStatus | None = None,
+        conclusion_confidence: ConclusionConfidence | None = None,
+        process_confidence: ProcessConfidence | None = None,
+        counterexample: dict[str, str] | None = None,
+        checked_claims: list[str] | None = None,
         method_keys: list[str] | None = None,
         created_at: datetime | None = None,
     ) -> ConversationMessage:
@@ -1070,6 +1101,10 @@ class WorkspaceStore:
                 attempt_id=attempt_id,
                 knowledge_draft_id=knowledge_draft_id,
                 verification_status=verification_status,
+                conclusion_confidence=conclusion_confidence,
+                process_confidence=process_confidence,
+                counterexample=counterexample or {},
+                checked_claims=checked_claims or [],
                 method_keys=method_keys or [],
                 created_at=now,
             )
@@ -1079,8 +1114,10 @@ class WorkspaceStore:
                     id, workspace_id, conversation_id, turn_id, ordinal,
                     role, kind, content, provider, model, attempt_id,
                     knowledge_draft_id, verification_status,
+                    conclusion_confidence, process_confidence,
+                    counterexample_json, checked_claims_json,
                     method_keys_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,
@@ -1100,6 +1137,18 @@ class WorkspaceStore:
                         if message.verification_status
                         else None
                     ),
+                    (
+                        message.conclusion_confidence.value
+                        if message.conclusion_confidence
+                        else None
+                    ),
+                    (
+                        message.process_confidence.value
+                        if message.process_confidence
+                        else None
+                    ),
+                    _dump(message.counterexample),
+                    _dump(message.checked_claims),
                     _dump(message.method_keys),
                     message.created_at.isoformat(),
                 ),
@@ -1204,6 +1253,24 @@ class WorkspaceStore:
                 VerificationStatus(row["verification_status"])
                 if row["verification_status"]
                 else None
+            ),
+            # 旧消息这几列为空：那表示「当时没查」，不是「查了没过」，所以留 None
+            # 而不是折算成某个档位。
+            conclusion_confidence=(
+                ConclusionConfidence(row["conclusion_confidence"])
+                if _optional_column(row, "conclusion_confidence")
+                else None
+            ),
+            process_confidence=(
+                ProcessConfidence(row["process_confidence"])
+                if _optional_column(row, "process_confidence")
+                else None
+            ),
+            counterexample=json.loads(
+                _optional_column(row, "counterexample_json") or "{}"
+            ),
+            checked_claims=json.loads(
+                _optional_column(row, "checked_claims_json") or "[]"
             ),
             method_keys=json.loads(row["method_keys_json"] or "[]"),
             created_at=datetime.fromisoformat(row["created_at"]),
