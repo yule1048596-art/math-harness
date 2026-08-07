@@ -15,6 +15,16 @@ from math_harness.bulk_import import (
     problem_preview,
     stored_example_fingerprint,
 )
+from math_harness.checks import (
+    CheckContext,
+    ConfidenceAssessment,
+    InstantiationCheck,
+    StepInstantiationCheck,
+    SymbolicEqualityCheck,
+    assess,
+    run_checks,
+)
+from math_harness.claim_drafting import ClaimDrafterProtocol, RuleBasedClaimDrafter
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
 from math_harness.conversation import (
@@ -181,6 +191,7 @@ class MathHarnessService:
         generator: SolutionGeneratorProtocol | None = None,
         normalizer: CandidateSolutionNormalizer | None = None,
         target_drafter: TargetDrafterProtocol | None = None,
+        claim_drafter: ClaimDrafterProtocol | None = None,
         conversation_responder: ConversationResponderProtocol | None = None,
         conversation_summarizer: ExtractiveConversationSummarizer | None = None,
         memory_extractor: MemoryExtractorProtocol | None = None,
@@ -193,6 +204,9 @@ class MathHarnessService:
         self.generator = generator or build_solution_generator_from_env()
         self.normalizer = normalizer or CandidateSolutionNormalizer()
         self.target_drafter = target_drafter or build_target_drafter_from_env()
+        # 规则版不调模型：数学回答里本来就大量存在能直接解析的等式，抽这些一次调用
+        # 都不用花。模型版抽断言留给以后接。
+        self.claim_drafter = claim_drafter or RuleBasedClaimDrafter()
         self.conversation_responder = (
             conversation_responder or build_conversation_responder_from_env()
         )
@@ -878,6 +892,10 @@ class MathHarnessService:
             model = generation.model
             verification_status = None
 
+        # 聊天路径也过检查。以前这条路一次检查都不做，于是「只有渐进题能被验证」——
+        # 而模型本来就答得了各领域的题，卡住的从来不是模型，是这道闸。
+        assessment, checked_claims = self._check_assistant_answer(assistant_content)
+
         assistant_message = store.append_conversation_message(
             conversation_id,
             turn_id,
@@ -889,6 +907,10 @@ class MathHarnessService:
             attempt_id=attempt.id if attempt else None,
             knowledge_draft_id=knowledge_draft.id if knowledge_draft else None,
             verification_status=verification_status,
+            conclusion_confidence=assessment.conclusion if assessment else None,
+            process_confidence=assessment.process if assessment else None,
+            counterexample=assessment.counterexample if assessment else {},
+            checked_claims=checked_claims,
             method_keys=method_keys,
         )
         summary_updated = self._compact_conversation(store, conversation_id)
@@ -922,6 +944,35 @@ class MathHarnessService:
             summary_updated=summary_updated,
             memory_job=memory_job,
         )
+
+    def _check_assistant_answer(
+        self, answer: str
+    ) -> tuple[ConfidenceAssessment | None, list[str]]:
+        """从回答里抽出断言，跑一遍检查流水线。
+
+        抽不出可检验内容时返回 `(None, [])`——那不是失败，只是这条回答没有可机检的
+        部分，照样正常展示。检查本身出问题也不能把用户的回答弄丢，所以整段兜住异常。
+
+        返回的断言原文要展示给用户：抽错题的风险始终存在（会验证一个你没问的命题），
+        处理方式是让它**可见**，而不是事前拦着不让走。
+        """
+
+        try:
+            draft = self.claim_drafter.draft("", answer)
+            if not draft.is_checkable:
+                return None, []
+            report = run_checks(
+                [
+                    SymbolicEqualityCheck(),
+                    InstantiationCheck(),
+                    StepInstantiationCheck(),
+                ],
+                CheckContext(claim=draft.claim, steps=draft.steps, answer_text=answer),
+            )
+            claims = [f"{item.lhs} = {item.rhs}" for item in draft.steps if item.rhs]
+            return assess(report), claims
+        except Exception:  # noqa: BLE001
+            return None, []
 
     def _build_conversation_context(
         self,

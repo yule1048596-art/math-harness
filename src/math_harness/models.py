@@ -280,6 +280,14 @@ class ConversationMessage(BaseModel):
     attempt_id: str | None = None
     knowledge_draft_id: str | None = None
     verification_status: VerificationStatus | None = None
+    #: 双轴可信度。聊天路径也会有——从回答里抽出的断言过一遍检查流水线就得到它，
+    #: 不再是「只有渐进题才查」。抽不出可检验内容时留空，那不是失败。
+    conclusion_confidence: ConclusionConfidence | None = None
+    process_confidence: ProcessConfidence | None = None
+    #: 反例。有它用户才分得清「真错」和「缺前提」。
+    counterexample: dict[str, str] = Field(default_factory=dict)
+    #: 实际被检查的断言原文，供并排展示——用户要看得见 AI 到底验了什么命题。
+    checked_claims: list[str] = Field(default_factory=list, max_length=40)
     method_keys: list[str] = Field(default_factory=list, max_length=20)
     created_at: datetime
 
