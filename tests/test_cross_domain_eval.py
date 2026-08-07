@@ -185,3 +185,51 @@ def test_the_corpus_files_are_valid_jsonl():
         ):
             if line.strip():
                 json.loads(line), f"{path}:{line_number}"
+
+
+# --- 检索门禁 ---------------------------------------------------------
+#
+# 拒不动的门禁不是门禁。
+
+
+def test_the_gate_passes_at_the_measured_level():
+    from math_harness.cross_eval import gate_failures
+
+    report = {
+        "after": {
+            "overall": {"hit_at_1": 0.596},
+            "slices": {"cross_family": {"hit_at_1": 0.500}},
+        }
+    }
+
+    assert gate_failures(report) == []
+
+
+def test_the_gate_rejects_a_drop_back_to_the_word_level_baseline():
+    """0.404 是没有结构参与时的成绩。掉回去就说明结构那一路白接了。"""
+
+    from math_harness.cross_eval import gate_failures
+
+    report = {
+        "after": {
+            "overall": {"hit_at_1": 0.404},
+            "slices": {"cross_family": {"hit_at_1": 0.500}},
+        }
+    }
+
+    assert gate_failures(report)
+
+
+def test_the_gate_rejects_being_fooled_by_surface_shape():
+    """结构权重给高了 cross_family 就掉——实测 0.12 起从 0.500 掉到 0.333。"""
+
+    from math_harness.cross_eval import gate_failures
+
+    report = {
+        "after": {
+            "overall": {"hit_at_1": 0.700},
+            "slices": {"cross_family": {"hit_at_1": 0.333}},
+        }
+    }
+
+    assert gate_failures(report)

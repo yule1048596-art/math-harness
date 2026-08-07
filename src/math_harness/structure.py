@@ -243,6 +243,45 @@ def operator_paths(
         return set()
 
 
+def features_from_text(
+    text: str,
+    parser: SafeMathParser | None = None,
+) -> StructuralFeatures:
+    """从任意自然语言文本里抽结构特征。
+
+    `extract_features` 要一个渐进形状的 `SolveMathTarget`，而聊天路径的提问和知识
+    草稿都没有——于是那条路上**结构检索一次都不会启动**，只剩词面。
+
+    这里用的是同一套算子标签和叶到根路径，只是入口换成文本：把题面里能安全解析的
+    片段都找出来，路径取并集。渐进专属的那几个 facet（趋近点、方向、余项）留空，
+    它们在这里没有意义。
+    """
+
+    from math_harness.claim_drafting import extract_expressions
+
+    safe_parser = parser or SafeMathParser()
+    operators: set[str] = set()
+    paths: set[str] = set()
+    for expression_text in extract_expressions(text, safe_parser):
+        symbols = {
+            name: sp.Symbol(name)
+            for name in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression_text))
+            if name not in safe_parser.FUNCTIONS and name not in safe_parser.CONSTANTS
+        }
+        try:
+            expression = safe_parser.parse(expression_text, symbols)
+            operators |= _collect_operators(expression, _NO_DISTINGUISHED_VARIABLE)
+            paths |= leaf_root_paths(expression, _NO_DISTINGUISHED_VARIABLE)
+        except Exception:  # noqa: BLE001, S112 —— 单个片段解析不了就跳过它，
+            # 检索不能因为题面里混着一段奇怪的字符就整体失败。
+            continue
+
+    return StructuralFeatures(
+        operators=sorted(operators),
+        paths=sorted(paths),
+    )
+
+
 def _collect_flags(
     expression: sp.Expr,
     variable: sp.Symbol,

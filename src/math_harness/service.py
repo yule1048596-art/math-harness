@@ -161,7 +161,11 @@ from math_harness.solving import (
     build_solution_generator_from_resolved,
 )
 from math_harness.storage import WorkspaceManager, WorkspaceStore
-from math_harness.structure import extract_features
+from math_harness.structure import (
+    StructuralFeatures,
+    extract_features,
+    features_from_text,
+)
 from math_harness.target_drafting import (
     TargetDrafterProtocol,
     build_target_drafter_from_env,
@@ -986,6 +990,23 @@ class MathHarnessService:
         }
     )
 
+    @staticmethod
+    def _signature_features(
+        problem: str, payload: MathPayload | None
+    ) -> StructuralFeatures:
+        """方法卡签名用的结构特征。
+
+        签名描述「这个方法适用于什么形状的题」，所以取的是**题面**结构——检索时手里
+        只有提问，两边必须是同一种东西。
+
+        没有渐进目标的例题以前拿到的是空签名，于是它们的方法卡在结构检索里完全不可见：
+        库里有卡，但结构那一路永远打不中。
+        """
+
+        if payload is not None:
+            return extract_features(payload)
+        return features_from_text(problem)
+
     def _verify_for_ingestion(self, request: ExampleCreate) -> VerificationReport:
         """入库时取一次验证结论。
 
@@ -1499,7 +1520,9 @@ class MathHarnessService:
             # 签名会直接影响后续检索，因此它和方法晋级共用同一条信任边界：
             # 数学上可验证但尚未经人工复核的例子，也不能改写已晋级知识。
             features = (
-                extract_features(request.math_payload) if promotion_approved else None
+                self._signature_features(request.problem, request.math_payload)
+                if promotion_approved
+                else None
             )
             for draft in extraction_result.methods:
                 learned_methods.append(
@@ -1873,7 +1896,7 @@ class MathHarnessService:
             drafts = extraction_result.methods
             replacement_extraction = extraction_result.trace
 
-        features = extract_features(example.math_payload)
+        features = self._signature_features(example.problem, example.math_payload)
         learned_methods = [
             store.upsert_method(
                 draft=draft,
@@ -1986,12 +2009,18 @@ class MathHarnessService:
         methods = self.workspaces.store(workspace_id).list_methods(
             include_pending=False
         )
+        # 没有渐进目标时从提问文本抽结构。以前这里直接给 `None`——聊天路径上永远
+        # 没有 `math_target`，于是结构检索一次都不会启动，只剩词面和标签。
+        features = (
+            extract_features(math_target) if math_target else features_from_text(query)
+        )
         return self.retriever.search(
             methods,
             query,
             tags=tags,
             top_k=top_k,
-            features=extract_features(math_target) if math_target else None,
+            features=features if not features.is_empty else None,
+            inferred_structure=math_target is None,
         )
 
     def build_solve_plan(

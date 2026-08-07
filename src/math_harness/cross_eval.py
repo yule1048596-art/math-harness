@@ -42,6 +42,15 @@ from math_harness.structure import operator_paths
 # 检索真的坏了；超过这个比例，指标衡量的就主要是记忆而不是泛化。
 MAX_STRUCTURAL_OVERLAP = 0.40
 
+#: 检索门禁：整体 Hit@1 的下限。
+#
+# v0.16 之前跨领域检索是 0.000——不是检索差，是知识永远晋级不了、库里恒空。修好晋级
+# 之后纯词面拿到 0.404，接上从题面推断的结构后拿到 0.596。这个门限守的是后者：
+# 掉回词面水平就说明结构那一路白接了。
+MIN_OVERALL_HIT_AT_1 = 0.55
+#: 被表面形状骗走的下限。结构权重给高了这一格会掉——0.12 就开始掉。
+MIN_CROSS_FAMILY_HIT_AT_1 = 0.45
+
 
 class CrossDomainTrainingCase(BaseModel):
     """跨领域训练语料的一条。"""
@@ -366,6 +375,24 @@ def format_report(report: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def gate_failures(report: dict[str, object]) -> list[str]:
+    """检索门禁。返回未达标的项，空列表表示通过。"""
+
+    failures: list[str] = []
+    overall = report["after"]["overall"]["hit_at_1"]
+    if overall < MIN_OVERALL_HIT_AT_1:
+        failures.append(f"整体 Hit@1 {overall:.3f} < {MIN_OVERALL_HIT_AT_1:.3f}")
+    cross_family = (
+        report["after"]["slices"].get("cross_family", {}).get("hit_at_1", 0.0)
+    )
+    if cross_family < MIN_CROSS_FAMILY_HIT_AT_1:
+        failures.append(
+            f"cross_family Hit@1 {cross_family:.3f} < "
+            f"{MIN_CROSS_FAMILY_HIT_AT_1:.3f}——被表面形状骗走了"
+        )
+    return failures
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="跨领域检索评测。量的是检索，不是提炼——训练语料显式声明方法键。"
@@ -382,6 +409,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--top-k", type=int, default=3)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="低于门限就以非零码退出。发布前跑这个。",
+    )
     args = parser.parse_args(argv)
 
     report = run_cross_evaluation(
@@ -391,6 +423,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
         print(format_report(report))
+    if args.check:
+        failures = gate_failures(report)
+        if failures:
+            print()
+            for failure in failures:
+                print(f"未达门限：{failure}")
+            return 1
     return 0
 
 
