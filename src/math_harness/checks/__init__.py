@@ -13,6 +13,15 @@ from math_harness.checks.claim import (
     ClaimKind,
     SamplingDomain,
 )
+from math_harness.checks.confidence import (
+    ConclusionConfidence,
+    ConfidenceAssessment,
+    ProcessConfidence,
+    assess,
+    conclusion_rank,
+    granted_level,
+    retrieval_weight,
+)
 from math_harness.checks.instantiation import (
     InstantiationCheck,
     StepInstantiationCheck,
@@ -29,10 +38,17 @@ __all__ = [
     "CheckTier",
     "Claim",
     "ClaimKind",
+    "ConclusionConfidence",
+    "ConfidenceAssessment",
     "InstantiationCheck",
+    "ProcessConfidence",
     "SamplingDomain",
     "StepInstantiationCheck",
     "SymbolicEqualityCheck",
+    "assess",
+    "conclusion_rank",
+    "granted_level",
+    "retrieval_weight",
     "run_checks",
 ]
 

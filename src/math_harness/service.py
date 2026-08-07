@@ -103,6 +103,7 @@ from math_harness.models import (
     MethodStatusUpdate,
     MethodVersion,
     ProblemExample,
+    ProcessConfidence,
     ProviderOverride,
     SolutionAttempt,
     SolutionAttemptStatus,
@@ -1227,6 +1228,7 @@ class MathHarnessService:
             request,
             verification.status,
             extractor=extractor,
+            verification=verification,
         )
         if origin is ExampleOrigin.CONVERSATION:
             extraction_result = self._filter_conversation_extraction(extraction_result)
@@ -1302,6 +1304,7 @@ class MathHarnessService:
         verification_status: VerificationStatus,
         *,
         extractor: MethodExtractorProtocol | None = None,
+        verification: VerificationReport | None = None,
     ) -> MethodExtractionResult:
         selected_extractor = extractor or self.extractor
         provider = getattr(
@@ -1316,6 +1319,27 @@ class MathHarnessService:
                     provider=provider,
                     prompt_version=prompt_version,
                     status=ExtractionStatus.SKIPPED,
+                    extracted_method_keys=[],
+                )
+            )
+        # 过程轴门禁：推导被反例推翻时不提取方法卡。
+        #
+        # 阶段 H 实测，结论正确、某一中间步写错的解会通过全部只查结论的层。方法卡是从
+        # 推导提取的，学下来就是一个错方法，还会被后续检索复用。
+        #
+        # 只在 `step_failed` 时拦截，不在 `step_unchecked` 时拦：旧的渐进路径压根没有
+        # 步骤断言，一律按未检查处理会把方法提取整个停掉。等阶段 G 把所有输入接进新
+        # 流水线，这条才谈得上全局生效。
+        if (
+            verification is not None
+            and verification.process_confidence is ProcessConfidence.STEP_FAILED
+        ):
+            return MethodExtractionResult(
+                trace=MethodExtractionTrace(
+                    provider=provider,
+                    prompt_version=prompt_version,
+                    status=ExtractionStatus.SKIPPED,
+                    error="推导中有步骤被反例推翻，不从中提取方法。",
                     extracted_method_keys=[],
                 )
             )

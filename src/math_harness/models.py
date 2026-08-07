@@ -36,6 +36,47 @@ class VerificationStatus(StrEnum):
     REJECTED = "rejected"
 
 
+# 双轴可信度。
+#
+# 结论对不对，和推导站不站得住，是**两件不同的事**。阶段 H 的测量把这一点变成了数据：
+# 39 个「结论正确、某一中间步写错」的变异体里，只查结论的层一个都没抓到，逐步检查全部
+# 抓到。所以可信度不能是一条阶梯，必须是两轴。
+#
+# 枚举放在这里是因为它们要落库，和别的持久化状态在一起；**判定策略**（哪条检查配得上
+# 哪一档、怎么折算）在 `checks/confidence.py`。
+
+
+class ConclusionConfidence(StrEnum):
+    """结论轴：这个答案有多可信。"""
+
+    #: 形式化证明通过。预留档位，本版不产出。
+    PROOF_VERIFIED = "proof_verified"
+    #: 符号证明：`simplify(lhs-rhs) == 0`。**确定性**结论。
+    VERIFIED = "verified"
+    #: 随机实例化 N 次全过。强证据，**不是证明**。
+    NUMERICALLY_CHECKED = "numerically_checked"
+    #: 独立引擎（Wolfram）重算一致。
+    CROSS_CHECKED = "cross_checked"
+    #: 换 provider 复核通过。
+    PEER_REVIEWED = "peer_reviewed"
+    #: 无法解析或没有适用的检查。
+    UNCHECKED = "unchecked"
+    #: 有反例。**这不是「没查」，是「查出来错了」**——两者混为一谈会让一个已知错误的
+    #: 答案以「未验证」的身份进知识库，和一道没检查过的题平起平坐。
+    REFUTED = "refuted"
+
+
+class ProcessConfidence(StrEnum):
+    """过程轴：推导站不站得住。"""
+
+    #: 每一步都是断言且全部通过。**方法卡门禁只认这一档。**
+    STEP_CHECKED = "step_checked"
+    #: 某步被反例推翻。
+    STEP_FAILED = "step_failed"
+    #: 解答没有可拆分的步骤断言。
+    STEP_UNCHECKED = "step_unchecked"
+
+
 class ProblemKind(StrEnum):
     ASYMPTOTIC = "asymptotic"
     LIMIT = "limit"
@@ -535,12 +576,42 @@ class ExampleCreate(BaseModel):
         return normalized
 
 
+#: 旧的三值状态到结论轴的对应。
+#
+# 旧路径的 `VERIFIED` 来自专门的 SymPy 符号验证器，是确定性判定，对应 `verified` 名副
+# 其实。`REJECTED` 对应 `refuted` 而不是 `unchecked`——那是查出来错了，不是没查。
+_LEGACY_CONCLUSION: dict[VerificationStatus, ConclusionConfidence] = {
+    VerificationStatus.VERIFIED: ConclusionConfidence.VERIFIED,
+    VerificationStatus.NEEDS_REVIEW: ConclusionConfidence.UNCHECKED,
+    VerificationStatus.REJECTED: ConclusionConfidence.REFUTED,
+}
+
+
 class VerificationReport(BaseModel):
     status: VerificationStatus
     summary: str
     checks: list[str] = Field(default_factory=list)
     computed: dict[str, str] = Field(default_factory=dict)
     error: str | None = None
+    #: 双轴可信度。为 None 表示这条记录是新流水线之前写的，靠 `conclusion` 折算。
+    conclusion_confidence: ConclusionConfidence | None = None
+    process_confidence: ProcessConfidence = ProcessConfidence.STEP_UNCHECKED
+    #: 反例。有它用户才分得清「真错」和「缺前提」。
+    counterexample: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def conclusion(self) -> ConclusionConfidence:
+        """结论轴。旧记录没有这个字段，按三值状态折算，不至于一律显示成「未检查」。"""
+
+        if self.conclusion_confidence is not None:
+            return self.conclusion_confidence
+        return _LEGACY_CONCLUSION[self.status]
+
+    @property
+    def may_extract_methods(self) -> bool:
+        """能不能从这个解提取方法卡。见 `checks.confidence` 里那条硬规则。"""
+
+        return self.process_confidence is ProcessConfidence.STEP_CHECKED
 
 
 class MethodExtractionTrace(BaseModel):
