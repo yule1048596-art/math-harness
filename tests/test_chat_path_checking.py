@@ -7,7 +7,10 @@ from math_harness.models import (
     ConclusionConfidence,
     ConversationCreate,
     ConversationTurnRequest,
+    ExtractionStatus,
+    KnowledgeStatus,
     ProcessConfidence,
+    VerificationStatus,
     WorkspaceCreate,
 )
 from math_harness.service import MathHarnessService
@@ -169,3 +172,120 @@ def test_the_confidence_survives_a_reload(tmp_path):
 
     assert assistant.conclusion_confidence is ConclusionConfidence.VERIFIED
     assert assistant.checked_claims == ["diff(x**2, x) = 2*x"]
+
+
+# --- 聊天路径的知识入库 -----------------------------------------------
+#
+# 「不会记住无关紧要的信息防止污染」在这里落地：门禁收得很紧，只有真的抽出了可检验
+# 内容、而且没被反例推翻的回合才进库。
+
+
+def draft(tmp_path, answer: str, message: str = "用有理化法求极限"):
+    service = MathHarnessService(
+        tmp_path, conversation_responder=FixedResponder(answer)
+    )
+    workspace = service.create_workspace(WorkspaceCreate(name="聊天入库"))
+    conversation = service.create_conversation(
+        workspace.id, ConversationCreate(title="对话")
+    )
+    result = service.send_conversation_turn(
+        workspace.id, conversation.id, ConversationTurnRequest(message=message)
+    )
+    return result
+
+
+def test_a_checkable_chat_turn_becomes_a_knowledge_draft(tmp_path):
+    """以前只有求解路径产出草稿，聊天问的题一律进不了知识库。"""
+
+    result = draft(tmp_path, "所以 diff(x**3 + 2*x, x) = 3*x**2 + 2")
+
+    assert result.knowledge_draft is not None
+    assert result.assistant_message.knowledge_draft_id == result.knowledge_draft.id
+
+
+def test_a_prose_only_turn_never_enters_the_knowledge_base(tmp_path):
+    """纯讲解没有可复用的东西。每个回合都建草稿会把知识库淹掉。"""
+
+    assert (
+        draft(tmp_path, "这道题要用洛必达法则，先对分子分母求导。").knowledge_draft
+        is None
+    )
+
+
+def test_a_refuted_turn_never_enters_the_knowledge_base(tmp_path):
+    """已经查出错的答案不是「待确认」，是已知错误。"""
+
+    assert draft(tmp_path, "diff(x**3, x) = 2*x**2").knowledge_draft is None
+
+
+def test_a_chat_draft_always_needs_human_review(tmp_path):
+    """这条路上的检查再怎么过也是概率性的，晋级仍然要人工确认。"""
+
+    result = draft(tmp_path, "所以 diff(x**3 + 2*x, x) = 3*x**2 + 2")
+
+    assert result.knowledge_draft.status is KnowledgeStatus.PENDING_REVIEW
+    assert result.knowledge_draft.reviewed is False
+
+
+def test_a_chat_draft_keeps_both_axes(tmp_path):
+    result = draft(tmp_path, "所以 diff(x**3 + 2*x, x) = 3*x**2 + 2")
+    verification = result.knowledge_draft.verification
+
+    assert verification.conclusion_confidence is ConclusionConfidence.VERIFIED
+    assert verification.process_confidence is ProcessConfidence.STEP_CHECKED
+
+
+def test_a_chat_turn_with_a_broken_step_stores_the_example_but_no_method(tmp_path):
+    """整条链路上最要紧的一条：例题可以留，方法**不能**从坏推导里学。"""
+
+    result = draft(
+        tmp_path,
+        "(a+b)^2 = a^2 + 2*a*b + b^2\n"
+        "(a-b)^2 = a^2 - 2*a*b - b^2\n"
+        "相减得 (a+b)^2 - (a-b)^2 = 4*a*b",
+    )
+
+    assert result.knowledge_draft is not None
+    assert result.knowledge_draft.method_drafts == []
+    assert result.knowledge_draft.extraction.status is ExtractionStatus.SKIPPED
+
+
+def test_a_sound_chat_derivation_does_yield_a_method_draft(tmp_path):
+    """门禁只拦坏推导，不能顺手把正常路径也拦掉。"""
+
+    result = draft(tmp_path, "所以 diff(x**3 + 2*x, x) = 3*x**2 + 2")
+
+    assert result.knowledge_draft.method_drafts != []
+
+
+def test_a_numerically_checked_turn_is_not_recorded_as_verified(tmp_path):
+    """随机取值都对，不该拿到和符号证明一样的三值状态——晋级门禁看的就是它。"""
+
+    result = draft(tmp_path, "Sum(binomial(n,k),(k,0,n)) = 2**n")
+    verification = result.knowledge_draft.verification
+
+    assert (
+        verification.conclusion_confidence is ConclusionConfidence.NUMERICALLY_CHECKED
+    )
+    assert verification.status is VerificationStatus.NEEDS_REVIEW
+
+
+def test_a_capture_failure_never_loses_the_turn(tmp_path):
+    """入库是附加价值，不是前置条件。"""
+
+    service = MathHarnessService(
+        tmp_path,
+        conversation_responder=FixedResponder("所以 diff(x**2, x) = 2*x"),
+    )
+    workspace = service.create_workspace(WorkspaceCreate(name="容错"))
+    conversation = service.create_conversation(
+        workspace.id, ConversationCreate(title="对话")
+    )
+    service._ingest_example = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("炸"))
+
+    result = service.send_conversation_turn(
+        workspace.id, conversation.id, ConversationTurnRequest(message="问题")
+    )
+
+    assert result.assistant_message.content == "所以 diff(x**2, x) = 2*x"
+    assert result.knowledge_draft is None

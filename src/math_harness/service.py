@@ -65,6 +65,7 @@ from math_harness.models import (
     BulkImportItemStatus,
     CandidateSolution,
     CandidateStep,
+    ConclusionConfidence,
     Conversation,
     ConversationCaptureResult,
     ConversationCreate,
@@ -912,6 +913,15 @@ class MathHarnessService:
             assistant_content,
             answer_profile_id=provider,
         )
+        if knowledge_draft is None:
+            knowledge_draft = self._capture_chat_knowledge(
+                workspace_id,
+                store,
+                problem=request.message,
+                answer=assistant_content,
+                tags=request.tags,
+                assessment=assessment,
+            )
 
         assistant_message = store.append_conversation_message(
             conversation_id,
@@ -960,6 +970,69 @@ class MathHarnessService:
             knowledge_draft=knowledge_draft,
             summary_updated=summary_updated,
             memory_job=memory_job,
+        )
+
+    def _capture_chat_knowledge(
+        self,
+        workspace_id: str,
+        store: WorkspaceStore,
+        *,
+        problem: str,
+        answer: str,
+        tags: list[str],
+        assessment: ConfidenceAssessment | None,
+    ) -> ProblemExample | None:
+        """把一次聊天问答存成待复核的知识草稿。
+
+        入库门禁刻意收得很紧：**只有真的抽出了可检验内容、而且没被反例推翻的回合才
+        进库**。每个回合都建草稿会把知识库淹掉，而纯讲解的回合本来也没有可复用的东西
+        ——这正是「不会记住无关紧要的信息防止污染」的落点。
+
+        草稿一律是 `pending_review`：这条路上的答案再怎么查也是概率性检查，
+        晋级仍然要人工确认。
+        """
+
+        if assessment is None or not assessment.may_enter_knowledge_base:
+            return None
+        try:
+            return self._ingest_example(
+                workspace_id,
+                ExampleCreate(
+                    problem=problem,
+                    solution=answer,
+                    tags=tags,
+                    reviewed=False,
+                ),
+                origin=ExampleOrigin.CONVERSATION,
+                verification_override=self._report_from(assessment),
+                store=store,
+            ).example
+        except Exception:  # noqa: BLE001
+            # 入库是附加价值，不是前置条件。存不进去也不能把这一轮对话弄丢。
+            return None
+
+    @staticmethod
+    def _report_from(assessment: ConfidenceAssessment) -> VerificationReport:
+        """把双轴折算成旧的三值状态，同时把两轴原样保留。
+
+        **只有确定性的符号判定才映射到 `VERIFIED`**。三值状态是晋级门禁看的东西，
+        把概率性检查折算进去，等于让「随机取值都对」拿到和符号证明一样的待遇。
+        """
+
+        deterministic = assessment.conclusion in {
+            ConclusionConfidence.VERIFIED,
+            ConclusionConfidence.PROOF_VERIFIED,
+        }
+        return VerificationReport(
+            status=(
+                VerificationStatus.VERIFIED
+                if deterministic
+                else VerificationStatus.NEEDS_REVIEW
+            ),
+            summary=f"聊天路径检查：{assessment.conclusion.value} / {assessment.process.value}",
+            conclusion_confidence=assessment.conclusion,
+            process_confidence=assessment.process,
+            counterexample=assessment.counterexample,
         )
 
     def _check_assistant_answer(
