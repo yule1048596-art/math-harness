@@ -13,6 +13,10 @@ from math_harness.checks.claim import (
     ClaimKind,
     SamplingDomain,
 )
+from math_harness.checks.instantiation import (
+    InstantiationCheck,
+    StepInstantiationCheck,
+)
 from math_harness.checks.symbolic import SymbolicEqualityCheck
 
 __all__ = [
@@ -25,7 +29,9 @@ __all__ = [
     "CheckTier",
     "Claim",
     "ClaimKind",
+    "InstantiationCheck",
     "SamplingDomain",
+    "StepInstantiationCheck",
     "SymbolicEqualityCheck",
     "run_checks",
 ]
