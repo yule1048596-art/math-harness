@@ -140,6 +140,26 @@ def _run_trials(
     return ("passed" if checked else "inconclusive"), {}, checked
 
 
+def _run_step_trials(
+    steps: list[
+        tuple[str, str | None, str, list[str], list[dict[str, str]], list[str]]
+    ],
+) -> tuple[int, str, dict[str, str], int]:
+    """在**一个**子进程里查完所有步骤，返回第一个出问题的步骤。
+
+    每步各起一个子进程的话，spawn 每次约 0.25 秒，一个十步的推导光开销就是 2.5 秒。
+    步骤之间互不依赖，一趟查完即可。返回的下标从 0 起，-1 表示全部通过。
+    """
+
+    for index, (lhs, rhs, kind, names, assignments, hypotheses) in enumerate(steps):
+        status, counterexample, checked = _run_trials(
+            lhs, rhs, kind, names, assignments, hypotheses
+        )
+        if status != "passed":
+            return index, status, counterexample, checked
+    return -1, "passed", {}, len(steps)
+
+
 class InstantiationCheck:
     """按 bindings 实例化断言并比对两边。"""
 
@@ -164,7 +184,11 @@ class InstantiationCheck:
         assert claim is not None
         return self._check_claim(claim, label="")
 
-    def _check_claim(self, claim: Claim, label: str) -> CheckResult:
+    def _spec(
+        self, claim: Claim
+    ) -> tuple[str, str | None, str, list[str], list[dict[str, str]], list[str]]:
+        """把断言打包成可以跨进程传的纯字符串。"""
+
         assignments = [
             {name: sp.sstr(value) for name, value in assignment.items()}
             for assignment in iter_assignments(
@@ -173,6 +197,17 @@ class InstantiationCheck:
                 seed=self.seed,
             )
         ]
+        return (
+            claim.lhs,
+            claim.rhs,
+            claim.kind.value,
+            claim.symbols,
+            assignments,
+            claim.hypotheses,
+        )
+
+    def _check_claim(self, claim: Claim, label: str) -> CheckResult:
+        assignments = self._spec(claim)[4]
 
         try:
             # 全部采样在同一个子进程里跑完：spawn 每次约 0.25 秒，按次起进程会慢到
@@ -240,15 +275,40 @@ class StepInstantiationCheck(InstantiationCheck):
         return bool(context.steps)
 
     def run(self, context: CheckContext) -> CheckResult:
-        for index, step in enumerate(context.steps, start=1):
-            result = self._check_claim(step, label=f"第 {index} 步：")
-            if result.outcome is CheckOutcome.FAILED:
-                return result.model_copy(update={"check": self.name})
-            if result.outcome is CheckOutcome.ERRORED:
-                return result.model_copy(update={"check": self.name})
+        specs = [self._spec(step) for step in context.steps]
+
+        try:
+            # 整条推导共用一个子进程。步骤之间互不依赖，没有理由为每一步付一次
+            # spawn 的钱。超时预算按步数放大，否则长推导会被自己的长度判成超时。
+            index, status, counterexample, checked = call_with_timeout(
+                _run_step_trials,
+                specs,
+                timeout_seconds=self.timeout_seconds * max(len(specs), 1),
+            )
+        except ComputationTimeout as exc:
+            return self._errored(f"逐步实例化超时：{exc}")
+        except (UnsafeExpression, RuntimeError) as exc:
+            return self._errored(f"逐步实例化未能执行：{exc}")
+
+        if status == "failed":
+            detail = "、".join(f"{k}={v}" for k, v in counterexample.items())
+            return CheckResult(
+                check=self.name,
+                tier=self.tier,
+                outcome=CheckOutcome.FAILED,
+                detail=f"第 {index + 1} 步：在 {detail} 处两边不相等。",
+                counterexample=counterexample,
+                evidence={"failing_step": str(index + 1)},
+            )
+
+        if status == "inconclusive":
+            return self._errored(
+                f"第 {index + 1} 步所有样本都落在未定义点或不满足前提，无法判定。"
+            )
+
         return CheckResult(
             check=self.name,
             tier=self.tier,
             outcome=CheckOutcome.PASSED,
-            evidence={"steps": str(len(context.steps))},
+            evidence={"steps": str(checked)},
         )

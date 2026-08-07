@@ -866,6 +866,10 @@ uv run --no-editable pytest
 uv run --no-editable ruff format --check .
 uv run --no-editable ruff check .
 
+# 检查层的变异测试门禁（约一分钟，发布前跑）
+# 捕获率置信下界不高于零、或误拒率超标的层，不该合入
+uv run --no-editable math-harness-mutation --check
+
 # 原生 macOS 开发运行
 ./scripts/run_macos_app.sh
 
@@ -912,7 +916,8 @@ flowchart TB
 - macOS 公共包仅面向 Apple Silicon/macOS 14+，尚无 Universal 2；
 - 默认是 ad-hoc 签名，尚未完成 Developer ID 公证和自动更新；
 - 数学表达式暂时以等宽文本展示，尚无原生离线 LaTeX 排版；
-- 单次 SymPy 工作仍在 helper 主进程内运行，任务取消和每题独立 worker 尚未完成；
+- 新的检查流水线（实例化检验）在带超时的子进程里跑，拖死的表达式会被杀掉；但**既有
+  求解路径的 SymPy 验证仍在 helper 主进程内运行**，任务取消尚未完成；
 - 当前没有向量检索，结构检索主要依赖受限解析器提取的离散特征；
 - 检索能力的实测水平：在训练里见过的形状上 Hit@1 为 `1.000`，**换成训练中不存在的
   新形状后降到 `0.667`**。表面算子相似但方法不同的题目为 `0.667`（v0.13 时是
