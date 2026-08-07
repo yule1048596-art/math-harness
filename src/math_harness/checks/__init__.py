@@ -29,3 +29,11 @@ __all__ = [
     "SymbolicEqualityCheck",
     "run_checks",
 ]
+
+from math_harness.checks.sandbox import (
+    DEFAULT_TIMEOUT_SECONDS,
+    ComputationTimeout,
+    call_with_timeout,
+)
+
+__all__ += ["DEFAULT_TIMEOUT_SECONDS", "ComputationTimeout", "call_with_timeout"]
