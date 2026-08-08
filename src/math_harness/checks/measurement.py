@@ -327,12 +327,49 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    from math_harness.checks.text_mutation import (
+        format_text_report,
+        measure_text_mutation,
+    )
+
     report = measure(args.seed)
+    # 断言层的门禁跑的是手工构造的 `Claim`，完全不经过「文本→断言」那条路。
+    # v0.16 把那条路加进了主链，所以整条链要单独量一遍：一个变异体可能在断言层
+    # 抓得住，而生产里抽断言那一步先把它弄坏了。
+    text_report = measure_text_mutation()
     if args.json:
-        print(json.dumps(report.model_dump(), ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "claim_level": report.model_dump(),
+                    "text_level": {
+                        "conclusion_capture": text_report.conclusion_capture,
+                        "step_capture": text_report.step_capture,
+                        "false_rejection": text_report.false_rejection_rate,
+                        "undraftable": text_report.undraftable,
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     else:
         print(format_report(report))
-    if args.check and any(not item.admitted for item in report.layers):
+        print()
+        print("整条链（人写记号的回答 → 抽断言 → 检查）：")
+        print(format_text_report(text_report))
+
+    if not args.check:
+        return 0
+    failures = [item.layer for item in report.layers if not item.admitted]
+    if text_report.false_rejection_rate > MAX_FALSE_REJECTION:
+        failures.append("整条链误拒率过高")
+    if min(text_report.conclusion_capture, text_report.step_capture) < 0.8:
+        failures.append("整条链捕获率过低")
+    if failures:
+        print()
+        for failure in failures:
+            print(f"未达门限：{failure}")
         return 1
     return 0
 

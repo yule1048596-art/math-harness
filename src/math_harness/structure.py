@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import sympy as sp
 from pydantic import BaseModel, Field
@@ -182,6 +183,14 @@ def leaf_root_paths(
     collected: set[str] = set()
 
     def walk(node: sp.Expr, prefix: tuple[str, ...]) -> None:
+        if isinstance(node, sp.MatrixBase):
+            # 矩阵不是 `Expr`，没有 `is_Symbol`——不单独处理的话整个线性代数领域
+            # 会在这里抛 AttributeError，被上层兜底吞成「没有结构」。
+            # 阶数进标签：二阶和三阶行列式该不该用代数余子式展开，答案是不一样的。
+            label = f"matrix{node.rows}x{node.cols}"
+            for entry in node:
+                walk(entry, prefix + (label,))
+            return
         if node.is_Symbol:
             leaf = "VAR" if node == variable else "PARAM"
             collected.add("/".join(prefix[-depth:] + (leaf,)))
@@ -195,6 +204,82 @@ def leaf_root_paths(
 
     walk(expression, ())
     return collected
+
+
+#: 一个不会出现在任何表达式里的哑符号。
+#
+# `leaf_root_paths` 靠它区分 VAR（趋近变量）和 PARAM（其余符号），那个区分只在渐进
+# 设定下有意义。通用表达式里没有天然的「主变量」，硬挑一个是任意的，任意的区分只会
+# 添噪声——所以这里让所有符号统一落到 PARAM。
+_NO_DISTINGUISHED_VARIABLE = sp.Symbol("__none__")
+
+
+def operator_paths(
+    expression_text: str,
+    parser: SafeMathParser | None = None,
+    depth: int = PATH_DEPTH,
+) -> set[str]:
+    """任意表达式文本的叶到根路径。
+
+    渐进路径走 `extract_features`，它要一个 `SolveMathTarget`。这个入口只要文本，
+    让跨领域的题面也能拿到同一种结构指纹。
+
+    解析失败返回空集：检索不能因为某个片段形状古怪就整体失败。
+    """
+
+    safe_parser = parser or SafeMathParser()
+    symbols = {
+        name: sp.Symbol(name)
+        for name in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression_text))
+        if name not in safe_parser.FUNCTIONS and name not in safe_parser.CONSTANTS
+    }
+    try:
+        expression = safe_parser.parse(expression_text, symbols)
+    except Exception:  # noqa: BLE001
+        return set()
+    try:
+        return leaf_root_paths(expression, _NO_DISTINGUISHED_VARIABLE, depth)
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+def features_from_text(
+    text: str,
+    parser: SafeMathParser | None = None,
+) -> StructuralFeatures:
+    """从任意自然语言文本里抽结构特征。
+
+    `extract_features` 要一个渐进形状的 `SolveMathTarget`，而聊天路径的提问和知识
+    草稿都没有——于是那条路上**结构检索一次都不会启动**，只剩词面。
+
+    这里用的是同一套算子标签和叶到根路径，只是入口换成文本：把题面里能安全解析的
+    片段都找出来，路径取并集。渐进专属的那几个 facet（趋近点、方向、余项）留空，
+    它们在这里没有意义。
+    """
+
+    from math_harness.claim_drafting import extract_expressions
+
+    safe_parser = parser or SafeMathParser()
+    operators: set[str] = set()
+    paths: set[str] = set()
+    for expression_text in extract_expressions(text, safe_parser):
+        symbols = {
+            name: sp.Symbol(name)
+            for name in set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression_text))
+            if name not in safe_parser.FUNCTIONS and name not in safe_parser.CONSTANTS
+        }
+        try:
+            expression = safe_parser.parse(expression_text, symbols)
+            operators |= _collect_operators(expression, _NO_DISTINGUISHED_VARIABLE)
+            paths |= leaf_root_paths(expression, _NO_DISTINGUISHED_VARIABLE)
+        except Exception:  # noqa: BLE001, S112 —— 单个片段解析不了就跳过它，
+            # 检索不能因为题面里混着一段奇怪的字符就整体失败。
+            continue
+
+    return StructuralFeatures(
+        operators=sorted(operators),
+        paths=sorted(paths),
+    )
 
 
 def _collect_flags(

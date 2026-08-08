@@ -251,9 +251,17 @@ def test_a_chat_turn_with_a_broken_step_stores_the_example_but_no_method(tmp_pat
 
 
 def test_a_sound_chat_derivation_does_yield_a_method_draft(tmp_path):
-    """门禁只拦坏推导，不能顺手把正常路径也拦掉。"""
+    """门禁只拦坏推导，不能顺手把正常路径也拦掉。
 
-    result = draft(tmp_path, "所以 diff(x**3 + 2*x, x) = 3*x**2 + 2")
+    解答里必须真的写着用了什么方法。这条测试原先只靠**提问**里出现「有理化」就通过
+    ——答案做的是求导，方法卡却写着有理化。它锁住的正是后来量出误标率 0.750 的那个
+    缺陷：方法是在解答里做出来的，不是在提问里说出来的。
+    """
+
+    result = draft(
+        tmp_path,
+        "先做共轭有理化再展开：\n所以 diff(x**3 + 2*x, x) = 3*x**2 + 2",
+    )
 
     assert result.knowledge_draft.method_drafts != []
 

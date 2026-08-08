@@ -9,7 +9,7 @@
 [查看全部版本](https://github.com/yule1048596-art/math-harness/releases) ·
 [MIT License](LICENSE)
 
-> 当前版本：**v0.15.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
+> 当前版本：**v0.16.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
 > 当前公开安装包使用 ad-hoc 签名，尚未完成 Developer ID 公证。
 
 ## 它能做什么
@@ -69,7 +69,7 @@ Math Harness 的“成长”目前指的是**可审计的记忆、方法卡、�
 安装步骤：
 
 1. 打开 [最新 Release](https://github.com/yule1048596-art/math-harness/releases/latest)。
-2. 下载文件名类似 `Math-Harness-0.15.0-macOS-arm64.dmg` 的安装镜像。
+2. 下载文件名类似 `Math-Harness-0.16.0-macOS-arm64.dmg` 的安装镜像。
 3. 打开 DMG，把 `Math Harness.app` 拖入“应用程序”文件夹。
 4. 从“应用程序”中启动 Math Harness。
 
@@ -877,9 +877,13 @@ uv run --no-editable pytest
 uv run --no-editable ruff format --check .
 uv run --no-editable ruff check .
 
-# 检查层的变异测试门禁（约一分钟，发布前跑）
-# 捕获率置信下界不高于零、或误拒率超标的层，不该合入
+# 三条度量门禁（发布前跑）
+# 变异测试：捕获率置信下界不高于零、或误拒率超标的层不该合入
 uv run --no-editable math-harness-mutation --check
+# 跨领域检索：掉回纯词面水平说明结构那一路白接了；cross_family 掉说明被表面形状骗走
+uv run --no-editable math-harness-cross-eval --data-root /tmp/xeval --check
+# 方法归属：误标比漏标严重——标错了是学进去一个假的，以后还会被当依据
+uv run --no-editable math-harness-attribution --max-mislabel-rate 0.0
 
 # 原生 macOS 开发运行
 ./scripts/run_macos_app.sh
@@ -921,11 +925,15 @@ flowchart TB
 
 - 当前是 Beta。检查流水线覆盖各数学领域，但成熟度不一：渐进估计、极限和符号表达式
   这条路经过最多打磨，其余领域靠通用的实例化检验；
-- 抽断言目前是规则版，覆盖回答里 `左边 = 右边` 形式的行；模型直接产出结构化断言的
-  路径尚未接。抽不出来的回答仍然正常显示，只是不带可信度标注；
+- 抽断言目前是规则版，覆盖回答里带等式的行。手造二十条回答形态上覆盖 60%；抽不出来
+  的回答仍然正常显示，只是不带可信度标注。剩下的缺口都是「回答里没有等式」，要处理
+  得先解读题目要干什么，那是模型直出结构化断言那条路要做的事；
 - **抽错题的风险仍在**：系统可能验了一个你没问的命题。处理方式是把验过的断言列出来
   让它可见，而不是发送前拦一道确认；
-- 检索尚未按结论可信度加权。现在能产出方法卡的路径可信度是齐平的，没有可加权的差异；
+- 跨领域检索的实测水平：整体 Hit@1 `0.596`（v0.16 之前是 `0.000`——不是检索差，是知识
+  永远晋级不了、库里恒空）。分切片：训练里见过的形状 `0.706`，新形状 `0.562`，表面
+  相似但方法不同的 `0.500`，题面里没有可解析表达式的 `0.500`。语料是手工编写的
+  42+47 条，只能给方向，不能给统计显著性；
 - 形式化证明（`proof_verified`）只预留了档位，本版不产出；
 - 软记忆只覆盖用户画像、学习目标、讲解偏好、专题背景和手工备注，不保存数学事实或方法；
 - 普通聊天还没有流式输出，模型完成整条回复后才会显示；

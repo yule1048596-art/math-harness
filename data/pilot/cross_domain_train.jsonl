@@ -1,0 +1,42 @@
+{"domain": "微积分", "method_key": "product_rule", "problem": "求 x^2*sin(x) 的导数。", "solution": "按乘积法则拆成两项：\ndiff(x**2, x) = 2*x\ndiff(sin(x), x) = cos(x)\n所以 diff(x**2*sin(x), x) = 2*x*sin(x) + x**2*cos(x)", "tags": ["微积分", "求导"]}
+{"domain": "微积分", "method_key": "product_rule", "problem": "求 x*exp(x) 的导数。", "solution": "乘积法则，两个因子各求一次导：\ndiff(x, x) = 1\ndiff(exp(x), x) = exp(x)\n于是 diff(x*exp(x), x) = exp(x) + x*exp(x)", "tags": ["微积分", "求导"]}
+{"domain": "微积分", "method_key": "chain_rule", "problem": "求 sin(x^2) 的导数。", "solution": "先对内层求导：\ndiff(x**2, x) = 2*x\n再乘以外层导数，得 diff(sin(x**2), x) = 2*x*cos(x**2)", "tags": ["微积分", "复合函数"]}
+{"domain": "微积分", "method_key": "chain_rule", "problem": "求 exp(3*x) 的导数。", "solution": "内层 3x 的导数是 3，外层保持指数形式：\ndiff(exp(3*x), x) = 3*exp(3*x)", "tags": ["微积分", "复合函数"]}
+{"domain": "微积分", "method_key": "differentiate_to_verify", "problem": "验证 x*exp(x)-exp(x) 是 x*exp(x) 的一个原函数。", "solution": "把候选原函数求导回去比对被积函数：\ndiff(x*exp(x) - exp(x), x) = x*exp(x)\n两边一致，故候选正确。", "tags": ["微积分", "积分"]}
+{"domain": "微积分", "method_key": "differentiate_to_verify", "problem": "验证 x*log(x)-x 是 log(x) 的一个原函数。", "solution": "求导回去核对：\ndiff(x*log(x) - x, x) = log(x)\n与被积函数相同。", "tags": ["微积分", "积分"]}
+{"domain": "线性代数", "method_key": "characteristic_polynomial", "problem": "验证 3 是矩阵 Matrix([[2,1],[1,2]]) 的一个特征值。", "solution": "特征值满足 det(A-λI)=0，代入 λ=3：\ndet(Matrix([[2,1],[1,2]]) - 3*eye(2)) = 0\n行列式为零，故 3 是特征值。", "tags": ["线性代数", "特征值"]}
+{"domain": "线性代数", "method_key": "characteristic_polynomial", "problem": "验证 5 是矩阵 Matrix([[4,1],[1,4]]) 的一个特征值。", "solution": "同样代入特征方程：\ndet(Matrix([[4,1],[1,4]]) - 5*eye(2)) = 0", "tags": ["线性代数", "特征值"]}
+{"domain": "线性代数", "method_key": "cofactor_expansion", "problem": "求二阶行列式 Matrix([[1,2],[3,4]]) 的值。", "solution": "二阶行列式按主对角线之积减副对角线之积：\n1*4 - 2*3 = -2\n所以 det(Matrix([[1,2],[3,4]])) = -2", "tags": ["线性代数", "行列式"]}
+{"domain": "线性代数", "method_key": "cofactor_expansion", "problem": "求三阶行列式 Matrix([[2,0,1],[1,3,2],[0,1,4]]) 的值。", "solution": "按第一行展开，先算两个二阶子式：\n3*4 - 2*1 = 10\n1*1 - 3*0 = 1\n合并得 det(Matrix([[2,0,1],[1,3,2],[0,1,4]])) = 21", "tags": ["线性代数", "行列式"]}
+{"domain": "线性代数", "method_key": "trace_determinant_relation", "problem": "验证 Matrix([[2,1],[1,2]]) 的迹等于两个特征值之和。", "solution": "迹与行列式给出特征值的和与积：\ntrace(Matrix([[2,1],[1,2]])) = 4\ndet(Matrix([[2,1],[1,2]])) = 3\n对应特征值 1 和 3，和为 4，积为 3。", "tags": ["线性代数", "迹"]}
+{"domain": "组合数学", "method_key": "binomial_theorem", "problem": "求 Sum(binomial(n,k),(k,0,n)) 的闭式。", "solution": "这是二项式定理在 a=b=1 时的特例：\nSum(binomial(n,k),(k,0,n)) = 2**n", "tags": ["组合", "二项式"]}
+{"domain": "组合数学", "method_key": "binomial_theorem", "problem": "求 Sum(binomial(n,k)*2**k,(k,0,n)) 的闭式。", "solution": "取 a=1, b=2 代入二项式定理：\nSum(binomial(n,k)*2**k,(k,0,n)) = 3**n", "tags": ["组合", "二项式"]}
+{"domain": "组合数学", "method_key": "telescoping_sum", "problem": "求 Sum(1/(k*(k+1)),(k,1,n)) 的闭式。", "solution": "先裂项：每一项写成两个分式之差，求和后中间成对相消：\nSum(1/(k*(k+1)),(k,1,n)) = n/(n+1)", "tags": ["组合", "裂项"]}
+{"domain": "组合数学", "method_key": "telescoping_sum", "problem": "求 Sum(1/((k+1)*(k+2)),(k,0,n)) 的闭式。", "solution": "同样裂项相消，只是下标平移：\nSum(1/((k+1)*(k+2)),(k,0,n)) = (n+1)/(n+2)", "tags": ["组合", "裂项"]}
+{"domain": "组合数学", "method_key": "power_sum_formula", "problem": "求 Sum(k,(k,1,n)) 的闭式。", "solution": "等差数列求和公式：\nSum(k,(k,1,n)) = n*(n+1)/2", "tags": ["组合", "求和"]}
+{"domain": "组合数学", "method_key": "power_sum_formula", "problem": "求 Sum(k**2,(k,1,n)) 的闭式。", "solution": "平方和公式：\nSum(k**2,(k,1,n)) = n*(n+1)*(2*n+1)/6", "tags": ["组合", "求和"]}
+{"domain": "复变函数", "method_key": "euler_formula", "problem": "验证 exp(I*x) 等于 cos(x)+I*sin(x)。", "solution": "欧拉公式直接给出：\nexp(I*x) = cos(x) + I*sin(x)", "tags": ["复变", "欧拉公式"]}
+{"domain": "复变函数", "method_key": "euler_formula", "problem": "用指数形式表示 2*cos(x)。", "solution": "由欧拉公式，一对共轭指数相加消去虚部：\nexp(I*x) + exp(-I*x) = 2*cos(x)", "tags": ["复变", "欧拉公式"]}
+{"domain": "复变函数", "method_key": "modulus_conjugate", "problem": "验证 z*conjugate(z) 等于 z 的模的平方。", "solution": "把 z 写成实部虚部，交叉项抵消：\nz*conjugate(z) = re(z)**2 + im(z)**2", "tags": ["复变", "模长"]}
+{"domain": "复变函数", "method_key": "modulus_conjugate", "problem": "用 z 与其共轭表示 z 的实部。", "solution": "共轭相加虚部抵消：\nz + conjugate(z) = 2*re(z)", "tags": ["复变", "共轭"]}
+{"domain": "平面几何", "method_key": "complex_coordinates", "problem": "用复数坐标证明线段中点到两端距离相等。", "solution": "设两端为复数 a 和 b，中点 m = (a+b)/2。\n(a+b)/2 - a = (b-a)/2\n两段长度相同：Abs((a+b)/2 - a) - Abs((a+b)/2 - b) = 0", "tags": ["平面几何", "复数法"]}
+{"domain": "平面几何", "method_key": "complex_coordinates", "problem": "用复数坐标验证平行四边形对角线互相平分。", "solution": "设顶点为 a、b、c、d 且 a+c=b+d，两条对角线中点重合：\n(a+c)/2 - (b+d)/2 = 0", "tags": ["平面几何", "复数法"]}
+{"domain": "平面几何", "method_key": "collinearity_ratio", "problem": "用复数判据验证 a、b 与 a+2*(b-a) 三点共线。", "solution": "三点共线当且仅当比值为实数，虚部为零：\nim((a + 2*(b-a) - a)/(b-a)) = 0", "tags": ["平面几何", "共线"]}
+{"domain": "数论", "method_key": "gcd_lcm_product", "problem": "验证 12 与 18 的最大公约数与最小公倍数之积等于两数之积。", "solution": "分别算出两者再相乘：\nlcm(12, 18) = 36\ngcd(12, 18) * lcm(12, 18) = 216\n而 12 * 18 = 216", "tags": ["数论", "gcd"]}
+{"domain": "数论", "method_key": "gcd_lcm_product", "problem": "验证 8 与 20 的最大公约数与最小公倍数之积等于两数之积。", "solution": "同样的恒等关系：\ngcd(8, 20) * lcm(8, 20) = 160\n8 * 20 = 160", "tags": ["数论", "gcd"]}
+{"domain": "数论", "method_key": "modular_arithmetic", "problem": "求 7 除以 3 的余数与 12、18 的最大公约数之和。", "solution": "分别取模和求最大公约数：\nMod(7, 3) = 1\ngcd(12, 18) = 6\n相加得 Mod(7, 3) + gcd(12, 18) = 7", "tags": ["数论", "同余"]}
+{"domain": "数论", "method_key": "modular_arithmetic", "problem": "求 2^10 除以 7 的余数。", "solution": "先降幂再取模：\nMod(2**10, 7) = 2", "tags": ["数论", "同余"]}
+{"domain": "代数", "method_key": "difference_of_squares", "problem": "化简 (a+b)^2-(a-b)^2。", "solution": "两个平方分别展开：\n(a+b)**2 = a**2 + 2*a*b + b**2\n(a-b)**2 = a**2 - 2*a*b + b**2\n相减得 (a+b)**2 - (a-b)**2 = 4*a*b", "tags": ["代数", "恒等式"]}
+{"domain": "代数", "method_key": "difference_of_squares", "problem": "化简 (x+3)^2-(x-3)^2。", "solution": "同一个平方差结构，系数不同：\n(x+3)**2 - (x-3)**2 = 12*x", "tags": ["代数", "恒等式"]}
+{"domain": "代数", "method_key": "factor_cubic_difference", "problem": "验证 (a-b)*(a^2+a*b+b^2) 等于 a^3-b^3。", "solution": "逐项展开再合并：\na*(a**2 + a*b + b**2) = a**3 + a**2*b + a*b**2\nb*(a**2 + a*b + b**2) = a**2*b + a*b**2 + b**3\n相减得 (a-b)*(a**2 + a*b + b**2) = a**3 - b**3", "tags": ["代数", "因式分解"]}
+{"domain": "代数", "method_key": "factor_cubic_difference", "problem": "验证 (a+b)*(a^2-a*b+b^2) 等于 a^3+b^3。", "solution": "立方和的对应分解：\n(a+b)*(a**2 - a*b + b**2) = a**3 + b**3", "tags": ["代数", "因式分解"]}
+{"domain": "竞赛代数", "method_key": "vieta_formulas", "problem": "已知二次式的两根为 2 和 3，写出它的展开式。", "solution": "由韦达定理，根之和为系数的相反数，根之积为常数项：\n2 + 3 = 5\n2 * 3 = 6\n所以 (x-2)*(x-3) = x**2 - 5*x + 6", "tags": ["竞赛", "韦达定理"]}
+{"domain": "竞赛代数", "method_key": "vieta_formulas", "problem": "已知二次式的两根为 1 和 4，写出它的展开式。", "solution": "两根和为 5，积为 4：\n(x-1)*(x-4) = x**2 - 5*x + 4", "tags": ["竞赛", "韦达定理"]}
+{"domain": "三角", "method_key": "pythagorean_identity", "problem": "化简 sin(x)^2+cos(x)^2。", "solution": "毕达哥拉斯恒等式：\nsin(x)**2 + cos(x)**2 = 1", "tags": ["三角", "恒等式"]}
+{"domain": "三角", "method_key": "pythagorean_identity", "problem": "化简 cosh(x)^2-sinh(x)^2。", "solution": "双曲版本的同一恒等式：\ncosh(x)**2 - sinh(x)**2 = 1", "tags": ["三角", "双曲"]}
+{"domain": "三角", "method_key": "double_angle", "problem": "用 sin(x) 与 cos(x) 表示 sin(2*x)。", "solution": "倍角公式：\nsin(2*x) = 2*sin(x)*cos(x)", "tags": ["三角", "倍角"]}
+{"domain": "三角", "method_key": "double_angle", "problem": "用 sin(x) 表示 cos(2*x)。", "solution": "倍角公式的另一形式：\ncos(2*x) = 1 - 2*sin(x)**2", "tags": ["三角", "倍角"]}
+{"domain": "解析几何", "method_key": "expand_circle_equation", "problem": "把圆方程 (x-h)^2+(y-k)^2 展开成一般式。", "solution": "两个平方分别展开后合并：\n(x-h)**2 = x**2 - 2*h*x + h**2\n(y-k)**2 = y**2 - 2*k*y + k**2\n得 (x-h)**2 + (y-k)**2 = x**2 + y**2 - 2*h*x - 2*k*y + h**2 + k**2", "tags": ["解析几何", "圆"]}
+{"domain": "解析几何", "method_key": "expand_circle_equation", "problem": "把 (x-1)^2+(y-2)^2 展开成一般式。", "solution": "同样的展开，代入具体圆心：\n(x-1)**2 + (y-2)**2 = x**2 + y**2 - 2*x - 4*y + 5", "tags": ["解析几何", "圆"]}
+{"domain": "离散数学", "method_key": "logical_equivalence", "problem": "验证德摩根律 Not(And(p,q)) 等价于 Or(Not(p),Not(q))。", "solution": "遍历两个命题变元的四种真值组合，两边真值表相同：\nEquivalent(Not(And(p, q)), Or(Not(p), Not(q)))", "tags": ["离散", "逻辑"]}
+{"domain": "离散数学", "method_key": "logical_equivalence", "problem": "验证 Not(Or(p,q)) 等价于 And(Not(p),Not(q))。", "solution": "德摩根律的对偶形式，同样用真值表验证：\nEquivalent(Not(Or(p, q)), And(Not(p), Not(q)))", "tags": ["离散", "逻辑"]}

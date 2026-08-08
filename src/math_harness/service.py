@@ -161,7 +161,11 @@ from math_harness.solving import (
     build_solution_generator_from_resolved,
 )
 from math_harness.storage import WorkspaceManager, WorkspaceStore
-from math_harness.structure import extract_features
+from math_harness.structure import (
+    StructuralFeatures,
+    extract_features,
+    features_from_text,
+)
 from math_harness.target_drafting import (
     TargetDrafterProtocol,
     build_target_drafter_from_env,
@@ -972,6 +976,79 @@ class MathHarnessService:
             memory_job=memory_job,
         )
 
+    #: 允许晋级的结论档位。
+    #
+    # 判据是「**有程序**查过」，不是「有人说对」。这四档都来自一段代码给出的结论：
+    # 符号化简、随机实例化、独立引擎重算。`peer_reviewed` 不在里面——另一个模型同意
+    # 仍然只是意见，而晋级意味着以后会被检索出来当依据用。
+    _PROMOTABLE_CONCLUSIONS = frozenset(
+        {
+            ConclusionConfidence.PROOF_VERIFIED,
+            ConclusionConfidence.VERIFIED,
+            ConclusionConfidence.NUMERICALLY_CHECKED,
+            ConclusionConfidence.CROSS_CHECKED,
+        }
+    )
+
+    @staticmethod
+    def _signature_features(
+        problem: str, payload: MathPayload | None
+    ) -> StructuralFeatures:
+        """方法卡签名用的结构特征。
+
+        签名描述「这个方法适用于什么形状的题」，所以取的是**题面**结构——检索时手里
+        只有提问，两边必须是同一种东西。
+
+        没有渐进目标的例题以前拿到的是空签名，于是它们的方法卡在结构检索里完全不可见：
+        库里有卡，但结构那一路永远打不中。
+        """
+
+        if payload is not None:
+            return extract_features(payload)
+        return features_from_text(problem)
+
+    def _verify_for_ingestion(self, request: ExampleCreate) -> VerificationReport:
+        """入库时取一次验证结论。
+
+        有渐进目标的走原来的验证器，逐字不变。
+
+        没有目标的走检查流水线。以前这条路只会得到「未提供结构化数学表达式」——手工
+        录入和批量导入的跨领域知识因此永远停在待复核，和聊天路径 v0.15 之前的处境
+        一模一样。检查流水线本来就不认领域，没有理由只给聊天路径用。
+        """
+
+        if request.math_payload is not None:
+            return self.verifier.verify(request.math_payload)
+
+        assessment, _ = self._check_assistant_answer(request.problem, request.solution)
+        if assessment is None:
+            return self.verifier.verify(None)
+        return self._report_from(assessment)
+
+    def _verification_for_promotion(
+        self, example: ProblemExample
+    ) -> VerificationReport:
+        """晋级前重新取一次验证结论。
+
+        有渐进目标的走原来的验证器，逐字不变——那条路被大量测试覆盖着。
+
+        没有目标的走已经存过的双轴结论。以前这里无条件调 `verify(example.math_payload)`，
+        聊天路径的 `math_payload` 恒为 `None`，于是**一条已经被 SymPy 符号验证过的解答
+        照样晋级失败**：门禁把 v0.15 已经得出的结论整个丢掉，重新用只认渐进形状的验证器
+        再验一遍。结果是跨领域的知识永远停在待复核，永远进不了检索。
+        """
+
+        if example.math_payload is not None:
+            return self.verifier.verify(example.math_payload)
+
+        stored = example.verification
+        if (
+            stored.conclusion in self._PROMOTABLE_CONCLUSIONS
+            and stored.process_confidence is not ProcessConfidence.STEP_FAILED
+        ):
+            return stored.model_copy(update={"status": VerificationStatus.VERIFIED})
+        return stored.model_copy(update={"status": VerificationStatus.NEEDS_REVIEW})
+
     def _capture_chat_knowledge(
         self,
         workspace_id: str,
@@ -1373,9 +1450,7 @@ class MathHarnessService:
         verification_override: VerificationReport | None = None,
         extractor: MethodExtractorProtocol | None = None,
     ) -> _PreparedIngestion:
-        verification = verification_override or self.verifier.verify(
-            request.math_payload
-        )
+        verification = verification_override or self._verify_for_ingestion(request)
         promotion_approved = (
             verification.status is VerificationStatus.VERIFIED and request.reviewed
         )
@@ -1445,7 +1520,9 @@ class MathHarnessService:
             # 签名会直接影响后续检索，因此它和方法晋级共用同一条信任边界：
             # 数学上可验证但尚未经人工复核的例子，也不能改写已晋级知识。
             features = (
-                extract_features(request.math_payload) if promotion_approved else None
+                self._signature_features(request.problem, request.math_payload)
+                if promotion_approved
+                else None
             )
             for draft in extraction_result.methods:
                 learned_methods.append(
@@ -1455,6 +1532,7 @@ class MathHarnessService:
                         status=method_status,
                         verified=promotion_approved,
                         features=features,
+                        confidence=example.verification.conclusion,
                     )
                 )
 
@@ -1791,10 +1869,11 @@ class MathHarnessService:
                     "来源求解记录未完整通过独立数学验证，不能晋级这条例题。"
                 )
 
-        fresh_verification = self.verifier.verify(example.math_payload)
+        fresh_verification = self._verification_for_promotion(example)
         if fresh_verification.status is not VerificationStatus.VERIFIED:
             raise InvalidKnowledgeState(
-                "只有独立数学验证通过的例题才能晋级；请先补充可验证数学目标。"
+                "只有独立数学验证通过的例题才能晋级；请先补充可验证数学目标，"
+                "或让检查流水线给出程序级证据。"
             )
 
         drafts = store.get_example_method_drafts(example.id)
@@ -1818,7 +1897,7 @@ class MathHarnessService:
             drafts = extraction_result.methods
             replacement_extraction = extraction_result.trace
 
-        features = extract_features(example.math_payload)
+        features = self._signature_features(example.problem, example.math_payload)
         learned_methods = [
             store.upsert_method(
                 draft=draft,
@@ -1827,6 +1906,7 @@ class MathHarnessService:
                 verified=True,
                 features=features,
                 idempotent_evidence=True,
+                confidence=fresh_verification.conclusion,
             )
             for draft in drafts
         ]
@@ -1931,12 +2011,18 @@ class MathHarnessService:
         methods = self.workspaces.store(workspace_id).list_methods(
             include_pending=False
         )
+        # 没有渐进目标时从提问文本抽结构。以前这里直接给 `None`——聊天路径上永远
+        # 没有 `math_target`，于是结构检索一次都不会启动，只剩词面和标签。
+        features = (
+            extract_features(math_target) if math_target else features_from_text(query)
+        )
         return self.retriever.search(
             methods,
             query,
             tags=tags,
             top_k=top_k,
-            features=extract_features(math_target) if math_target else None,
+            features=features if not features.is_empty else None,
+            inferred_structure=math_target is None,
         )
 
     def build_solve_plan(

@@ -25,7 +25,46 @@ from math_harness.models import ExtractionStatus
 _EQUALS = re.compile(r"(?<![<>=!])={1,2}(?!=)")
 
 #: 行首的编号、项目符号和常见前缀。
-_LINE_NOISE = re.compile(r"^\s*(?:[（(]?\d+[)）.、]|[-*·]|第\s*\d+\s*步[:：]?)\s*")
+#
+# 中文数字要一起认：模型写「第一步：」比写「第 1 步：」常见得多，只认阿拉伯数字的话
+# 这一整类步骤行都会连着前缀一起送去解析，然后失败。
+_LINE_NOISE = re.compile(
+    r"^\s*(?:[（(]?[\d一二三四五六七八九十]+[)）.、]"
+    r"|[-*·]"
+    r"|第\s*[\d一二三四五六七八九十]+\s*步[:：]?"
+    r"|结论[:：]|答[:：]|解[:：])\s*"
+)
+
+#: `\frac{a}{b}` → `(a)/(b)`。分数是数学写作里最常见的 LaTeX 结构，不认就整行报废。
+_FRAC = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
+#: `\sqrt{x}` → `sqrt(x)`。
+_SQRT = re.compile(r"\\sqrt\s*\{([^{}]*)\}")
+#: 剩下的 LaTeX 控制序列，比如 `\cdot`、`\left`、`\right`。
+_LATEX_COMMANDS = {
+    r"\cdot": "*", r"\times": "*", r"\div": "/",
+    r"\left": "", r"\right": "", r"\,": " ", r"\;": " ", r"\!": "",
+    r"\pi": "pi", r"\infty": "oo",
+}  # fmt: skip
+
+
+def expand_latex(text: str) -> str:
+    """把常见的 LaTeX 结构换成安全解析器认得的写法。
+
+    只处理**无歧义**的那几个。花括号嵌套的分数不递归展开——写复杂了宁可抽不出来，
+    也不要抽出一个和原式不同的东西。
+    """
+
+    expanded = text
+    for _ in range(3):  # 允许嵌套两层，够覆盖常见写法
+        replaced = _FRAC.sub(r"((\1)/(\2))", expanded)
+        replaced = _SQRT.sub(r"sqrt(\1)", replaced)
+        if replaced == expanded:
+            break
+        expanded = replaced
+    for command, replacement in _LATEX_COMMANDS.items():
+        expanded = expanded.replace(command, replacement)
+    return expanded
+
 
 #: LaTeX 的行内包裹与显示包裹。
 _LATEX_WRAPPERS = (
@@ -85,6 +124,88 @@ class ClaimDrafterProtocol(Protocol):
     def draft(self, problem: str, answer: str) -> ClaimDraft: ...
 
 
+#: 隐式乘法。`9x`、`25x^2`、`2(a+b)`、`(a+b)(a-b)` 是人写数学的常态，却都不是合法
+#: Python。**数字后面跟字母**和**右括号后面跟标识符或左括号**这两种是无歧义的；
+#: 反过来「字母后面跟数字」不能碰——`x2` 是一个变量名，不是 `x*2`。
+_IMPLICIT_AFTER_NUMBER = re.compile(r"(?<=\d)(?=[A-Za-z(])")
+_IMPLICIT_AFTER_PAREN = re.compile(r"(?<=\))(?=[A-Za-z0-9(])")
+
+
+#: 可能是「几个单字母变量连写」的标识符：纯字母、长度 2–3。
+_RUN_OF_LETTERS = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z]{2,3})(?![A-Za-z0-9_(])")
+
+
+def split_letter_runs(text: str) -> str:
+    """把 `ab` 拆成 `a*b`——但**只在能确认的时候**。
+
+    `4ab` 在数学里是 `4*a*b`，可 `ab` 在 Python 里是一个名字。不拆的话，一条正确
+    的解答会被判成有反例：实测 `(a+b)^2-(a-b)^2 = 4ab` 得到 `refuted`，反例里还带着
+    一个根本不存在的符号 `ab`。这是最难看的一种误拒——答案是对的，系统说它错了。
+
+    但拆错比不拆更糟：那等于换了一个命题去验，而且不会报错。所以判据很严——**每个
+    字母都必须在同一段文本里单独出现过**。`(a+b)^2-(a-b)^2 = 4ab` 里 `a` 和 `b`
+    都单独出现，拆；一个真的叫 `ab` 的变量不会有这个特征，不拆。
+    """
+
+    standalone = set(re.findall(r"(?<![A-Za-z0-9_])([A-Za-z])(?![A-Za-z0-9_])", text))
+    if not standalone:
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        run = match.group(1)
+        if run in SafeMathParser.FUNCTIONS or run in SafeMathParser.CONSTANTS:
+            return run
+        if not all(letter in standalone for letter in run):
+            return run
+        return "*".join(run)
+
+    return _RUN_OF_LETTERS.sub(replace, text)
+
+
+def insert_implicit_multiplication(text: str) -> str:
+    """把 `9x` 这类写法补成 `9*x`。
+
+    不补的话，人写的题面几乎全军覆没：实测真实评测集的题面里，`sqrt(x^2+9x)-x`、
+    `log(1+7x)`、`sqrt(25x^2+7x)` 一条都解析不出来。
+    """
+
+    # 先避开科学计数法：`1e5` 里的 `e` 不是符号。
+    protected = re.sub(r"(?<=\d)[eE](?=[-+]?\d)", "\0", text)
+    inserted = _IMPLICIT_AFTER_PAREN.sub(
+        "*", _IMPLICIT_AFTER_NUMBER.sub("*", protected)
+    )
+    return inserted.replace("\0", "e")
+
+
+#: 人写数学的函数名 → SymPy 的标识符。
+#
+# 这是**记号习惯**的差异，不是解析能力的差异：`Γ`/`Gamma` 是数学里写伽马函数的方式，
+# `gamma` 是 SymPy 里的名字；`ln` 是中文数学写自然对数的方式，SymPy 只有 `log`。
+# 不映射的话，实测评测集里三道 Gamma 题的题面一条都解析不出来。
+#
+# 只在**函数调用位置**替换（后面必须跟左括号），免得改掉同名的变量。
+# 只放无歧义的。刻意不放的两个：
+#   `C(n,k)` —— 组合数是这么写，但解析几何里 `C(1,2)` 是点 C 的坐标。两种都解析得
+#     成功，猜错了不会报错，只会安静地换成另一个表达式。
+#   `lg` —— 常用对数，映射到 SymPy 的自然对数 `log` 数学上就是错的。
+_NOTATION_ALIASES = {
+    "Γ": "gamma", "Gamma": "gamma",
+    "ln": "log",
+    "arcsin": "asin", "arccos": "acos", "arctan": "atan",
+    "abs": "Abs", "Re": "re", "Im": "im",
+}  # fmt: skip
+
+_ALIAS_PATTERN = re.compile(
+    r"\b("
+    + "|".join(sorted(map(re.escape, _NOTATION_ALIASES), key=len, reverse=True))
+    + r")\s*\("
+)
+
+
+def apply_notation_aliases(text: str) -> str:
+    return _ALIAS_PATTERN.sub(lambda m: f"{_NOTATION_ALIASES[m.group(1)]}(", text)
+
+
 def normalize_math_text(text: str) -> str:
     """把常见的书写形式收敛成安全解析器认得的写法。
 
@@ -92,13 +213,17 @@ def normalize_math_text(text: str) -> str:
     `x^2` 悄悄解析成完全不同的东西，所以必须换掉而不是放行。
     """
 
-    cleaned = text
+    cleaned = expand_latex(text)
     for wrapper, replacement in _LATEX_WRAPPERS:
         cleaned = cleaned.replace(wrapper, replacement)
     cleaned = cleaned.replace("^", "**")
     cleaned = cleaned.replace("×", "*").replace("÷", "/")
     cleaned = cleaned.replace("−", "-").replace("–", "-")
-    return cleaned.strip()
+    # 恒等号在数学写作里就是「两边处处相等」，正是断言要表达的东西。
+    cleaned = cleaned.replace("≡", "=")
+    aliased = apply_notation_aliases(cleaned.strip())
+    # 先补数字与括号处的隐式乘，再拆字母连写：`4ab` 要先变成 `4*ab` 才好识别。
+    return split_letter_runs(insert_implicit_multiplication(aliased))
 
 
 def infer_bindings(texts: list[str], parser: SafeMathParser) -> list[Binding]:
@@ -159,11 +284,16 @@ def extract_claims(text: str, parser: SafeMathParser | None = None) -> list[Clai
     definitions: dict[sp.Symbol, sp.Expr] = {}
     for raw_line in text.splitlines():
         line = _LINE_NOISE.sub("", raw_line).strip()
-        if not line or "=" not in line:
+        if not line:
             continue
         # 去掉行尾的解释性文字：中文全角标点后面通常是说明，不是式子的一部分。
         line = re.split(r"[，。；、]", line)[0]
-        split = _split_equation(normalize_math_text(line))
+        # **先规范化再判断有没有等号**：`≡` 要先换成 `=` 才看得见。反过来的话，
+        # 恒等号写法的整行会在这里被静默丢掉。
+        normalized = normalize_math_text(line)
+        if "=" not in normalized:
+            continue
+        split = _split_equation(normalized)
         if split is None:
             continue
         left, right = split
@@ -229,6 +359,52 @@ def _substitute(
         # 代入后反而解析不了：返回 None，调用方保留代入前的原样，不把这条断言丢掉。
         return None
     return new_left, new_right, new_bindings
+
+
+#: 一段可能是数学的连续字符。中文、标点和引号都不在里面，自然成为切分边界。
+_MATH_RUN = re.compile(r"[A-Za-z0-9_^*/+\-()\[\]、., ]{2,}")
+
+#: 表达式里至少要有一处结构，否则它只是个名字或一个数字。
+#: 光秃秃的 `x` 或 `12` 当签名用没有任何区分度，反而会把所有题连成一片。
+_HAS_STRUCTURE = re.compile(r"[-+*/^]|\w\s*\(")
+
+
+def extract_expressions(
+    text: str,
+    parser: SafeMathParser | None = None,
+    limit: int = 12,
+) -> list[str]:
+    """从自然语言里挑出能安全解析的数学表达式。
+
+    抽断言要求一行里有等号，**提问里通常没有**——「求 sqrt(x^2+9x)-x 在 x→∞ 的渐进
+    展开」是个祈使句，不是等式。但结构检索要的只是算子树，不需要等式。所以这里比
+    `extract_claims` 宽一档：任何能安全解析、且带结构的片段都算数。
+
+    准入条件仍然只有一条：**能过安全解析器**。
+    """
+
+    safe_parser = parser or SafeMathParser()
+    found: list[str] = []
+    seen: set[str] = set()
+    for match in _MATH_RUN.finditer(text):
+        candidate = _strip_prose(normalize_math_text(match.group(0)))
+        # 顿号是中文的并列符号，不是数学的一部分。
+        candidate = candidate.replace("、", " ").strip(" ,.")
+        if not candidate or not _HAS_STRUCTURE.search(candidate):
+            continue
+        if candidate in seen:
+            continue
+        bindings = infer_bindings([candidate], safe_parser)
+        table = {binding.symbol: sp.Symbol(binding.symbol) for binding in bindings}
+        try:
+            safe_parser.parse(candidate, table)
+        except (UnsafeExpression, ValueError, TypeError, SyntaxError):
+            continue
+        seen.add(candidate)
+        found.append(candidate)
+        if len(found) >= limit:
+            break
+    return found
 
 
 class RuleBasedClaimDrafter:

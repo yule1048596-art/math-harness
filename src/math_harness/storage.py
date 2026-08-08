@@ -661,6 +661,9 @@ class WorkspaceStore:
             self._ensure_column(
                 connection, "conversation_messages", "checked_claims_json", "TEXT"
             )
+            # v0.16 方法卡的来源可信度。旧卡这一列为空，按 `verified` 折算——
+            # 它们本来就是走「验证通过 + 人工复核」那条路进来的。
+            self._ensure_column(connection, "methods", "conclusion_confidence", "TEXT")
             self._ensure_column(connection, "examples", "source_attempt_id", "TEXT")
             self._ensure_column(connection, "examples", "reviewed_at", "TEXT")
             self._ensure_column(
@@ -2457,6 +2460,7 @@ class WorkspaceStore:
         features: StructuralFeatures | None = None,
         *,
         idempotent_evidence: bool = False,
+        confidence: ConclusionConfidence | None = None,
     ) -> MethodCard:
         """Create or evolve a method without letting unreviewed data cross trust levels.
 
@@ -2514,6 +2518,14 @@ class WorkspaceStore:
                         now.isoformat(),
                     ),
                 )
+                if verified and confidence is not None:
+                    connection.execute(
+                        """
+                        UPDATE methods SET conclusion_confidence = ?
+                        WHERE id = ? AND workspace_id = ?
+                        """,
+                        (confidence.value, method_id, self.workspace_id),
+                    )
                 event_type = "method_created"
                 event_extra: dict[str, object] = {}
                 event_status = initial_status
@@ -2740,6 +2752,8 @@ class WorkspaceStore:
                     event_status = next_status
 
             if not ignored:
+                if verified and confidence is not None:
+                    self._raise_method_confidence(connection, method_id, confidence)
                 connection.execute(
                     """
                     INSERT OR IGNORE INTO method_examples
@@ -2760,6 +2774,38 @@ class WorkspaceStore:
                 )
 
         return self.get_method(method_id)
+
+    def _raise_method_confidence(
+        self,
+        connection: sqlite3.Connection,
+        method_id: str,
+        confidence: ConclusionConfidence,
+    ) -> None:
+        """把方法卡的可信度提到新证据那一档，**只升不降**。
+
+        一条符号验证过的例题确实给这个方法提供了那个级别的依据；后来又加进几条只过了
+        数值检验的，不该把它拉低。晋级门禁已经保证每条贡献例题都被程序查过，所以这里
+        的取值范围本来就窄。
+        """
+
+        from math_harness.checks.confidence import conclusion_rank
+
+        row = connection.execute(
+            "SELECT conclusion_confidence FROM methods WHERE id = ? AND workspace_id = ?",
+            (method_id, self.workspace_id),
+        ).fetchone()
+        current = row["conclusion_confidence"] if row else None
+        if current and conclusion_rank(ConclusionConfidence(current)) >= (
+            conclusion_rank(confidence)
+        ):
+            return
+        connection.execute(
+            """
+            UPDATE methods SET conclusion_confidence = ?
+            WHERE id = ? AND workspace_id = ?
+            """,
+            (confidence.value, method_id, self.workspace_id),
+        )
 
     def update_method_status(
         self, method_id: str, status: KnowledgeStatus
@@ -3637,6 +3683,11 @@ class WorkspaceStore:
             status=KnowledgeStatus(row["status"]),
             version=row["version"],
             signature=json.loads(row["signature_json"] or "{}"),
+            conclusion_confidence=(
+                ConclusionConfidence(value)
+                if (value := _optional_column(row, "conclusion_confidence"))
+                else None
+            ),
             success_count=row["success_count"],
             failure_count=row["failure_count"],
             example_ids=example_ids,

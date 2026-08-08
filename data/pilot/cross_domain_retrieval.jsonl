@@ -1,0 +1,47 @@
+{"id": "ctl-product-rule-1", "slice": "control", "expected_method_keys": ["product_rule"], "problem": "求 x^3*cos(x) 的导数。", "rationale": "两个含变量的因子相乘。", "tags": ["微积分", "求导"]}
+{"id": "nov-chain-rule-1", "slice": "novel_shape", "expected_method_keys": ["chain_rule"], "problem": "求 sin(3*x) 的导数。", "rationale": "复合函数，内层线性。", "tags": ["微积分", "复合函数"]}
+{"id": "ctl-binomial-theorem-2", "slice": "control", "expected_method_keys": ["binomial_theorem"], "problem": "求 Sum(binomial(n,k)*5**k,(k,0,n)) 的闭式。", "rationale": "二项式定理取 b=5。", "tags": ["组合", "二项式"]}
+{"id": "ctl-difference-of-squares-3", "slice": "control", "expected_method_keys": ["difference_of_squares"], "problem": "化简 (y+c)^2-(y-c)^2。", "rationale": "平方差，换了字母。", "tags": ["代数", "恒等式"]}
+{"id": "ctl-double-angle-4", "slice": "control", "expected_method_keys": ["double_angle"], "problem": "用 cos(x) 表示 cos(2*x)。", "rationale": "倍角公式另一形式。", "tags": ["三角", "倍角"]}
+{"id": "ctl-telescoping-sum-5", "slice": "control", "expected_method_keys": ["telescoping_sum"], "problem": "求 Sum(1/((k+2)*(k+3)),(k,0,n)) 的闭式。", "rationale": "裂项相消，下标平移。", "tags": ["组合", "裂项"]}
+{"id": "ctl-difference-of-squares-6", "slice": "control", "expected_method_keys": ["difference_of_squares"], "problem": "化简 (a+b)^3-(a-b)^3。", "rationale": "两立方之差，同为对称展开相消。", "tags": ["代数", "恒等式"]}
+{"id": "ctl-modular-arithmetic-7", "slice": "control", "expected_method_keys": ["modular_arithmetic"], "problem": "求 Mod(5**3, 4) 的值。", "rationale": "幂的同余。", "tags": ["数论", "同余"]}
+{"id": "ctl-telescoping-sum-8", "slice": "control", "expected_method_keys": ["telescoping_sum"], "problem": "求 Sum(1/(k*(k+3)),(k,1,n)) 的闭式。", "rationale": "裂项相消，间隔为 3。", "tags": ["组合", "裂项"]}
+{"id": "ctl-telescoping-sum-9", "slice": "control", "expected_method_keys": ["telescoping_sum"], "problem": "求 Sum(1/(k*(k+2)),(k,1,n)) 的闭式。", "rationale": "裂项相消，间隔为 2。", "tags": ["组合", "裂项"]}
+{"id": "ctl-binomial-theorem-10", "slice": "control", "expected_method_keys": ["binomial_theorem"], "problem": "求 Sum(binomial(n,k)*3**k,(k,0,n)) 的闭式。", "rationale": "二项式定理取 b=3。", "tags": ["组合", "二项式"]}
+{"id": "ctl-expand-circle-equation-11", "slice": "control", "expected_method_keys": ["expand_circle_equation"], "problem": "把 (x-4)^2+(y-1)^2 展开成一般式。", "rationale": "圆方程展开。", "tags": ["解析几何", "圆"]}
+{"id": "ctl-chain-rule-12", "slice": "control", "expected_method_keys": ["chain_rule"], "problem": "求 exp(2*x) 的导数。", "rationale": "指数复合线性内层。", "tags": ["微积分", "复合函数"]}
+{"id": "ctl-product-rule-13", "slice": "control", "expected_method_keys": ["product_rule"], "problem": "求 x^2*cos(x) 的导数。", "rationale": "两因子相乘。", "tags": ["微积分", "求导"]}
+{"id": "ctl-power-sum-formula-14", "slice": "control", "expected_method_keys": ["power_sum_formula"], "problem": "求 Sum(k**3,(k,1,n)) 的闭式。", "rationale": "三次幂和。", "tags": ["组合", "求和"]}
+{"id": "ctl-cofactor-expansion-15", "slice": "control", "expected_method_keys": ["cofactor_expansion"], "problem": "求三阶行列式 Matrix([[1,2,3],[4,5,6],[7,8,10]]) 的值。", "rationale": "稠密三阶矩阵。", "tags": ["线性代数", "行列式"]}
+{"id": "ctl-modular-arithmetic-16", "slice": "control", "expected_method_keys": ["modular_arithmetic"], "problem": "求 3^4 除以 5 的余数。", "rationale": "幂的同余。", "tags": ["数论", "同余"]}
+{"id": "ctl-collinearity-ratio-17", "slice": "control", "expected_method_keys": ["collinearity_ratio"], "problem": "用复数判据证明 a、b 与 a+3*(b-a) 三点共线。", "rationale": "共线判据，参数不同。", "tags": ["平面几何", "共线"]}
+{"id": "crs-cofactor-expansion-1", "slice": "cross_family", "expected_method_keys": ["cofactor_expansion"], "problem": "求二阶行列式 Matrix([[5,2],[1,3]]) 的值。", "rationale": "与特征值题共用裸 2x2 矩阵结构，靠词面区分。", "tags": ["线性代数", "行列式"]}
+{"id": "crs-characteristic-polynomial-2", "slice": "cross_family", "expected_method_keys": ["characteristic_polynomial"], "problem": "验证 4 是矩阵 Matrix([[3,1],[1,3]]) 的一个特征值。", "rationale": "同上，结构不足以区分。", "tags": ["线性代数", "特征值"]}
+{"id": "crs-characteristic-polynomial-3", "slice": "cross_family", "expected_method_keys": ["characteristic_polynomial"], "problem": "验证 2 是矩阵 Matrix([[1,1],[0,2]]) 的一个特征值。", "rationale": "非对称矩阵，结构仍是裸 2x2。", "tags": ["线性代数", "特征值"]}
+{"id": "crs-trace-determinant-relation-4", "slice": "cross_family", "expected_method_keys": ["trace_determinant_relation"], "problem": "求矩阵 Matrix([[4,2],[1,5]]) 的迹。", "rationale": "同一结构第三种问法。", "tags": ["线性代数", "迹"]}
+{"id": "crs-double-angle-5", "slice": "cross_family", "expected_method_keys": ["double_angle"], "problem": "化简 2*sin(x)*cos(x)。", "rationale": "与勾股恒等式共用 sin/cos 结构，要的是倍角逆用。", "tags": ["三角", "倍角"]}
+{"id": "crs-modulus-conjugate-6", "slice": "cross_family", "expected_method_keys": ["modulus_conjugate"], "problem": "求 Abs(3+4*I) 的值。", "rationale": "模长计算。", "tags": ["复变", "模长"]}
+{"id": "nov-chain-rule-2", "slice": "novel_shape", "expected_method_keys": ["chain_rule"], "problem": "求 log(x^2+1) 的导数。", "rationale": "对数套多项式。", "tags": ["微积分", "复合函数"]}
+{"id": "nov-factor-cubic-difference-3", "slice": "novel_shape", "expected_method_keys": ["factor_cubic_difference"], "problem": "验证 (2*x-y)*(4*x^2+2*x*y+y^2) 等于 8*x^3-y^3。", "rationale": "带系数的立方差。", "tags": ["代数", "因式分解"]}
+{"id": "nov-logical-equivalence-4", "slice": "novel_shape", "expected_method_keys": ["logical_equivalence"], "problem": "验证 Implies(p,q) 等价于 Or(Not(p),q)。", "rationale": "蕴含展开。", "tags": ["离散", "逻辑"]}
+{"id": "nov-differentiate-to-verify-5", "slice": "novel_shape", "expected_method_keys": ["differentiate_to_verify"], "problem": "验证 sin(x)-x*cos(x) 是 x*sin(x) 的一个原函数。", "rationale": "求导回去验证。", "tags": ["微积分", "积分"]}
+{"id": "nov-double-angle-6", "slice": "novel_shape", "expected_method_keys": ["double_angle"], "problem": "化简 cos(x)^2-sin(x)^2。", "rationale": "与双曲恒等式同形，方法却是倍角。", "tags": ["三角", "倍角"]}
+{"id": "nov-product-rule-7", "slice": "novel_shape", "expected_method_keys": ["product_rule"], "problem": "求 x*log(x) 的导数。", "rationale": "变量乘对数。", "tags": ["微积分", "求导"]}
+{"id": "nov-logical-equivalence-8", "slice": "novel_shape", "expected_method_keys": ["logical_equivalence"], "problem": "验证 Equivalent(And(p,Or(q,r)), Or(And(p,q),And(p,r)))。", "rationale": "分配律。", "tags": ["离散", "逻辑"]}
+{"id": "nov-product-rule-9", "slice": "novel_shape", "expected_method_keys": ["product_rule"], "problem": "求 exp(x)*sin(x) 的导数。", "rationale": "指数乘三角。", "tags": ["微积分", "求导"]}
+{"id": "nov-difference-of-squares-10", "slice": "novel_shape", "expected_method_keys": ["difference_of_squares"], "problem": "化简 (x+3)*(x-3)。", "rationale": "两个一次式之积。", "tags": ["代数", "恒等式"]}
+{"id": "nov-chain-rule-11", "slice": "novel_shape", "expected_method_keys": ["chain_rule"], "problem": "求 sqrt(x^2+1) 的导数。", "rationale": "根式复合。", "tags": ["微积分", "复合函数"]}
+{"id": "nov-logical-equivalence-12", "slice": "novel_shape", "expected_method_keys": ["logical_equivalence"], "problem": "验证 Not(Not(p)) 等价于 p。", "rationale": "双重否定。", "tags": ["离散", "逻辑"]}
+{"id": "nov-power-sum-formula-13", "slice": "novel_shape", "expected_method_keys": ["power_sum_formula"], "problem": "求 Sum(k*(k+1),(k,1,n)) 的闭式。", "rationale": "展开后化为幂和。", "tags": ["组合", "求和"]}
+{"id": "txt-complex-coordinates-1", "slice": "text_only", "expected_method_keys": ["complex_coordinates"], "problem": "用复数坐标证明三角形一边中点到该边两端距离相等。", "rationale": "纯文字叙述。", "tags": ["平面几何", "复数法"]}
+{"id": "txt-gcd-lcm-product-2", "slice": "text_only", "expected_method_keys": ["gcd_lcm_product"], "problem": "验证 15 与 25 的最大公约数与最小公倍数之积等于两数之积。", "rationale": "纯文字叙述。", "tags": ["数论", "gcd"]}
+{"id": "txt-complex-coordinates-3", "slice": "text_only", "expected_method_keys": ["complex_coordinates"], "problem": "用复数坐标证明平行四边形对角线互相平分的逆命题。", "rationale": "纯文字叙述。", "tags": ["平面几何", "复数法"]}
+{"id": "txt-vieta-formulas-4", "slice": "text_only", "expected_method_keys": ["vieta_formulas"], "problem": "已知一元二次方程的两根之和为 7、之积为 12，写出该方程。", "rationale": "纯文字叙述。", "tags": ["竞赛", "韦达定理"]}
+{"id": "txt-logical-equivalence-5", "slice": "text_only", "expected_method_keys": ["logical_equivalence"], "problem": "用真值表验证析取对合取的分配律。", "rationale": "纯文字叙述。", "tags": ["离散", "逻辑"]}
+{"id": "txt-modular-arithmetic-6", "slice": "text_only", "expected_method_keys": ["modular_arithmetic"], "problem": "说明为什么两个奇数之和一定是偶数。", "rationale": "纯文字叙述。", "tags": ["数论", "同余"]}
+{"id": "nov-logical-equivalence-14", "slice": "novel_shape", "expected_method_keys": ["logical_equivalence"], "problem": "验证 Equivalent(Implies(p,q), Implies(Not(q),Not(p)))。", "rationale": "逆否命题。", "tags": ["离散", "逻辑"]}
+{"id": "nov-chain-rule-15", "slice": "novel_shape", "expected_method_keys": ["chain_rule"], "problem": "求 exp(x^2) 的导数。", "rationale": "指数套平方。", "tags": ["微积分", "复合函数"]}
+{"id": "nov-modulus-conjugate-16", "slice": "novel_shape", "expected_method_keys": ["modulus_conjugate"], "problem": "验证 conjugate(z*w) 等于 conjugate(z)*conjugate(w)。", "rationale": "共轭的乘法性。", "tags": ["复变", "共轭"]}
+{"id": "txt-modular-arithmetic-7", "slice": "text_only", "expected_method_keys": ["modular_arithmetic"], "problem": "证明任意三个连续整数之积必被 6 整除。", "rationale": "纯文字叙述。", "tags": ["数论", "同余"]}
+{"id": "txt-complex-coordinates-8", "slice": "text_only", "expected_method_keys": ["complex_coordinates"], "problem": "用复数方法证明正三角形三顶点之和等于三倍中心。", "rationale": "纯文字叙述。", "tags": ["平面几何", "复数法"]}

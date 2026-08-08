@@ -252,7 +252,8 @@ def test_draft_edit_uses_revision_lock_and_keeps_rejected_draft_repairable(tmp_p
         ExampleDraftUpdate(
             expected_revision=2,
             problem=example.problem,
-            solution="修正为正确展开 1/2 - 1/(8*x)。",
+            # 解答要真的说明用了什么方法：方法归属只看解答，不再从题面里捡词。
+            solution="共轭有理化后修正为正确展开 1/2 - 1/(8*x)。",
             tags=example.tags,
             math_payload=MathPayload(
                 expression="sqrt(x**2 + x) - x",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from math_harness.checks.confidence import retrieval_weight
 from math_harness.classifier import infer_query_tags
 from math_harness.models import MethodCard, MethodMatch
 from math_harness.structure import (
@@ -23,6 +24,18 @@ def tokens(text: str) -> set[str]:
     return atomic | bigrams
 
 
+#: 从提问文本推断出的结构在打分里占的权重。
+#
+# 用户确认过的目标拿 0.45，推断出来的只拿这一档，因为它明显更弱：抽片段可能抓错东西，
+# 而且没有「主变量」可言（全部符号一视同仁），表示本身就更粗。当个**打平时的裁决者**
+# 是它该有的位置。
+#
+# 跨领域评测上扫过一遍：[0.02, 0.10] 这一整段结果完全相同（整体 0.596），0.12 起
+# cross_family 开始掉——被表面形状骗走。取平台中部而不是边缘，也不取扫描出来的最大值，
+# 47 道题上 0.596 与 0.553 只差两道，那点差别不足以支撑一个精确的选择。
+_INFERRED_STRUCTURE_WEIGHT = 0.08
+
+
 def jaccard(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
@@ -37,6 +50,7 @@ class MethodRetriever:
         tags: list[str] | None = None,
         top_k: int = 5,
         features: StructuralFeatures | None = None,
+        inferred_structure: bool = False,
     ) -> list[MethodMatch]:
         query_tokens = tokens(query)
         query_tags = {tag.lower() for tag in (tags or [])}
@@ -79,7 +93,21 @@ class MethodRetriever:
                 if use_structure
                 else 0.0
             )
-            if use_structure:
+            if use_structure and inferred_structure:
+                # 从提问文本猜出来的结构，权重要比用户确认过的目标低。
+                #
+                # 两个理由，都是实测出来的：抽片段可能抓错东西；而提问的词面本身携带
+                # 着结构给不出的信息——裸的 2x2 矩阵判不出是求行列式还是求特征值，
+                # 「行列式」「特征值」这几个字才是判据。按 0.45 的原权重，cross_family
+                # 从 0.500 掉到 0.333，正是被表面形状骗走。
+                score = min(
+                    1.0,
+                    structure_score * _INFERRED_STRUCTURE_WEIGHT
+                    + text_score * 0.30
+                    + tag_score * 0.35
+                    + history_score * 0.10,
+                )
+            elif use_structure:
                 score = min(
                     1.0,
                     structure_score * 0.45
@@ -103,6 +131,13 @@ class MethodRetriever:
                 reasons.append(f"已有 {method.success_count} 个验证通过的来源案例")
             if method.failure_count:
                 reasons.append(f"已有 {method.failure_count} 次失败反馈")
+
+            # 按来源可信度加权。
+            #
+            # 未验证的内容进了知识库就会被检索到——那是用户要的。但它不该盖过验证过的
+            # 内容：「越用越强」的前提是强的那部分排在前面。旧卡没有这个字段，按
+            # `verified` 折算（权重 1.0），所以既有排序一位不动。
+            score *= retrieval_weight(method.confidence)
 
             if score > 0:
                 matches.append(

@@ -34,6 +34,49 @@ class MethodTemplate:
         )
 
 
+#: 出现在方法名**之前**的否定与对比线索。
+#
+# 「不用泰勒展开也能做」「而不是做有理化」「相比泰勒展开，这里用变量倒换」——
+# 三句话都提到了一个方法，三句话都没有用它。
+_NEGATION_BEFORE = (
+    "不用", "不需要", "不必", "无需", "无须", "没有必要", "不宜",
+    "而不是", "而非", "不是", "不能", "不可", "避免",
+    "相比", "比起", "不同于", "区别于",
+)  # fmt: skip
+
+#: 出现在方法名**之后**的否定线索。「这题和斯特林公式无关」是最常见的一种。
+_NEGATION_AFTER = ("无关", "不相关", "没有用到", "用不上", "不适用", "并不适用")
+
+#: 往前、往后各看多少个字符。
+#
+# 中文里否定词离被否定的对象很近；窗口开大了会把上一句的否定误算到这一句头上。
+_WINDOW_BEFORE = 10
+_WINDOW_AFTER = 8
+
+
+def used_in(text: str, markers: tuple[str, ...]) -> bool:
+    """解答里是否**用了**带这些标记的方法。
+
+    单纯出现不算数：提到一个方法可能是为了说明不用它，或者为了和实际用的方法作对比。
+    实测这一类占了误标的一半以上。
+    """
+
+    lowered = text.lower()
+    for marker in markers:
+        needle = marker.lower()
+        start = lowered.find(needle)
+        while start >= 0:
+            before = lowered[max(0, start - _WINDOW_BEFORE) : start]
+            after = lowered[start + len(needle) :][:_WINDOW_AFTER]
+            negated = any(cue in before for cue in _NEGATION_BEFORE) or any(
+                cue in after for cue in _NEGATION_AFTER
+            )
+            if not negated:
+                return True
+            start = lowered.find(needle, start + 1)
+    return False
+
+
 METHOD_TEMPLATES = (
     MethodTemplate(
         key=MethodKind.RATIONALIZATION,
@@ -143,13 +186,16 @@ class MethodExtractor:
     def extract(
         self, problem: str, solution: str, hint: str | None = None
     ) -> MethodExtractionResult:
-        combined = "\n".join(
-            part for part in (problem, solution, hint or "") if part
-        ).lower()
+        # **只看解答。**
+        #
+        # 方法是在解答里做出来的，不是在提问里说出来的。以前题面和提示词一起参与匹配，
+        # 于是「用有理化方法求这个极限」配上一段求导的解答，会得到一张写着有理化的
+        # 方法卡——数学完全正确、`step_checked`，v0.15 的门禁一个都拦不住，因为它们
+        # 查的是数学，不查方法标签。
         drafts = [
             template.to_draft()
             for template in METHOD_TEMPLATES
-            if any(marker.lower() in combined for marker in template.markers)
+            if used_in(solution, template.markers)
         ]
         if not drafts:
             drafts = [
