@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, RLock, Thread
@@ -38,6 +38,7 @@ from math_harness.conversation import (
     ExtractiveConversationSummarizer,
     build_conversation_responder_from_env,
     build_conversation_responder_from_resolved,
+    stream_chat_generation,
 )
 from math_harness.dedup import find_merge_candidates
 from math_harness.errors import InvalidKnowledgeState
@@ -173,6 +174,23 @@ from math_harness.target_drafting import (
 )
 from math_harness.tools import build_mcp_client_from_env
 from math_harness.verifier import SolutionVerifier
+
+
+@dataclass(frozen=True)
+class _TurnSetup:
+    """一个回合准备好、还没生成回复时的状态。
+
+    同步与流式两条路走同样的准备和同样的收尾，差别只在正文是一次拿到还是逐段拿到。
+    拆出来是为了让这一点在代码里成立，而不是靠两份相似的实现各自保持一致。
+    """
+
+    store: WorkspaceStore
+    turn_id: str
+    user_message: ConversationMessage
+    context: ConversationContext
+    matches: list[MethodMatch]
+    kind: ConversationMessageKind
+    override: ProviderOverride | None
 
 
 @dataclass(frozen=True)
@@ -798,12 +816,18 @@ class MathHarnessService:
                 request,
             )
 
-    def _send_conversation_turn(
+    def _begin_turn(
         self,
         workspace_id: str,
         conversation_id: str,
         request: ConversationTurnRequest,
-    ) -> ConversationTurnResult:
+    ) -> _TurnSetup | ConversationTurnResult:
+        """准备一个回合：幂等重放、检索、上下文、落用户消息。
+
+        同步与流式两条路共用这一段。返回 `ConversationTurnResult` 表示这个 turn_id
+        已经完整答过了，直接把原结果给回去——重发不该再生成一次。
+        """
+
         store = self.workspaces.store(workspace_id)
         conversation = store.get_conversation(conversation_id)
         # 解析顺序：本次请求指定 > 这个对话记住的 > 全局设置。
@@ -869,6 +893,36 @@ class MathHarnessService:
                 kind,
                 request.message,
             )
+        return _TurnSetup(
+            store=store,
+            turn_id=turn_id,
+            user_message=user_message,
+            context=context,
+            matches=matches,
+            kind=kind,
+            override=effective_override,
+        )
+
+    def _finish_turn(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        request: ConversationTurnRequest,
+        setup: _TurnSetup,
+        generation: ChatGeneration | None = None,
+    ) -> ConversationTurnResult:
+        """回合的后半段：求解或聊天、检查、入库、落库、记忆任务。
+
+        `generation` 由流式路径传进来——正文已经吐给用户了，这里不能再生成一次。
+        """
+
+        store = setup.store
+        turn_id = setup.turn_id
+        user_message = setup.user_message
+        context = setup.context
+        matches = setup.matches
+        kind = setup.kind
+        effective_override = setup.override
 
         attempt: SolutionAttempt | None = None
         knowledge_draft: ProblemExample | None = None
@@ -898,12 +952,13 @@ class MathHarnessService:
             model = attempt.generation.model
             verification_status = attempt.verification.status
         else:
-            generation = self._generate_chat_response(
-                context,
-                request.message,
-                request.max_output_tokens,
-                override=effective_override,
-            )
+            if generation is None:
+                generation = self._generate_chat_response(
+                    context,
+                    request.message,
+                    request.max_output_tokens,
+                    override=effective_override,
+                )
             assistant_content = generation.content
             method_keys = [match.method.key for match in matches]
             provider = generation.provider
@@ -975,6 +1030,54 @@ class MathHarnessService:
             summary_updated=summary_updated,
             memory_job=memory_job,
         )
+
+    def _send_conversation_turn(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        request: ConversationTurnRequest,
+    ) -> ConversationTurnResult:
+        setup = self._begin_turn(workspace_id, conversation_id, request)
+        if isinstance(setup, ConversationTurnResult):
+            return setup
+        return self._finish_turn(workspace_id, conversation_id, request, setup)
+
+    def stream_conversation_turn(
+        self,
+        workspace_id: str,
+        conversation_id: str,
+        request: ConversationTurnRequest,
+    ) -> Generator[str, None, ConversationTurnResult]:
+        """逐段产出正文，结束时返回和同步路径完全一样的回合结果。
+
+        **检查、入库、落库全部在整条回复吐完之后才跑。** 可信度徽章不能一边流一边变
+        ——用户看到「先说对、又说错」比等一下要糟得多。而且检查本来就要看完整的推导：
+        逐步检查在只有半条推导时给出的判断没有意义。
+
+        指定了验算目标的回合不流式：那条路的正文是由求解器和验证器一起产出的，中间
+        没有可以逐字给出的东西。
+        """
+
+        with self._knowledge_lock:
+            setup = self._begin_turn(workspace_id, conversation_id, request)
+            if isinstance(setup, ConversationTurnResult):
+                # 这个 turn_id 已经完整答过了。重放不重新生成，把原文一次给回去。
+                if setup.assistant_message is not None:
+                    yield setup.assistant_message.content
+                return setup
+
+            generation: ChatGeneration | None = None
+            if request.math_target is None:
+                responder = self.resolve_conversation_responder(setup.override)
+                generation = yield from stream_chat_generation(
+                    responder,
+                    setup.context,
+                    request.message,
+                    request.max_output_tokens,
+                )
+            return self._finish_turn(
+                workspace_id, conversation_id, request, setup, generation
+            )
 
     #: 允许晋级的结论档位。
     #
