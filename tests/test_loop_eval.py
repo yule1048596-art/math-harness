@@ -114,3 +114,128 @@ def test_the_gate_passes_a_working_loop():
     )
 
     assert gate_failures(report) == []
+
+
+# --- 碎片化 -----------------------------------------------------------
+#
+# 方法键从 v0.17 起是生成式的，不再是封闭集合。计划里我把「把知识库切碎」标成了
+# 这一版的最高风险：碎掉之后每张卡的样本都太少，签名和反馈统计都失去意义。
+#
+# 实测没有碎——18 课得到 11 张，曲线先涨后平，有七课复用了已有的卡。原因是结构性的：
+# 变换词表有界于解析器的函数白名单，所以键会收敛而不是增殖。这一组守住这个结论。
+
+
+def test_the_gate_rejects_a_fragmenting_knowledge_base():
+    """每课都造一张新卡，就是碎了。"""
+
+    report = LoopReport(
+        lesson_count=18,
+        query_count=18,
+        captured=18,
+        promoted=18,
+        recalled=18,
+        method_cards=18,
+    )
+
+    assert gate_failures(report)
+
+
+def test_the_gate_accepts_the_measured_growth():
+    """实测 18 课 11 张，比值 0.611。"""
+
+    report = LoopReport(
+        lesson_count=18,
+        query_count=18,
+        captured=17,
+        promoted=17,
+        recalled=15,
+        method_cards=11,
+    )
+
+    assert gate_failures(report) == []
+
+
+def test_structural_keys_converge_rather_than_proliferate():
+    """同一个技法的不同形状要落到同一个键上——这正是它不碎的原因。"""
+
+    from math_harness.claim_drafting import RuleBasedClaimDrafter
+    from math_harness.method_identity import derive_method_key
+
+    drafter = RuleBasedClaimDrafter()
+    same_technique = [
+        "所以 diff(x^2*sin(x), x) = 2x*sin(x) + x^2*cos(x)",
+        "所以 diff(x^3*cos(x), x) = 3x^2*cos(x) - x^3*sin(x)",
+        "所以 diff(sin(x^2), x) = 2x*cos(x^2)",
+    ]
+
+    keys = {
+        derive_method_key(drafter.draft("", answer).steps) for answer in same_technique
+    }
+
+    assert keys == {"differentiate"}
+
+
+def test_different_techniques_get_different_keys():
+    """收敛不能收敛到一起去——那就退回通用兜底卡了。"""
+
+    from math_harness.claim_drafting import RuleBasedClaimDrafter
+    from math_harness.method_identity import derive_method_key
+
+    drafter = RuleBasedClaimDrafter()
+    distinct = [
+        "所以 diff(x^2*sin(x), x) = 2x*sin(x) + x^2*cos(x)",
+        "Sum(binomial(n,k),(k,0,n)) = 2**n",
+        "det(Matrix([[2,1],[1,2]]) - 3*eye(2)) = 0",
+        "exp(I*x) = cos(x) + I*sin(x)",
+        "z*conjugate(z) = re(z)**2 + im(z)**2",
+    ]
+
+    keys = [derive_method_key(drafter.draft("", answer).steps) for answer in distinct]
+
+    assert len(set(keys)) == len(keys), keys
+
+
+def test_a_card_accumulates_evidence_across_lessons(tmp_path):
+    """同一个键被教到第二次时要**并进同一张卡**，而不是新建一张。
+
+    这是签名和反馈统计有意义的前提：一张只有一个样本的卡，结构签名就是那一道题。
+    """
+
+    from math_harness.loop_eval import ScriptedResponder
+    from math_harness.models import (
+        ConversationCreate,
+        ConversationTurnRequest,
+        ExampleReviewDecision,
+        ExampleReviewRequest,
+        WorkspaceCreate,
+    )
+    from math_harness.service import MathHarnessService
+
+    answers = {
+        "求 x^2*sin(x) 的导数。": "所以 diff(x^2*sin(x), x) = 2x*sin(x) + x^2*cos(x)",
+        "求 x^3*cos(x) 的导数。": "所以 diff(x^3*cos(x), x) = 3x^2*cos(x) - x^3*sin(x)",
+    }
+    service = MathHarnessService(
+        tmp_path, conversation_responder=ScriptedResponder(answers)
+    )
+    workspace = service.create_workspace(WorkspaceCreate(name="合并"))
+    conversation = service.create_conversation(
+        workspace.id, ConversationCreate(title="教学")
+    )
+    for problem in answers:
+        draft = service.send_conversation_turn(
+            workspace.id, conversation.id, ConversationTurnRequest(message=problem)
+        ).knowledge_draft
+        service.review_example(
+            workspace.id,
+            draft.id,
+            ExampleReviewRequest(
+                decision=ExampleReviewDecision.APPROVE,
+                expected_revision=draft.revision,
+            ),
+        )
+
+    methods = service.list_methods(workspace.id)
+
+    assert len(methods) == 1
+    assert len(methods[0].example_ids) == 2

@@ -77,6 +77,21 @@ class LoopReport(BaseModel):
     def recall_rate(self) -> float:
         return round(self.recalled / self.query_count, 6) if self.query_count else 0.0
 
+    @property
+    def cards_per_lesson(self) -> float:
+        """教一课平均新增多少张方法卡。
+
+        方法键从 v0.17 起是**生成式**的，不再是封闭集合。它可能把知识库切碎——同一个
+        技法在不同形状下生成几个相近的键，之后每张卡的样本都太少，签名和反馈统计都
+        失去意义。这个比值接近 1 就是碎了；健康的形状是先涨后平。
+        """
+
+        return (
+            round(self.method_cards / self.lesson_count, 6)
+            if self.lesson_count
+            else 0.0
+        )
+
 
 class ScriptedResponder:
     """按剧本回答。
@@ -233,7 +248,10 @@ def format_report(report: LoopReport) -> str:
             f"零结果 {report.empty}"
         ),
         "",
-        f"闭环命中率 {report.recall_rate:.3f}",
+        (
+            f"闭环命中率 {report.recall_rate:.3f} · "
+            f"每课新增 {report.cards_per_lesson:.3f} 张卡"
+        ),
     ]
     if report.details:
         lines.append("")
@@ -253,6 +271,12 @@ MIN_RECALL_RATE = 0.60
 # 回归。但掉太多就说明知识根本进不了库，后面全是空的。
 MIN_CAPTURE_RATE = 0.85
 
+#: 每课新增卡数的上限。
+#
+# 实测 18 课得到 11 张，比值 0.611，曲线明显先涨后平（有七课没有新增，复用了已有的
+# 卡）。接近 1 就说明每课都在造新卡，知识库在碎。
+MAX_CARDS_PER_LESSON = 0.80
+
 
 def gate_failures(report: LoopReport) -> list[str]:
     failures: list[str] = []
@@ -262,6 +286,11 @@ def gate_failures(report: LoopReport) -> list[str]:
         failures.append(
             f"入库率 {report.capture_rate:.3f} < {MIN_CAPTURE_RATE:.3f}——"
             "知识进不了库，后面全是空的"
+        )
+    if report.cards_per_lesson > MAX_CARDS_PER_LESSON:
+        failures.append(
+            f"每课新增 {report.cards_per_lesson:.3f} 张卡 > "
+            f"{MAX_CARDS_PER_LESSON:.3f}——知识库在碎，每张卡的样本会少到没有意义"
         )
     return failures
 
