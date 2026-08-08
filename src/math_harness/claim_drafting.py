@@ -25,7 +25,46 @@ from math_harness.models import ExtractionStatus
 _EQUALS = re.compile(r"(?<![<>=!])={1,2}(?!=)")
 
 #: 行首的编号、项目符号和常见前缀。
-_LINE_NOISE = re.compile(r"^\s*(?:[（(]?\d+[)）.、]|[-*·]|第\s*\d+\s*步[:：]?)\s*")
+#
+# 中文数字要一起认：模型写「第一步：」比写「第 1 步：」常见得多，只认阿拉伯数字的话
+# 这一整类步骤行都会连着前缀一起送去解析，然后失败。
+_LINE_NOISE = re.compile(
+    r"^\s*(?:[（(]?[\d一二三四五六七八九十]+[)）.、]"
+    r"|[-*·]"
+    r"|第\s*[\d一二三四五六七八九十]+\s*步[:：]?"
+    r"|结论[:：]|答[:：]|解[:：])\s*"
+)
+
+#: `\frac{a}{b}` → `(a)/(b)`。分数是数学写作里最常见的 LaTeX 结构，不认就整行报废。
+_FRAC = re.compile(r"\\[dt]?frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
+#: `\sqrt{x}` → `sqrt(x)`。
+_SQRT = re.compile(r"\\sqrt\s*\{([^{}]*)\}")
+#: 剩下的 LaTeX 控制序列，比如 `\cdot`、`\left`、`\right`。
+_LATEX_COMMANDS = {
+    r"\cdot": "*", r"\times": "*", r"\div": "/",
+    r"\left": "", r"\right": "", r"\,": " ", r"\;": " ", r"\!": "",
+    r"\pi": "pi", r"\infty": "oo",
+}  # fmt: skip
+
+
+def expand_latex(text: str) -> str:
+    """把常见的 LaTeX 结构换成安全解析器认得的写法。
+
+    只处理**无歧义**的那几个。花括号嵌套的分数不递归展开——写复杂了宁可抽不出来，
+    也不要抽出一个和原式不同的东西。
+    """
+
+    expanded = text
+    for _ in range(3):  # 允许嵌套两层，够覆盖常见写法
+        replaced = _FRAC.sub(r"((\1)/(\2))", expanded)
+        replaced = _SQRT.sub(r"sqrt(\1)", replaced)
+        if replaced == expanded:
+            break
+        expanded = replaced
+    for command, replacement in _LATEX_COMMANDS.items():
+        expanded = expanded.replace(command, replacement)
+    return expanded
+
 
 #: LaTeX 的行内包裹与显示包裹。
 _LATEX_WRAPPERS = (
@@ -92,6 +131,37 @@ _IMPLICIT_AFTER_NUMBER = re.compile(r"(?<=\d)(?=[A-Za-z(])")
 _IMPLICIT_AFTER_PAREN = re.compile(r"(?<=\))(?=[A-Za-z0-9(])")
 
 
+#: 可能是「几个单字母变量连写」的标识符：纯字母、长度 2–3。
+_RUN_OF_LETTERS = re.compile(r"(?<![A-Za-z0-9_])([A-Za-z]{2,3})(?![A-Za-z0-9_(])")
+
+
+def split_letter_runs(text: str) -> str:
+    """把 `ab` 拆成 `a*b`——但**只在能确认的时候**。
+
+    `4ab` 在数学里是 `4*a*b`，可 `ab` 在 Python 里是一个名字。不拆的话，一条正确
+    的解答会被判成有反例：实测 `(a+b)^2-(a-b)^2 = 4ab` 得到 `refuted`，反例里还带着
+    一个根本不存在的符号 `ab`。这是最难看的一种误拒——答案是对的，系统说它错了。
+
+    但拆错比不拆更糟：那等于换了一个命题去验，而且不会报错。所以判据很严——**每个
+    字母都必须在同一段文本里单独出现过**。`(a+b)^2-(a-b)^2 = 4ab` 里 `a` 和 `b`
+    都单独出现，拆；一个真的叫 `ab` 的变量不会有这个特征，不拆。
+    """
+
+    standalone = set(re.findall(r"(?<![A-Za-z0-9_])([A-Za-z])(?![A-Za-z0-9_])", text))
+    if not standalone:
+        return text
+
+    def replace(match: re.Match[str]) -> str:
+        run = match.group(1)
+        if run in SafeMathParser.FUNCTIONS or run in SafeMathParser.CONSTANTS:
+            return run
+        if not all(letter in standalone for letter in run):
+            return run
+        return "*".join(run)
+
+    return _RUN_OF_LETTERS.sub(replace, text)
+
+
 def insert_implicit_multiplication(text: str) -> str:
     """把 `9x` 这类写法补成 `9*x`。
 
@@ -143,13 +213,17 @@ def normalize_math_text(text: str) -> str:
     `x^2` 悄悄解析成完全不同的东西，所以必须换掉而不是放行。
     """
 
-    cleaned = text
+    cleaned = expand_latex(text)
     for wrapper, replacement in _LATEX_WRAPPERS:
         cleaned = cleaned.replace(wrapper, replacement)
     cleaned = cleaned.replace("^", "**")
     cleaned = cleaned.replace("×", "*").replace("÷", "/")
     cleaned = cleaned.replace("−", "-").replace("–", "-")
-    return apply_notation_aliases(insert_implicit_multiplication(cleaned.strip()))
+    # 恒等号在数学写作里就是「两边处处相等」，正是断言要表达的东西。
+    cleaned = cleaned.replace("≡", "=")
+    aliased = apply_notation_aliases(cleaned.strip())
+    # 先补数字与括号处的隐式乘，再拆字母连写：`4ab` 要先变成 `4*ab` 才好识别。
+    return split_letter_runs(insert_implicit_multiplication(aliased))
 
 
 def infer_bindings(texts: list[str], parser: SafeMathParser) -> list[Binding]:
@@ -210,11 +284,16 @@ def extract_claims(text: str, parser: SafeMathParser | None = None) -> list[Clai
     definitions: dict[sp.Symbol, sp.Expr] = {}
     for raw_line in text.splitlines():
         line = _LINE_NOISE.sub("", raw_line).strip()
-        if not line or "=" not in line:
+        if not line:
             continue
         # 去掉行尾的解释性文字：中文全角标点后面通常是说明，不是式子的一部分。
         line = re.split(r"[，。；、]", line)[0]
-        split = _split_equation(normalize_math_text(line))
+        # **先规范化再判断有没有等号**：`≡` 要先换成 `=` 才看得见。反过来的话，
+        # 恒等号写法的整行会在这里被静默丢掉。
+        normalized = normalize_math_text(line)
+        if "=" not in normalized:
+            continue
+        split = _split_equation(normalized)
         if split is None:
             continue
         left, right = split
