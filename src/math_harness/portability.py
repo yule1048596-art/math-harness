@@ -180,6 +180,7 @@ _TABLE_COLUMNS = {
         "success_count",
         "failure_count",
         "signature_json",
+        "conclusion_confidence",
         "created_at",
         "updated_at",
     },

@@ -743,6 +743,20 @@ class MethodCard(BaseModel):
     failure_count: int = 0
     # 这张方法卡通常用在什么数学结构上，由它关联例子确定性累积而来。
     signature: dict[str, object] = Field(default_factory=dict)
+    #: 支撑这张卡的例题里**最强**的那一档结论可信度。
+    #
+    # 取最强而不是最弱：晋级门禁已经保证每一条贡献例题都被程序查过，所以这里的范围
+    # 本来就窄；一条符号验证过的例题确实给这个方法提供了那个级别的依据，后来又加进
+    # 几条只过了数值检验的，不该把它拉低。
+    #
+    # 为 None 表示这张卡是 v0.16 之前建的。旧卡走的是「验证通过 + 人工复核」那条路，
+    # 折算成 `verified` 名副其实。
+    conclusion_confidence: ConclusionConfidence | None = None
+
+    @property
+    def confidence(self) -> ConclusionConfidence:
+        return self.conclusion_confidence or ConclusionConfidence.VERIFIED
+
     example_ids: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

@@ -1532,6 +1532,7 @@ class MathHarnessService:
                         status=method_status,
                         verified=promotion_approved,
                         features=features,
+                        confidence=example.verification.conclusion,
                     )
                 )
 
@@ -1905,6 +1906,7 @@ class MathHarnessService:
                 verified=True,
                 features=features,
                 idempotent_evidence=True,
+                confidence=fresh_verification.conclusion,
             )
             for draft in drafts
         ]

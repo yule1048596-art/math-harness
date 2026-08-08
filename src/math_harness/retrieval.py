@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 
+from math_harness.checks.confidence import retrieval_weight
 from math_harness.classifier import infer_query_tags
 from math_harness.models import MethodCard, MethodMatch
 from math_harness.structure import (
@@ -130,6 +131,13 @@ class MethodRetriever:
                 reasons.append(f"已有 {method.success_count} 个验证通过的来源案例")
             if method.failure_count:
                 reasons.append(f"已有 {method.failure_count} 次失败反馈")
+
+            # 按来源可信度加权。
+            #
+            # 未验证的内容进了知识库就会被检索到——那是用户要的。但它不该盖过验证过的
+            # 内容：「越用越强」的前提是强的那部分排在前面。旧卡没有这个字段，按
+            # `verified` 折算（权重 1.0），所以既有排序一位不动。
+            score *= retrieval_weight(method.confidence)
 
             if score > 0:
                 matches.append(
