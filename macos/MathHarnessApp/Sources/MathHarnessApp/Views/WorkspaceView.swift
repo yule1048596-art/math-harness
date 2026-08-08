@@ -261,6 +261,10 @@ private struct ConversationTimeline: View {
                 .id(message.id)
             }
           }
+          if !model.streamingReply.isEmpty {
+            StreamingReplyRow(text: model.streamingReply)
+              .id("streaming-reply")
+          }
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 22)
@@ -271,6 +275,12 @@ private struct ConversationTimeline: View {
         if let id = model.messages.last?.id {
           withAnimation { proxy.scrollTo(id, anchor: .bottom) }
         }
+      }
+      .onChange(of: model.streamingReply) {
+        // 字在长，视图要跟着走，否则新内容一直落在屏幕外面。
+        // 这里**不加动画**：每来一段就跑一次动画会抖。
+        guard !model.streamingReply.isEmpty else { return }
+        proxy.scrollTo("streaming-reply", anchor: .bottom)
       }
       .onChange(of: model.selectedConversationID) {
         if let id = model.messages.last?.id {
@@ -474,6 +484,50 @@ private struct ConversationMessageRow: View {
     case .peerReviewed: .teal
     case .unchecked: .secondary
     case .refuted: .red
+    }
+  }
+}
+
+/// 正在流式到达的回复。
+///
+/// **刻意不带可信度徽章。** 检查要看完整的推导，逐步检查在只有半条推导时给出的判断
+/// 没有意义；徽章一边流一边变，用户会看到「先说对、又说错」。这里只说明它还没查。
+private struct StreamingReplyRow: View {
+  let text: String
+
+  var body: some View {
+    HStack(alignment: .top, spacing: 10) {
+      Image(systemName: "function")
+        .font(.headline)
+        .foregroundStyle(.tint)
+        .frame(width: 31, height: 31)
+        .background(.tint.opacity(0.10), in: Circle())
+
+      VStack(alignment: .leading, spacing: 10) {
+        HStack(spacing: 8) {
+          Text("Math Harness")
+            .font(.subheadline.weight(.semibold))
+          Label("正在回答……", systemImage: "ellipsis")
+            .font(.caption2.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(.quaternary, in: Capsule())
+          Spacer()
+        }
+
+        Text(text)
+          .textSelection(.enabled)
+          .lineSpacing(3)
+
+        Text("回答完成后会自动检查并标注可信度。")
+          .font(.caption)
+          .foregroundStyle(.tertiary)
+      }
+      .padding(14)
+      .background(.background.secondary, in: RoundedRectangle(cornerRadius: 15))
+
+      Spacer(minLength: 52)
     }
   }
 }

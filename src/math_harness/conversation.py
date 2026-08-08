@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
-from typing import Protocol
+from time import perf_counter
+from typing import Protocol, runtime_checkable
 
 from math_harness.models import ConversationMessage, MemoryItem, MethodMatch, Workspace
 from math_harness.provider_config import (
@@ -78,6 +80,75 @@ class ConversationResponderProtocol(Protocol):
         message: str,
         max_output_tokens: int,
     ) -> ChatGeneration: ...
+
+
+@runtime_checkable
+class StreamingResponderProtocol(Protocol):
+    """能逐段吐字的响应器。
+
+    可选：没实现它的响应器照常走 `respond`，`stream_chat_generation` 会把整条回复
+    当成一段产出。离线响应器就是这种情况——它本来就是瞬间返回的固定说明。
+    """
+
+    def stream(
+        self,
+        context: ConversationContext,
+        message: str,
+        max_output_tokens: int,
+    ) -> Iterator[str]: ...
+
+
+def stream_chat_generation(
+    responder: ConversationResponderProtocol,
+    context: ConversationContext,
+    message: str,
+    max_output_tokens: int,
+) -> Generator[str, None, ChatGeneration]:
+    """逐段产出正文，结束时返回完整的一次生成。
+
+    不支持流式的响应器退回一次性返回——**降级要看得见地正常工作**，而不是报错。
+
+    生成中途失败时，已经吐出去的部分不丢：用户看着字一个个出现，最后告诉他「刚才那些
+    不算数」是最糟的处理方式。已收到的内容照常保存，错误记在生成结果里。
+    """
+
+    streaming = isinstance(responder, StreamingResponderProtocol) and hasattr(
+        responder, "stream"
+    )
+    if not streaming:
+        generation = responder.respond(context, message, max_output_tokens)
+        if generation.content:
+            yield generation.content
+        return generation
+
+    started = perf_counter()
+    chunks: list[str] = []
+    error: str | None = None
+    try:
+        for chunk in responder.stream(context, message, max_output_tokens):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            yield chunk
+    except Exception as exc:  # noqa: BLE001
+        error = f"{exc.__class__.__name__}: {exc}"[:2_000]
+
+    content = "".join(chunks)
+    if not content:
+        content = (
+            "这次对话回复生成失败，但你的消息已经保存在当前工作区。"
+            "请检查模型设置或网络后重新发送。"
+        )
+        yield content
+    return ChatGeneration(
+        content=content,
+        provider=getattr(responder, "name", responder.__class__.__name__),
+        model=getattr(responder, "model", None),
+        prompt_version=getattr(responder, "prompt_version", "conversation-v1"),
+        raw_output=content[:8_000],
+        error=error,
+        duration_ms=max(0, round((perf_counter() - started) * 1_000)),
+    )
 
 
 class OfflineConversationResponder:

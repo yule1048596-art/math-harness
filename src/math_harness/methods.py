@@ -90,7 +90,10 @@ METHOD_TEMPLATES = (
         ),
         failure_modes=("遗漏共轭分母的定义域", "有理化后过早截断导致丢失下一阶"),
         tags=("asymptotic", "radical", "cancellation"),
-        markers=("有理化", "共轭", "rationaliz", "conjugate"),
+        # `conjugate` 刻意不在这里：它是 SymPy 的函数名，会出现在**公式内部**，
+        # 那里它表示复共轭这个运算，不表示「共轭有理化」这个技法。闭环度量抓到过
+        # 一次——复变的 `z*conjugate(z)` 被标成了有理化。
+        markers=("有理化", "共轭", "rationaliz"),
     ),
     MethodTemplate(
         key=MethodKind.VARIABLE_INVERSION,
@@ -179,6 +182,35 @@ METHOD_TEMPLATES = (
 )
 
 
+def _structural_drafts(solution: str) -> list[MethodDraft]:
+    """从解答的推导结构导出一张方法卡。判不出来返回空列表。
+
+    **宁可不学，也不要编一个名字**——那正是通用兜底卡的老问题。
+    """
+
+    from math_harness.claim_drafting import RuleBasedClaimDrafter
+    from math_harness.method_identity import METHOD_DESCRIPTIONS, derive_method_key
+
+    draft = RuleBasedClaimDrafter().draft("", solution)
+    if not draft.steps:
+        return []
+    key = derive_method_key(draft.steps)
+    if key is None:
+        return []
+    description = METHOD_DESCRIPTIONS[key]
+    return [
+        MethodDraft(
+            key=key,
+            name=description.name,
+            goal=description.goal,
+            applicable_when=[description.applicable_when],
+            procedure=[description.procedure],
+            failure_modes=[description.failure_mode],
+            tags=["structural"],
+        )
+    ]
+
+
 class MethodExtractor:
     name = "rules"
     prompt_version = "rules-v1"
@@ -197,6 +229,13 @@ class MethodExtractor:
             for template in METHOD_TEMPLATES
             if used_in(solution, template.markers)
         ]
+        if not drafts:
+            # 散文里没有认得出的技法名，就看**推导在结构上做掉了什么**。
+            #
+            # 七个模板全是渐进方法，别的领域一个都覆盖不到：实测跨领域覆盖率 0.333，
+            # 一多半的题解只能落到通用兜底卡上，而兜底卡在聊天路径会被过滤、在导入
+            # 路径会把所有领域挤成同一张，两条路都长不出知识库。
+            drafts = _structural_drafts(solution)
         if not drafts:
             drafts = [
                 MethodDraft(

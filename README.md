@@ -9,7 +9,7 @@
 [查看全部版本](https://github.com/yule1048596-art/math-harness/releases) ·
 [MIT License](LICENSE)
 
-> 当前版本：**v0.16.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
+> 当前版本：**v0.17.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
 > 当前公开安装包使用 ad-hoc 签名，尚未完成 Developer ID 公证。
 
 ## 它能做什么
@@ -69,7 +69,7 @@ Math Harness 的“成长”目前指的是**可审计的记忆、方法卡、�
 安装步骤：
 
 1. 打开 [最新 Release](https://github.com/yule1048596-art/math-harness/releases/latest)。
-2. 下载文件名类似 `Math-Harness-0.16.0-macOS-arm64.dmg` 的安装镜像。
+2. 下载文件名类似 `Math-Harness-0.17.0-macOS-arm64.dmg` 的安装镜像。
 3. 打开 DMG，把 `Math Harness.app` 拖入“应用程序”文件夹。
 4. 从“应用程序”中启动 Math Harness。
 
@@ -877,13 +877,15 @@ uv run --no-editable pytest
 uv run --no-editable ruff format --check .
 uv run --no-editable ruff check .
 
-# 三条度量门禁（发布前跑）
+# 四条度量门禁（发布前跑）
+# 闭环：一环都不绕——教一批题再问结构相似的新题，看方法有没有真的被调出来
+uv run --no-editable math-harness-loop --data-root /tmp/loop --check
 # 变异测试：捕获率置信下界不高于零、或误拒率超标的层不该合入
 uv run --no-editable math-harness-mutation --check
 # 跨领域检索：掉回纯词面水平说明结构那一路白接了；cross_family 掉说明被表面形状骗走
 uv run --no-editable math-harness-cross-eval --data-root /tmp/xeval --check
 # 方法归属：误标比漏标严重——标错了是学进去一个假的，以后还会被当依据
-uv run --no-editable math-harness-attribution --max-mislabel-rate 0.0
+uv run --no-editable math-harness-attribution --max-mislabel-rate 0.0 --min-coverage 0.6
 
 # 原生 macOS 开发运行
 ./scripts/run_macos_app.sh
@@ -930,13 +932,20 @@ flowchart TB
   得先解读题目要干什么，那是模型直出结构化断言那条路要做的事；
 - **抽错题的风险仍在**：系统可能验了一个你没问的命题。处理方式是把验过的断言列出来
   让它可见，而不是发送前拦一道确认；
+- 成长闭环的实测水平：教 18 道跨领域的题再问 18 道结构相似的新题，**15 道能调出正确
+  来源的方法**（命中率 `0.833`；v0.17 之前是 `0.056`——离线提炼器只有 7 个渐进模板，
+  跨领域一张方法卡都产不出来）。剩下 3 条错的原因相同：那几课的解答里没有可解析的
+  等式，抽不出断言就学不到方法；
 - 跨领域检索的实测水平：整体 Hit@1 `0.596`（v0.16 之前是 `0.000`——不是检索差，是知识
   永远晋级不了、库里恒空）。分切片：训练里见过的形状 `0.706`，新形状 `0.562`，表面
   相似但方法不同的 `0.500`，题面里没有可解析表达式的 `0.500`。语料是手工编写的
   42+47 条，只能给方向，不能给统计显著性；
 - 形式化证明（`proof_verified`）只预留了档位，本版不产出；
 - 软记忆只覆盖用户画像、学习目标、讲解偏好、专题背景和手工备注，不保存数学事实或方法；
-- 普通聊天还没有流式输出，模型完成整条回复后才会显示；
+- 普通聊天支持流式输出，正文逐段显示。**可信度徽章要等整条回复结束才出现**——检查
+  要看完整的推导，逐步检查在只有半条推导时给出的判断没有意义，而徽章一边流一边变会
+  让你看到「先说对、又说错」。指定验算目标的回合不流式：那条路的正文由求解器和验证器
+  一起产出，中间没有可以逐字给出的东西；
 - 可选接入 Wolfram Cloud MCP 做独立重算，默认关闭。它只翻译两边写法明确一致的
   子集——`diff`、`Sum`、`Integral`、`Matrix` 这些参数形状两边不同的构造一律拒绝，
   因为译歪了不会报错，只会安静地核对另一个命题。它最高产出 `cross_checked`，

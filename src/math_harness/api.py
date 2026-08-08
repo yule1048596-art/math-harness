@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import json
 import os
 import secrets
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, Query, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from math_harness import __version__
 from math_harness.errors import (
@@ -76,6 +78,16 @@ from math_harness.portability import ARCHIVE_MEDIA_TYPE, MAX_ARCHIVE_BYTES
 from math_harness.provider_config import provider_config_error
 from math_harness.provider_probe import probe_provider
 from math_harness.service import MathHarnessService
+
+
+def _sse(payload: dict[str, object]) -> str:
+    """一条 SSE 事件。
+
+    `ensure_ascii=False` 是必须的：正文基本都是中文，转义之后体积翻几倍，
+    而流式的全部意义就是让字尽快到达。
+    """
+
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def create_app(
@@ -265,6 +277,58 @@ def create_app(
             workspace_id,
             conversation_id,
             request,
+        )
+
+    @app.post("/workspaces/{workspace_id}/conversations/{conversation_id}/turns/stream")
+    def stream_conversation_turn(
+        workspace_id: str,
+        conversation_id: str,
+        request: ConversationTurnRequest,
+    ) -> StreamingResponse:
+        """逐段返回正文，最后一条事件带完整回合结果。
+
+        事件只有三种：`delta` 是正文增量，`result` 是和非流式接口逐字段相同的
+        `ConversationTurnResult`，`error` 是连回合都没跑起来。
+
+        **可信度只在 `result` 里出现。** 检查要看完整的推导，逐步检查在只有半条推导时
+        给出的判断没有意义；徽章一边流一边变，用户会看到「先说对、又说错」。
+        """
+
+        def events() -> Iterator[str]:
+            stream = service.stream_conversation_turn(
+                workspace_id, conversation_id, request
+            )
+            try:
+                while True:
+                    try:
+                        delta = next(stream)
+                    except StopIteration as stop:
+                        result = stop.value
+                        yield _sse(
+                            {
+                                "type": "result",
+                                "result": result.model_dump(mode="json"),
+                            }
+                        )
+                        return
+                    yield _sse({"type": "delta", "text": delta})
+            except Exception as exc:  # noqa: BLE001
+                yield _sse(
+                    {
+                        "type": "error",
+                        "message": f"{exc.__class__.__name__}: {exc}"[:2_000],
+                    }
+                )
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                # 本机 helper 前面没有代理，但把它写清楚：分块响应被缓冲起来，
+                # 流式就退化成一次性返回，而且没有任何报错。
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.get(

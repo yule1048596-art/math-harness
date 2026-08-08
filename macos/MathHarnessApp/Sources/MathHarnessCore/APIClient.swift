@@ -93,6 +93,71 @@ public actor APIClient {
     )
   }
 
+  /// 流式发送一个回合：正文逐段到达，最后拿到和非流式接口完全一样的结果。
+  ///
+  /// 可信度只在最后的结果里出现。检查要看完整的推导，而徽章一边流一边变会让用户
+  /// 看到「先说对、又说错」。
+  public func streamConversationTurn(
+    workspaceID: String,
+    conversationID: String,
+    request: ConversationTurnRequest,
+    onDelta: @escaping @Sendable (String) -> Void
+  ) async throws -> ConversationTurnResult {
+    let path = "workspaces/\(workspaceID)/conversations/\(conversationID)/turns/stream"
+    var urlRequest = URLRequest(url: requestURL(for: path), timeoutInterval: timeout)
+    urlRequest.httpMethod = "POST"
+    urlRequest.httpBody = try JSONEncoder().encode(request)
+    urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+    urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    if let bearerToken {
+      urlRequest.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+    }
+
+    let bytes: URLSession.AsyncBytes
+    let response: URLResponse
+    do {
+      (bytes, response) = try await session.bytes(for: urlRequest)
+    } catch {
+      throw APIClientError.transport(error.localizedDescription)
+    }
+    guard let httpResponse = response as? HTTPURLResponse else {
+      throw APIClientError.invalidResponse
+    }
+    guard (200...299).contains(httpResponse.statusCode) else {
+      throw APIClientError.http(status: httpResponse.statusCode, detail: "流式请求失败")
+    }
+
+    let decoder = JSONDecoder()
+    for try await line in bytes.lines {
+      guard line.hasPrefix("data: ") else { continue }
+      let payload = Data(line.dropFirst(6).utf8)
+      guard let event = try? decoder.decode(StreamEvent.self, from: payload) else {
+        continue
+      }
+      switch event.type {
+      case "delta":
+        if let text = event.text, !text.isEmpty { onDelta(text) }
+      case "result":
+        if let result = event.result { return result }
+        throw APIClientError.invalidResponse
+      case "error":
+        throw APIClientError.http(status: 500, detail: event.message ?? "流式生成失败")
+      default:
+        // 后端以后可能加新的事件类型。认不出来就跳过，不能因此中断整条流。
+        continue
+      }
+    }
+    // 流结束了却没有结果事件：连接被掐断了。
+    throw APIClientError.invalidResponse
+  }
+
+  private struct StreamEvent: Decodable {
+    let type: String
+    let text: String?
+    let result: ConversationTurnResult?
+    let message: String?
+  }
+
   public func listMemories(
     workspaceID: String,
     query: String? = nil,

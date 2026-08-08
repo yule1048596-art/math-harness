@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from time import perf_counter
 from typing import Any
 
@@ -76,20 +77,16 @@ class OpenAIConversationResponder:
             self._client = OpenAI(**options)
         return self._client
 
-    def respond(
-        self,
-        context: ConversationContext,
-        message: str,
-        max_output_tokens: int,
-    ) -> ChatGeneration:
-        started = perf_counter()
+    def _input_messages(
+        self, context: ConversationContext, message: str
+    ) -> list[dict[str, str]]:
         context_payload = context.model_payload()
         context_payload.pop("recent_messages", None)
         history = [
             {"role": item.role.value, "content": item.content}
             for item in context.recent_messages
         ]
-        input_messages = [
+        return [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
                 "role": "user",
@@ -101,9 +98,43 @@ class OpenAIConversationResponder:
             *history,
             {"role": "user", "content": message},
         ]
+
+    def stream(
+        self,
+        context: ConversationContext,
+        message: str,
+        max_output_tokens: int,
+    ) -> Iterator[str]:
+        """逐段产出正文。
+
+        只取正文增量事件。推理增量刻意不转发——那是模型的思考过程，产品其他地方一律
+        不展示它，这里也不该开一个口子。
+        """
+
+        stream = self._client_or_create().responses.create(
+            model=self.model,
+            input=self._input_messages(context, message),
+            reasoning={"effort": self.reasoning_effort},
+            max_output_tokens=max_output_tokens,
+            store=False,
+            stream=True,
+        )
+        for event in stream:
+            if getattr(event, "type", "") == "response.output_text.delta":
+                delta = getattr(event, "delta", None)
+                if isinstance(delta, str) and delta:
+                    yield delta
+
+    def respond(
+        self,
+        context: ConversationContext,
+        message: str,
+        max_output_tokens: int,
+    ) -> ChatGeneration:
+        started = perf_counter()
         response = self._client_or_create().responses.create(
             model=self.model,
-            input=input_messages,
+            input=self._input_messages(context, message),
             reasoning={"effort": self.reasoning_effort},
             max_output_tokens=max_output_tokens,
             store=False,

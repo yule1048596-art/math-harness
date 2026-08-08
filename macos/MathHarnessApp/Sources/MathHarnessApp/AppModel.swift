@@ -23,6 +23,11 @@ final class AppModel: ObservableObject {
   @Published private(set) var conversations: [Conversation] = []
   @Published private(set) var selectedConversationID: String?
   @Published private(set) var messages: [ConversationMessage] = []
+  /// 正在流式到达的回复。为空表示当前没有回合在流。
+  ///
+  /// 它是一段**没有可信度**的临时正文：检查要等整条回复吐完才跑，徽章一边流一边变
+  /// 会让用户看到「先说对、又说错」。落到 `messages` 里的那一刻才带上徽章。
+  @Published private(set) var streamingReply: String = ""
   @Published private(set) var attempts: [SolutionAttempt] = []
   @Published private(set) var examples: [ProblemExample] = []
   @Published private(set) var methods: [MethodCard] = []
@@ -372,17 +377,40 @@ final class AppModel: ObservableObject {
         self.selectedConversationID = created.id
         conversationID = created.id
       }
-      let result = try await api.sendConversationTurn(
-        workspaceID: workspaceID,
-        conversationID: conversationID,
-        request: ConversationTurnRequest(
-          message: trimmedMessage,
-          tags: tags,
-          topK: 5,
-          mathTarget: mathTarget,
-          maxOutputTokens: AppSettings.maxOutputTokens
-        )
+      let turnRequest = ConversationTurnRequest(
+        message: trimmedMessage,
+        tags: tags,
+        topK: 5,
+        mathTarget: mathTarget,
+        maxOutputTokens: AppSettings.maxOutputTokens
       )
+      // 指定了验算目标的回合不流式：那条路的正文由求解器和验证器一起产出，
+      // 中间没有可以逐字给出的东西。
+      let result: ConversationTurnResult
+      if mathTarget == nil {
+        streamingReply = ""
+        result = try await api.streamConversationTurn(
+          workspaceID: workspaceID,
+          conversationID: conversationID,
+          request: turnRequest
+        ) { [weak self] delta in
+          Task { @MainActor in
+            guard let self else { return }
+            guard
+              workspaceID == self.selectedWorkspaceID,
+              conversationID == self.selectedConversationID
+            else { return }
+            self.streamingReply += delta
+          }
+        }
+        streamingReply = ""
+      } else {
+        result = try await api.sendConversationTurn(
+          workspaceID: workspaceID,
+          conversationID: conversationID,
+          request: turnRequest
+        )
+      }
       guard
         workspaceID == selectedWorkspaceID,
         conversationID == selectedConversationID
