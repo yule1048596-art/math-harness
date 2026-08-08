@@ -1,0 +1,18 @@
+{"id": "q-product-rule", "recalls": "product-rule", "problem": "求 x^3*cos(x) 的导数。"}
+{"id": "q-chain-rule", "recalls": "chain-rule", "problem": "求 cos(x^2) 的导数。"}
+{"id": "q-verify-antiderivative", "recalls": "verify-antiderivative", "problem": "验证 x*log(x)-x 是 log(x) 的原函数。"}
+{"id": "q-binomial-sum", "recalls": "binomial-sum", "problem": "求 Sum(binomial(n,k)*3**k,(k,0,n)) 的闭式。"}
+{"id": "q-telescoping", "recalls": "telescoping", "problem": "求 Sum(1/(k*(k+2)),(k,1,n)) 的闭式。"}
+{"id": "q-power-sum", "recalls": "power-sum", "problem": "求 Sum(k**3,(k,1,n)) 的闭式。"}
+{"id": "q-eigenvalue", "recalls": "eigenvalue", "problem": "验证 4 是 Matrix([[3,1],[1,3]]) 的特征值。"}
+{"id": "q-determinant", "recalls": "determinant", "problem": "求二阶行列式 Matrix([[5,2],[1,3]]) 的值。"}
+{"id": "q-difference-of-squares", "recalls": "difference-of-squares", "problem": "化简 (y+c)^2-(y-c)^2。"}
+{"id": "q-cubic-difference", "recalls": "cubic-difference", "problem": "验证 (2x-y)*(4x^2+2xy+y^2) 等于 8x^3-y^3。"}
+{"id": "q-euler-formula", "recalls": "euler-formula", "problem": "用指数形式表示 2cos(x)。"}
+{"id": "q-modulus-conjugate", "recalls": "modulus-conjugate", "problem": "用 z 与其共轭表示 z 的实部。"}
+{"id": "q-circle-equation", "recalls": "circle-equation", "problem": "把 (x-4)^2+(y-1)^2 展开成一般式。"}
+{"id": "q-pythagorean", "recalls": "pythagorean", "problem": "化简 cosh(x)^2-sinh(x)^2。"}
+{"id": "q-double-angle", "recalls": "double-angle", "problem": "用 cos(x) 表示 cos(2x)。"}
+{"id": "q-gcd-lcm", "recalls": "gcd-lcm", "problem": "验证 gcd(15,25)*lcm(15,25) 等于 15*25。"}
+{"id": "q-logic-demorgan", "recalls": "logic-demorgan", "problem": "验证 Not(Or(p,q)) 等价于 And(Not(p),Not(q))。"}
+{"id": "q-vieta", "recalls": "vieta", "problem": "已知两根为 1 和 4，写出对应的二次式。"}

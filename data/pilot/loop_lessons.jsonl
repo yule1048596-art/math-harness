@@ -1,0 +1,18 @@
+{"id": "product-rule", "domain": "微积分", "problem": "求 x^2*sin(x) 的导数。", "answer": "用乘积法则，两个因子分别求导：\ndiff(x^2, x) = 2x\ndiff(sin(x), x) = cos(x)\n所以 diff(x^2*sin(x), x) = 2x*sin(x) + x^2*cos(x)"}
+{"id": "chain-rule", "domain": "微积分", "problem": "求 sin(x^2) 的导数。", "answer": "复合函数用链式法则，先对内层求导：\ndiff(x^2, x) = 2x\n所以 diff(sin(x^2), x) = 2x*cos(x^2)"}
+{"id": "verify-antiderivative", "domain": "微积分", "problem": "验证 x*exp(x)-exp(x) 是 x*exp(x) 的原函数。", "answer": "把候选原函数求导回去比对：\ndiff(x*exp(x) - exp(x), x) = x*exp(x)\n两边一致。"}
+{"id": "binomial-sum", "domain": "组合数学", "problem": "求 Sum(binomial(n,k),(k,0,n)) 的闭式。", "answer": "这是二项式定理在 a=b=1 时的特例：\nSum(binomial(n,k),(k,0,n)) = 2**n"}
+{"id": "telescoping", "domain": "组合数学", "problem": "求 Sum(1/(k*(k+1)),(k,1,n)) 的闭式。", "answer": "先裂项，每一项写成两个分式之差，求和后中间成对相消：\nSum(1/(k*(k+1)),(k,1,n)) = n/(n+1)"}
+{"id": "power-sum", "domain": "组合数学", "problem": "求 Sum(k**2,(k,1,n)) 的闭式。", "answer": "套用平方和公式：\nSum(k**2,(k,1,n)) = n*(n+1)*(2n+1)/6"}
+{"id": "eigenvalue", "domain": "线性代数", "problem": "验证 3 是 Matrix([[2,1],[1,2]]) 的特征值。", "answer": "特征值满足特征方程，代入 λ=3：\ndet(Matrix([[2,1],[1,2]]) - 3*eye(2)) = 0"}
+{"id": "determinant", "domain": "线性代数", "problem": "求二阶行列式 Matrix([[1,2],[3,4]]) 的值。", "answer": "二阶行列式按主对角线之积减副对角线之积展开：\n1*4 - 2*3 = -2\n所以 det(Matrix([[1,2],[3,4]])) = -2"}
+{"id": "difference-of-squares", "domain": "代数", "problem": "化简 (a+b)^2-(a-b)^2。", "answer": "两个平方分别展开，对称项相消：\n(a+b)^2 = a^2 + 2ab + b^2\n(a-b)^2 = a^2 - 2ab + b^2\n相减得 (a+b)^2 - (a-b)^2 = 4ab"}
+{"id": "cubic-difference", "domain": "代数", "problem": "验证 (a-b)*(a^2+ab+b^2) 等于 a^3-b^3。", "answer": "逐项展开一次因子与三项式的乘积，中间项成对抵消：\na*(a^2 + ab + b^2) = a^3 + a^2*b + a*b^2\nb*(a^2 + ab + b^2) = a^2*b + a*b^2 + b^3\n相减得 (a-b)*(a^2 + ab + b^2) = a^3 - b^3"}
+{"id": "euler-formula", "domain": "复变函数", "problem": "验证 exp(I*x) 等于 cos(x)+I*sin(x)。", "answer": "欧拉公式直接给出：\nexp(I*x) = cos(x) + I*sin(x)"}
+{"id": "modulus-conjugate", "domain": "复变函数", "problem": "验证 z*conjugate(z) 等于 z 的模的平方。", "answer": "把 z 写成实部虚部，交叉项抵消：\nz*conjugate(z) = re(z)**2 + im(z)**2"}
+{"id": "circle-equation", "domain": "解析几何", "problem": "把 (x-h)^2+(y-k)^2 展开成一般式。", "answer": "两个完全平方分别展开后合并：\n(x-h)^2 = x^2 - 2hx + h^2\n(y-k)^2 = y^2 - 2ky + k^2\n所以 (x-h)^2 + (y-k)^2 = x^2 + y^2 - 2hx - 2ky + h^2 + k^2"}
+{"id": "pythagorean", "domain": "三角", "problem": "化简 sin(x)^2+cos(x)^2。", "answer": "毕达哥拉斯恒等式：\nsin(x)^2 + cos(x)^2 ≡ 1"}
+{"id": "double-angle", "domain": "三角", "problem": "用 sin(x) 与 cos(x) 表示 sin(2x)。", "answer": "倍角公式：\nsin(2x) = 2sin(x)*cos(x)"}
+{"id": "gcd-lcm", "domain": "数论", "problem": "验证 gcd(12,18)*lcm(12,18) 等于 12*18。", "answer": "分别算出两者再相乘：\nlcm(12, 18) = 36\ngcd(12, 18) * lcm(12, 18) = 216"}
+{"id": "logic-demorgan", "domain": "离散数学", "problem": "验证德摩根律。", "answer": "遍历两个命题变元的四种真值组合，两边真值表相同：\nEquivalent(Not(And(p, q)), Or(Not(p), Not(q)))"}
+{"id": "vieta", "domain": "竞赛代数", "problem": "已知两根为 2 和 3，写出对应的二次式。", "answer": "由韦达定理，根之和为一次项系数的相反数，根之积为常数项：\n2 + 3 = 5\n2 * 3 = 6\n所以 (x-2)*(x-3) = x^2 - 5x + 6"}
