@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "math-harness"
-version = "0.15.0"
+version = "0.16.0"
 description = "Workspace-isolated, verifiable memory harness for growing mathematical experts."
 readme = "README.md"
 requires-python = ">=3.12"
