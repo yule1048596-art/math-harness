@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.17.0"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.17.1"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.17.0", "ready version")
+require(ready.version == "0.17.1", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -45,6 +45,69 @@ let targetDraftData = Data(
 let targetDraft = try JSONDecoder().decode(MathTargetDraftResult.self, from: targetDraftData)
 require(targetDraft.target?.mode == .limit, "target draft mode")
 require(targetDraft.requiresConfirmation, "target draft confirmation boundary")
+
+let migrationKeys = LegacyProviderSettingsMigrationKeys(
+  providerSettings: "providerSettings",
+  completionMarker: "didMigrateLegacyMiMo",
+  legacyProvider: "solverProvider",
+  legacyBaseURL: "mimoBaseURL",
+  legacyModel: "mimoModel"
+)
+let migrationSuite = "MathHarnessCoreChecks.\(UUID().uuidString)"
+let migrationDefaults = UserDefaults(suiteName: migrationSuite)!
+migrationDefaults.removePersistentDomain(forName: migrationSuite)
+migrationDefaults.set("mimo", forKey: migrationKeys.legacyProvider)
+migrationDefaults.set("https://legacy.example/v1", forKey: migrationKeys.legacyBaseURL)
+migrationDefaults.set("legacy-model", forKey: migrationKeys.legacyModel)
+enum SimulatedKeychainError: Error { case denied }
+let failedMigration = LegacyProviderSettingsMigrator.migrate(
+  defaults: migrationDefaults,
+  keys: migrationKeys,
+  preset: .mimo,
+  legacyProviderID: "mimo",
+  readLegacyKey: { "legacy-key-placeholder" },
+  migrateLegacyKey: { _ in throw SimulatedKeychainError.denied }
+)
+require(!failedMigration, "failed key migration reports false")
+require(
+  !migrationDefaults.bool(forKey: migrationKeys.completionMarker),
+  "failed key migration remains retryable"
+)
+require(
+  migrationDefaults.data(forKey: migrationKeys.providerSettings) == nil,
+  "failed key migration does not commit settings"
+)
+var migratedProfileID: String?
+let retriedMigration = LegacyProviderSettingsMigrator.migrate(
+  defaults: migrationDefaults,
+  keys: migrationKeys,
+  preset: .mimo,
+  legacyProviderID: "mimo",
+  readLegacyKey: { "legacy-key-placeholder" },
+  migrateLegacyKey: {
+    migratedProfileID = $0
+    return true
+  }
+)
+require(retriedMigration, "key migration retries after failure")
+require(
+  migrationDefaults.bool(forKey: migrationKeys.completionMarker),
+  "successful key migration commits marker"
+)
+let migratedSettingsData = migrationDefaults.data(forKey: migrationKeys.providerSettings)!
+let migratedSettings = try JSONDecoder().decode(
+  ProviderSettings.self, from: migratedSettingsData
+)
+require(migratedSettings.profiles.first?.id == migratedProfileID, "migrated profile key target")
+require(
+  migratedSettings.profiles.first?.baseURL == "https://legacy.example/v1",
+  "migrated legacy base URL"
+)
+require(
+  migratedSettings.profiles.first?.defaultModel == "legacy-model",
+  "migrated legacy model"
+)
+migrationDefaults.removePersistentDomain(forName: migrationSuite)
 
 let workspaceData = Data(
   #"{"id":"ws-1","name":"渐进估计","description":"测试","created_at":"2026-08-01T01:02:03.123456Z"}"#.utf8
@@ -79,6 +142,21 @@ require(conversationMessage.methodKeys == ["rationalization"], "conversation met
 require(conversationMessage.counterexample.isEmpty, "legacy message decodes without counterexample")
 require(conversationMessage.checkedClaims.isEmpty, "legacy message decodes without claims")
 require(conversationMessage.conclusionConfidence == nil, "legacy message has no conclusion axis")
+require(conversationMessage.generationError == nil, "legacy message has no stream error")
+
+let interruptedMessageData = Data(
+  #"{"id":"msg-interrupted","workspace_id":"ws-1","conversation_id":"chat-1","turn_id":"turn-interrupted","ordinal":3,"role":"assistant","kind":"chat","content":"先整理已知条件，","provider":"mimo","model":"mimo-7b","generation_error":"RuntimeError: connection reset","attempt_id":null,"knowledge_draft_id":null,"verification_status":null,"conclusion_confidence":null,"process_confidence":null,"counterexample":{},"checked_claims":[],"method_keys":[],"created_at":"2026-08-07T00:30:00Z"}"#
+    .utf8
+)
+let interruptedMessage = try JSONDecoder().decode(
+  ConversationMessage.self,
+  from: interruptedMessageData
+)
+require(
+  interruptedMessage.generationError == "RuntimeError: connection reset",
+  "interrupted message preserves generation error"
+)
+require(interruptedMessage.conclusionConfidence == nil, "interrupted message is untrusted")
 
 let gradedMessageData = Data(
   #"{"id":"msg-2","workspace_id":"ws-1","conversation_id":"chat-1","turn_id":"turn-2","ordinal":4,"role":"assistant","kind":"chat","content":"(a+b)^2 - (a-b)^2 = 4ab","provider":"mimo","model":"mimo-7b","attempt_id":null,"knowledge_draft_id":null,"verification_status":null,"conclusion_confidence":"verified","process_confidence":"step_failed","counterexample":{"a":"7","b":"-4"},"checked_claims":["(a+b)**2 = a**2 + 2*a*b + b**2"],"method_keys":[],"created_at":"2026-08-07T01:00:00Z"}"#

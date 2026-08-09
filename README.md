@@ -9,7 +9,7 @@
 [查看全部版本](https://github.com/yule1048596-art/math-harness/releases) ·
 [MIT License](LICENSE)
 
-> 当前版本：**v0.17.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
+> 当前版本：**v0.17.1 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
 > 当前公开安装包使用 ad-hoc 签名，尚未完成 Developer ID 公证。
 
 ## 它能做什么
@@ -69,7 +69,7 @@ Math Harness 的“成长”目前指的是**可审计的记忆、方法卡、�
 安装步骤：
 
 1. 打开 [最新 Release](https://github.com/yule1048596-art/math-harness/releases/latest)。
-2. 下载文件名类似 `Math-Harness-0.17.0-macOS-arm64.dmg` 的安装镜像。
+2. 下载文件名类似 `Math-Harness-0.17.1-macOS-arm64.dmg` 的安装镜像。
 3. 打开 DMG，把 `Math Harness.app` 拖入“应用程序”文件夹。
 4. 从“应用程序”中启动 Math Harness。
 
@@ -945,7 +945,8 @@ flowchart TB
 - 普通聊天支持流式输出，正文逐段显示。**可信度徽章要等整条回复结束才出现**——检查
   要看完整的推导，逐步检查在只有半条推导时给出的判断没有意义，而徽章一边流一边变会
   让你看到「先说对、又说错」。指定验算目标的回合不流式：那条路的正文由求解器和验证器
-  一起产出，中间没有可以逐字给出的东西；
+  一起产出，中间没有可以逐字给出的东西。若模型中途断开，已收到的正文会带“生成中断”
+  标记保留，但不会获得可信度、进入知识草稿或被后续对话误当作完整答案；
 - 可选接入 Wolfram Cloud MCP 做独立重算，默认关闭。它只翻译两边写法明确一致的
   子集——`diff`、`Sum`、`Integral`、`Matrix` 这些参数形状两边不同的构造一律拒绝，
   因为译歪了不会报错，只会安静地核对另一个命题。它最高产出 `cross_checked`，

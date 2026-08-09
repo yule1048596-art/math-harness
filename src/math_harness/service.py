@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from _thread import LockType
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event, RLock, Thread
+from threading import Event, Lock, RLock, Thread
 from time import perf_counter
 
 from math_harness.bulk_import import (
@@ -257,6 +258,11 @@ class MathHarnessService:
         self._override_clients: dict[tuple[str, str, str], object] = {}
         self._override_lock = RLock()
         self._knowledge_lock = RLock()
+        # 同一对话的两个回合不能交错写入；不同对话却不该因为一个 provider 很慢而
+        # 互相冻结。这里用普通 Lock 而非 RLock：StreamingResponse 可能在不同的
+        # thread-pool worker 上推进/关闭生成器，普通 Lock 允许由关闭方可靠释放。
+        self._conversation_turn_locks: dict[tuple[str, str], LockType] = {}
+        self._conversation_turn_locks_guard = Lock()
         self._memory_wakeup = Event()
         self._memory_stop = Event()
         self._memory_thread: Thread | None = None
@@ -809,12 +815,37 @@ class MathHarnessService:
         conversation_id: str,
         request: ConversationTurnRequest,
     ) -> ConversationTurnResult:
-        with self._knowledge_lock:
-            return self._send_conversation_turn(
-                workspace_id,
-                conversation_id,
-                request,
-            )
+        with self._conversation_turn_lock(workspace_id, conversation_id):
+            with self._knowledge_lock:
+                setup = self._begin_turn(workspace_id, conversation_id, request)
+            if isinstance(setup, ConversationTurnResult):
+                return setup
+
+            generation: ChatGeneration | None = None
+            if request.math_target is None:
+                # 网络等待不占全服务的知识锁。上下文已经是一个不可变快照，生成结束后
+                # 再短暂取锁做检查与原子化持久化即可。
+                generation = self._generate_chat_response(
+                    setup.context,
+                    request.message,
+                    request.max_output_tokens,
+                    override=setup.override,
+                )
+            with self._knowledge_lock:
+                return self._finish_turn(
+                    workspace_id, conversation_id, request, setup, generation
+                )
+
+    def _conversation_turn_lock(
+        self, workspace_id: str, conversation_id: str
+    ) -> LockType:
+        key = (workspace_id, conversation_id)
+        with self._conversation_turn_locks_guard:
+            lock = self._conversation_turn_locks.get(key)
+            if lock is None:
+                lock = Lock()
+                self._conversation_turn_locks[key] = lock
+            return lock
 
     def _begin_turn(
         self,
@@ -926,6 +957,7 @@ class MathHarnessService:
 
         attempt: SolutionAttempt | None = None
         knowledge_draft: ProblemExample | None = None
+        generation_error: str | None = None
         if request.math_target is not None:
             solve_request = SolveRequest(
                 problem=request.message,
@@ -964,23 +996,30 @@ class MathHarnessService:
             provider = generation.provider
             model = generation.model
             verification_status = None
+            generation_error = generation.error
 
-        # 聊天路径也过检查。以前这条路一次检查都不做，于是「只有渐进题能被验证」——
-        # 而模型本来就答得了各领域的题，卡住的从来不是模型，是这道闸。
-        assessment, checked_claims = self._check_assistant_answer(
-            request.message,
-            assistant_content,
-            answer_profile_id=provider,
-        )
-        if knowledge_draft is None:
-            knowledge_draft = self._capture_chat_knowledge(
-                workspace_id,
-                store,
-                problem=request.message,
-                answer=assistant_content,
-                tags=request.tags,
-                assessment=assessment,
+        if generation_error is None:
+            # 聊天路径也过检查。以前这条路一次检查都不做，于是「只有渐进题能被验证」——
+            # 而模型本来就答得了各领域的题，卡住的从来不是模型，是这道闸。
+            assessment, checked_claims = self._check_assistant_answer(
+                request.message,
+                assistant_content,
+                answer_profile_id=provider,
             )
+            if knowledge_draft is None:
+                knowledge_draft = self._capture_chat_knowledge(
+                    workspace_id,
+                    store,
+                    problem=request.message,
+                    answer=assistant_content,
+                    tags=request.tags,
+                    assessment=assessment,
+                )
+        else:
+            # 断流后的正文只是一份可恢复的现场，不是答案。即使里面碰巧有一条能被
+            # SymPy 验过的等式，也不能因此获得可信度或进入成长闭环。
+            assessment = None
+            checked_claims = []
 
         assistant_message = store.append_conversation_message(
             conversation_id,
@@ -990,6 +1029,7 @@ class MathHarnessService:
             assistant_content,
             provider=provider,
             model=model,
+            generation_error=generation_error,
             attempt_id=attempt.id if attempt else None,
             knowledge_draft_id=knowledge_draft.id if knowledge_draft else None,
             verification_status=verification_status,
@@ -1007,7 +1047,11 @@ class MathHarnessService:
             assistant_message.ordinal,
         )
         store.record_learning_event(
-            "conversation_turn_completed",
+            (
+                "conversation_turn_interrupted"
+                if generation_error
+                else "conversation_turn_completed"
+            ),
             turn_id,
             {
                 "conversation_id": conversation_id,
@@ -1019,6 +1063,7 @@ class MathHarnessService:
                 ),
                 "summary_updated": summary_updated,
                 "memory_job_id": memory_job.id if memory_job else None,
+                "generation_error": generation_error,
             },
         )
         return ConversationTurnResult(
@@ -1030,17 +1075,6 @@ class MathHarnessService:
             summary_updated=summary_updated,
             memory_job=memory_job,
         )
-
-    def _send_conversation_turn(
-        self,
-        workspace_id: str,
-        conversation_id: str,
-        request: ConversationTurnRequest,
-    ) -> ConversationTurnResult:
-        setup = self._begin_turn(workspace_id, conversation_id, request)
-        if isinstance(setup, ConversationTurnResult):
-            return setup
-        return self._finish_turn(workspace_id, conversation_id, request, setup)
 
     def stream_conversation_turn(
         self,
@@ -1058,8 +1092,9 @@ class MathHarnessService:
         没有可以逐字给出的东西。
         """
 
-        with self._knowledge_lock:
-            setup = self._begin_turn(workspace_id, conversation_id, request)
+        with self._conversation_turn_lock(workspace_id, conversation_id):
+            with self._knowledge_lock:
+                setup = self._begin_turn(workspace_id, conversation_id, request)
             if isinstance(setup, ConversationTurnResult):
                 # 这个 turn_id 已经完整答过了。重放不重新生成，把原文一次给回去。
                 if setup.assistant_message is not None:
@@ -1075,9 +1110,10 @@ class MathHarnessService:
                     request.message,
                     request.max_output_tokens,
                 )
-            return self._finish_turn(
-                workspace_id, conversation_id, request, setup, generation
-            )
+            with self._knowledge_lock:
+                return self._finish_turn(
+                    workspace_id, conversation_id, request, setup, generation
+                )
 
     #: 允许晋级的结论档位。
     #

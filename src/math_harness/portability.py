@@ -258,6 +258,7 @@ _TABLE_COLUMNS = {
         "content",
         "provider",
         "model",
+        "generation_error",
         "attempt_id",
         "knowledge_draft_id",
         "verification_status",
@@ -317,6 +318,12 @@ _TABLE_COLUMNS = {
         "automatic_extraction_enabled",
         "updated_at",
     },
+}
+
+# 备份先按白名单验证再交给 WorkspaceStore 做数据库迁移。新增可空列时，上一版备份
+# 合理地还没有它；只允许缺少这里逐项列明的迁移列，未知的多余列仍然拒绝。
+_MIGRATABLE_MISSING_COLUMNS: dict[str, set[str]] = {
+    "conversation_messages": {"generation_error"},
 }
 
 
@@ -603,7 +610,14 @@ def _validate_database(
         counts: dict[str, int] = {}
         for table in sorted(tables):
             columns = _table_columns(connection, table)
-            if columns != _TABLE_COLUMNS[table]:
+            expected_columns = _TABLE_COLUMNS[table]
+            unknown_columns = columns - expected_columns
+            unsupported_missing = (
+                expected_columns
+                - columns
+                - _MIGRATABLE_MISSING_COLUMNS.get(table, set())
+            )
+            if unknown_columns or unsupported_missing:
                 raise InvalidPortableData(
                     f"workspace database has unsupported columns in table {table}"
                 )

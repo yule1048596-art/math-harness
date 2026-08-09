@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python quality and release gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --no-editable --extra dev --extra llm
+
+      - name: Check formatting and lint
+        run: |
+          uv run --no-editable ruff format --check .
+          uv run --no-editable ruff check .
+
+      - name: Run full test suite
+        run: uv run --no-editable pytest
+
+      - name: Run mathematical release gates
+        run: |
+          uv run --no-editable math-harness-loop \
+            --data-root "${RUNNER_TEMP}/loop" --check
+          uv run --no-editable math-harness-attribution \
+            --max-mislabel-rate 0.0 --min-coverage 0.6
+          uv run --no-editable math-harness-cross-eval \
+            --data-root "${RUNNER_TEMP}/cross-eval" --check
+          uv run --no-editable math-harness-mutation --check
+
+      - name: Build Python distributions
+        run: uv build
+
+  macos:
+    name: macOS contract and build
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check Swift format
+        run: |
+          swift format lint --recursive --strict \
+            macos/MathHarnessApp/Package.swift \
+            macos/MathHarnessApp/Sources
+
+      - name: Build app and check API contract
+        run: |
+          swift build --package-path macos/MathHarnessApp
+          swift run --package-path macos/MathHarnessApp MathHarnessCoreChecks

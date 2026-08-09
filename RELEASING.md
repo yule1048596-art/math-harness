@@ -4,16 +4,26 @@
 
 ## 发布新版本
 
-1. 更新 `pyproject.toml`、API 版本和 README。
+1. 同步更新 `pyproject.toml`、`uv.lock`、Python API、Swift App、`Info.plist`、README
+   和协议检查中的版本号。
 2. 在 `.github/release-notes/vX.Y.Z.md` 编写版本说明。
 3. 运行本地验证：
 
    ```bash
-   uv sync --no-editable --extra dev
+   uv sync --frozen --no-editable --extra dev --extra llm
    uv run --no-editable ruff format --check .
    uv run --no-editable ruff check .
    uv run --no-editable pytest
+   uv run --no-editable math-harness-loop \
+     --data-root /tmp/math-harness-release-loop --check
+   uv run --no-editable math-harness-attribution \
+     --max-mislabel-rate 0.0 --min-coverage 0.6
+   uv run --no-editable math-harness-cross-eval \
+     --data-root /tmp/math-harness-release-cross --check
+   uv run --no-editable math-harness-mutation --check
    uv build
+   swift format lint --recursive --strict \
+     macos/MathHarnessApp/Package.swift macos/MathHarnessApp/Sources
    swift build --package-path macos/MathHarnessApp
    swift run --package-path macos/MathHarnessApp MathHarnessCoreChecks
    ./scripts/build_macos_app.sh
@@ -30,6 +40,8 @@
    git push origin vX.Y.Z
    ```
 
-标签触发 `.github/workflows/release.yml`。工作流会重新安装锁定依赖、执行检查、
-构建 wheel、source distribution 和 Apple Silicon macOS App ZIP/DMG，然后创建 GitHub
-Release 并上传构建产物。GitHub 同时为每个标签提供标准源码 ZIP 和 tar.gz 归档。
+pull request 与 `main` 推送由 `.github/workflows/ci.yml` 验证。标签触发
+`.github/workflows/release.yml`：Python 与 macOS 两组任务分别执行完整门禁并暂存 wheel、
+source distribution、Apple Silicon App ZIP 和 DMG；只有两组都成功后，`publish` 任务才
+创建公开 GitHub Release 并一次性上传全部产物。GitHub 同时为每个标签提供标准源码 ZIP
+和 tar.gz 归档。

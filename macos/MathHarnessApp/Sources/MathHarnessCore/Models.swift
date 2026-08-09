@@ -158,6 +158,8 @@ public struct ConversationMessage: Codable, Identifiable, Equatable, Sendable {
   public let content: String
   public let provider: String?
   public let model: String?
+  /// 非空表示供应商在正文完成前中断；内容只作现场保留，不是已验证答案。
+  public let generationError: String?
   public let attemptID: String?
   public let knowledgeDraftID: String?
   public let verificationStatus: String?
@@ -177,6 +179,7 @@ public struct ConversationMessage: Codable, Identifiable, Equatable, Sendable {
     case workspaceID = "workspace_id"
     case conversationID = "conversation_id"
     case turnID = "turn_id"
+    case generationError = "generation_error"
     case attemptID = "attempt_id"
     case knowledgeDraftID = "knowledge_draft_id"
     case verificationStatus = "verification_status"
@@ -203,6 +206,7 @@ public struct ConversationMessage: Codable, Identifiable, Equatable, Sendable {
     content = try container.decode(String.self, forKey: .content)
     provider = try container.decodeIfPresent(String.self, forKey: .provider)
     model = try container.decodeIfPresent(String.self, forKey: .model)
+    generationError = try container.decodeIfPresent(String.self, forKey: .generationError)
     attemptID = try container.decodeIfPresent(String.self, forKey: .attemptID)
     knowledgeDraftID = try container.decodeIfPresent(
       String.self, forKey: .knowledgeDraftID)

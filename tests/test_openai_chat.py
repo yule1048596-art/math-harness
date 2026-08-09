@@ -101,3 +101,48 @@ def test_openai_chat_preserves_message_roles_and_bounds_context_payload():
     assert "conversation_summary" in inputs[1]["content"]
     assert "recent_messages" not in inputs[1]["content"]
     assert inputs[-1]["content"] == "请继续解释。"
+
+
+def test_openai_chat_marks_interrupted_assistant_history_as_incomplete():
+    now = utc_now()
+    workspace = Workspace(
+        id="workspace-1",
+        name="极限",
+        description="只讨论极限",
+        created_at=now,
+    )
+    interrupted = ConversationMessage(
+        id="message-1",
+        workspace_id=workspace.id,
+        conversation_id="conversation-1",
+        turn_id="turn-1",
+        ordinal=1,
+        role=ConversationRole.ASSISTANT,
+        kind=ConversationMessageKind.CHAT,
+        content="先使用洛必达法则，",
+        generation_error="RuntimeError: connection reset",
+        created_at=now,
+    )
+    client = FakeClient()
+    responder = OpenAIConversationResponder(
+        model="mimo-v2.5-pro",
+        reasoning_effort="none",
+        provider_name="xiaomi_mimo",
+        client=client,
+    )
+
+    responder.respond(
+        ConversationContext(
+            workspace=workspace,
+            summary="",
+            recent_messages=[interrupted],
+            trusted_methods=[],
+        ),
+        "请重新回答。",
+        1_024,
+    )
+
+    inputs = client.responses.calls[0]["input"]
+    assistant = next(item for item in inputs if item["role"] == "assistant")
+    assert "interrupted and is incomplete" in assistant["content"]
+    assert assistant["content"].endswith(interrupted.content)
