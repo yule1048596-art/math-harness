@@ -446,6 +446,7 @@ class WorkspaceStore:
                     content TEXT NOT NULL,
                     provider TEXT,
                     model TEXT,
+                    generation_error TEXT,
                     attempt_id TEXT,
                     knowledge_draft_id TEXT,
                     verification_status TEXT,
@@ -660,6 +661,11 @@ class WorkspaceStore:
             )
             self._ensure_column(
                 connection, "conversation_messages", "checked_claims_json", "TEXT"
+            )
+            # v0.17.1：流式断线的半成品必须永久带着中断标记，不能在重启后重新
+            # 看起来像一条完整、可学习的回答。
+            self._ensure_column(
+                connection, "conversation_messages", "generation_error", "TEXT"
             )
             # v0.16 方法卡的来源可信度。旧卡这一列为空，按 `verified` 折算——
             # 它们本来就是走「验证通过 + 人工复核」那条路进来的。
@@ -1042,6 +1048,7 @@ class WorkspaceStore:
         *,
         provider: str | None = None,
         model: str | None = None,
+        generation_error: str | None = None,
         attempt_id: str | None = None,
         knowledge_draft_id: str | None = None,
         verification_status: VerificationStatus | None = None,
@@ -1101,6 +1108,7 @@ class WorkspaceStore:
                 content=content,
                 provider=provider,
                 model=model,
+                generation_error=generation_error,
                 attempt_id=attempt_id,
                 knowledge_draft_id=knowledge_draft_id,
                 verification_status=verification_status,
@@ -1115,12 +1123,12 @@ class WorkspaceStore:
                 """
                 INSERT INTO conversation_messages (
                     id, workspace_id, conversation_id, turn_id, ordinal,
-                    role, kind, content, provider, model, attempt_id,
-                    knowledge_draft_id, verification_status,
+                    role, kind, content, provider, model, generation_error,
+                    attempt_id, knowledge_draft_id, verification_status,
                     conclusion_confidence, process_confidence,
                     counterexample_json, checked_claims_json,
                     method_keys_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,
@@ -1133,6 +1141,7 @@ class WorkspaceStore:
                     message.content,
                     message.provider,
                     message.model,
+                    message.generation_error,
                     message.attempt_id,
                     message.knowledge_draft_id,
                     (
@@ -1250,6 +1259,7 @@ class WorkspaceStore:
             content=row["content"],
             provider=row["provider"],
             model=row["model"],
+            generation_error=_optional_column(row, "generation_error"),
             attempt_id=row["attempt_id"],
             knowledge_draft_id=row["knowledge_draft_id"],
             verification_status=(

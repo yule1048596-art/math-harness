@@ -80,42 +80,28 @@ enum AppSettings {
   /// 只在首次升级时跑一次。用户既有的 Base URL、模型和 Keychain 密钥都保留下来，
   /// 升级后不需要重新填写。
   @discardableResult
-  static func migrateLegacySettingsIfNeeded() -> Bool {
-    guard !defaults.bool(forKey: AppSettingsKey.didMigrateLegacyMiMo) else {
-      return false
+  static func migrateLegacySettingsIfNeeded(
+    defaults migrationDefaults: UserDefaults = .standard,
+    readLegacyKey: () throws -> String? = {
+      try KeychainStore.readAPIKey(account: KeychainStore.legacyMiMoAccount)
+    },
+    migrateLegacyKey: (String) throws -> Bool = {
+      try KeychainStore.migrateLegacyMiMoKey(toProfile: $0)
     }
-    defaults.set(true, forKey: AppSettingsKey.didMigrateLegacyMiMo)
-
-    guard defaults.data(forKey: AppSettingsKey.providerSettings) == nil else {
-      return false
-    }
-
-    let legacyProvider = defaults.string(forKey: AppSettingsKey.legacySolverProvider)
-    let hadLegacyKey =
-      (try? KeychainStore.readAPIKey(
-        account: KeychainStore.legacyMiMoAccount
-      )) ?? nil
-    // 从没配过 MiMo 的用户不需要凭空得到一个档案。
-    guard legacyProvider == "mimo" || (hadLegacyKey?.isEmpty == false) else {
-      return false
-    }
-
-    var profile = ProviderPreset.mimo.makeProfile()
-    if let baseURL = defaults.string(forKey: AppSettingsKey.legacyMiMoBaseURL),
-      !baseURL.isEmpty
-    {
-      profile.baseURL = baseURL
-    }
-    if let model = defaults.string(forKey: AppSettingsKey.legacyMiMoModel), !model.isEmpty {
-      profile.defaultModel = model
-    }
-
-    providerSettings = ProviderSettings(
-      profiles: [profile],
-      useSimpleMode: true,
-      simpleProfileID: profile.id
+  ) -> Bool {
+    LegacyProviderSettingsMigrator.migrate(
+      defaults: migrationDefaults,
+      keys: LegacyProviderSettingsMigrationKeys(
+        providerSettings: AppSettingsKey.providerSettings,
+        completionMarker: AppSettingsKey.didMigrateLegacyMiMo,
+        legacyProvider: AppSettingsKey.legacySolverProvider,
+        legacyBaseURL: AppSettingsKey.legacyMiMoBaseURL,
+        legacyModel: AppSettingsKey.legacyMiMoModel
+      ),
+      preset: .mimo,
+      legacyProviderID: "mimo",
+      readLegacyKey: readLegacyKey,
+      migrateLegacyKey: migrateLegacyKey
     )
-    try? KeychainStore.migrateLegacyMiMoKey(toProfile: profile.id)
-    return true
   }
 }

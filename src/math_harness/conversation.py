@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Generator, Iterator
 from dataclasses import dataclass, field
 from time import perf_counter
@@ -13,6 +14,29 @@ from math_harness.provider_config import (
     resolve_role,
     role_is_configured,
 )
+
+_INCOMPLETE_HISTORY_PREFIX = (
+    "[Previous assistant response was interrupted and is incomplete.]\n"
+)
+_KEY_LIKE_SECRET = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
+
+
+def conversation_history_content(message: ConversationMessage) -> str:
+    """给模型的历史内容；中断回答必须显式标出，不能伪装成完整上下文。"""
+
+    if message.generation_error and message.role.value == "assistant":
+        return _INCOMPLETE_HISTORY_PREFIX + message.content
+    return message.content
+
+
+def _generation_error(responder: object, exc: Exception) -> str:
+    """记录可诊断错误，但绝不把 provider 密钥写进消息、备份或界面。"""
+
+    detail = f"{exc.__class__.__name__}: {exc}"
+    api_key = getattr(responder, "api_key", None)
+    if isinstance(api_key, str) and api_key:
+        detail = detail.replace(api_key, "[redacted]")
+    return _KEY_LIKE_SECRET.sub("[redacted]", detail)[:2_000]
 
 
 @dataclass(frozen=True)
@@ -41,7 +65,10 @@ class ConversationContext:
                 for memory in self.soft_memories
             ],
             "recent_messages": [
-                {"role": message.role.value, "content": message.content}
+                {
+                    "role": message.role.value,
+                    "content": conversation_history_content(message),
+                }
                 for message in self.recent_messages
             ],
             "trusted_method_cards": [
@@ -131,7 +158,7 @@ def stream_chat_generation(
             chunks.append(chunk)
             yield chunk
     except Exception as exc:  # noqa: BLE001
-        error = f"{exc.__class__.__name__}: {exc}"[:2_000]
+        error = _generation_error(responder, exc)
 
     content = "".join(chunks)
     if not content:
@@ -199,7 +226,12 @@ class ExtractiveConversationSummarizer:
         if existing_summary.strip():
             lines.append(existing_summary.strip())
         for message in messages:
-            label = "用户" if message.role.value == "user" else "助手"
+            if message.role.value == "user":
+                label = "用户"
+            elif message.generation_error:
+                label = "助手（回复中断）"
+            else:
+                label = "助手"
             content = " ".join(message.content.split())
             if len(content) > self.per_message_characters:
                 content = content[: self.per_message_characters - 1] + "…"

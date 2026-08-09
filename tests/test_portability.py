@@ -13,6 +13,8 @@ from math_harness.api import create_app
 from math_harness.errors import InvalidPortableData
 from math_harness.models import (
     ConversationCreate,
+    ConversationMessageKind,
+    ConversationRole,
     ConversationTurnRequest,
     ExampleCreate,
     MathPayload,
@@ -133,6 +135,40 @@ def test_backup_restore_round_trip_rebinds_every_workspace_reference(tmp_path):
     )
 
 
+def test_backup_restore_preserves_interrupted_generation_metadata(tmp_path):
+    service = MathHarnessService(tmp_path)
+    source = service.create_workspace(WorkspaceCreate(name="断流备份"))
+    conversation = service.create_conversation(
+        source.id, ConversationCreate(title="保留错误")
+    )
+    store = service.workspaces.store(source.id)
+    store.append_conversation_message(
+        conversation.id,
+        "turn-1",
+        ConversationRole.USER,
+        ConversationMessageKind.CHAT,
+        "继续证明",
+    )
+    store.append_conversation_message(
+        conversation.id,
+        "turn-1",
+        ConversationRole.ASSISTANT,
+        ConversationMessageKind.CHAT,
+        "先整理已知条件，",
+        generation_error="RuntimeError: connection reset",
+    )
+
+    restored = service.restore_workspace_backup(
+        service.export_workspace_backup(source.id)
+    )
+    restored_conversation = service.list_conversations(restored.workspace.id)[0]
+    messages = service.list_conversation_messages(
+        restored.workspace.id, restored_conversation.id
+    )
+
+    assert messages[-1].generation_error == "RuntimeError: connection reset"
+
+
 def test_archive_manifest_matches_database_digest_and_counts(tmp_path):
     service, workspace, _ = _populated_service(tmp_path)
     archive_bytes = service.export_workspace_backup(workspace.id)
@@ -206,6 +242,42 @@ def test_restore_accepts_v09_archive_and_backfills_attempt_conversation(tmp_path
     )
     assert [message.role.value for message in messages] == ["user", "assistant"]
     assert messages[-1].attempt_id is not None
+
+
+def test_restore_accepts_v017_archive_without_generation_error_column(tmp_path):
+    service, workspace, _ = _populated_service(tmp_path)
+    original = service.export_workspace_backup(workspace.id)
+    with zipfile.ZipFile(io.BytesIO(original)) as archive:
+        manifest = json.loads(archive.read(MANIFEST_NAME))
+        database = archive.read(DATABASE_NAME)
+
+    database_path = tmp_path / "v017-workspace.sqlite3"
+    database_path.write_bytes(database)
+    connection = sqlite3.connect(database_path)
+    try:
+        connection.execute(
+            "ALTER TABLE conversation_messages DROP COLUMN generation_error"
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    legacy_database = database_path.read_bytes()
+    manifest["app_version"] = "0.17.0"
+    manifest["database"]["sha256"] = hashlib.sha256(legacy_database).hexdigest()
+    manifest["database"]["size"] = len(legacy_database)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w") as archive:
+        archive.writestr(MANIFEST_NAME, json.dumps(manifest))
+        archive.writestr(DATABASE_NAME, legacy_database)
+
+    restored = service.restore_workspace_backup(output.getvalue())
+    conversations = service.list_conversations(restored.workspace.id)
+    messages = service.list_conversation_messages(
+        restored.workspace.id, conversations[0].id
+    )
+
+    assert messages
+    assert all(message.generation_error is None for message in messages)
 
 
 def test_restore_rejects_tampered_database_without_creating_workspace(tmp_path):

@@ -360,6 +360,14 @@ private struct ConversationMessageRow: View {
           HStack(spacing: 8) {
             Text("Math Harness")
               .font(.subheadline.weight(.semibold))
+            if let generationError = message.generationError {
+              ConfidencePill(
+                title: "生成中断",
+                symbol: "wifi.exclamationmark",
+                tint: .orange,
+                help: "这条回复没有生成完整，已保留正文，但不会被验算或写入知识库。\n\(generationError)"
+              )
+            }
             if let verification = message.verificationStatus {
               VerificationPill(status: verification)
             }
@@ -386,7 +394,8 @@ private struct ConversationMessageRow: View {
                 help: process.explanation
               )
             }
-            if message.verificationStatus == nil, message.conclusionConfidence == nil,
+            if message.generationError == nil, message.verificationStatus == nil,
+              message.conclusionConfidence == nil,
               message.kind == "chat"
             {
               Text("对话")

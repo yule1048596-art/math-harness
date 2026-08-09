@@ -363,9 +363,18 @@ final class AppModel: ObservableObject {
       return false
     }
 
+    let usesStreaming = mathTarget == nil
+    if usesStreaming {
+      streamingReply = ""
+    }
     isSolving = true
     errorMessage = nil
-    defer { isSolving = false }
+    defer {
+      isSolving = false
+      if usesStreaming {
+        streamingReply = ""
+      }
+    }
     do {
       let conversationID: String
       if let selectedConversationID {
@@ -387,23 +396,19 @@ final class AppModel: ObservableObject {
       // 指定了验算目标的回合不流式：那条路的正文由求解器和验证器一起产出，
       // 中间没有可以逐字给出的东西。
       let result: ConversationTurnResult
-      if mathTarget == nil {
-        streamingReply = ""
+      if usesStreaming {
         result = try await api.streamConversationTurn(
           workspaceID: workspaceID,
           conversationID: conversationID,
           request: turnRequest
         ) { [weak self] delta in
-          Task { @MainActor in
-            guard let self else { return }
-            guard
-              workspaceID == self.selectedWorkspaceID,
-              conversationID == self.selectedConversationID
-            else { return }
-            self.streamingReply += delta
-          }
+          guard let self else { return }
+          guard
+            workspaceID == self.selectedWorkspaceID,
+            conversationID == self.selectedConversationID
+          else { return }
+          self.streamingReply += delta
         }
-        streamingReply = ""
       } else {
         result = try await api.sendConversationTurn(
           workspaceID: workspaceID,
@@ -421,6 +426,10 @@ final class AppModel: ObservableObject {
       }
       if !messages.contains(where: { $0.id == result.assistantMessage.id }) {
         messages.append(result.assistantMessage)
+      }
+      if result.assistantMessage.generationError != nil {
+        errorMessage =
+          "模型连接中断；已保留收到的内容，但未验算或写入知识库。可以重新生成。"
       }
       messages.sort { $0.ordinal < $1.ordinal }
       if let index = conversations.firstIndex(where: { $0.id == result.conversation.id }) {

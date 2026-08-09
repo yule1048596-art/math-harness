@@ -101,7 +101,7 @@ public actor APIClient {
     workspaceID: String,
     conversationID: String,
     request: ConversationTurnRequest,
-    onDelta: @escaping @Sendable (String) -> Void
+    onDelta: @escaping @MainActor @Sendable (String) -> Void
   ) async throws -> ConversationTurnResult {
     let path = "workspaces/\(workspaceID)/conversations/\(conversationID)/turns/stream"
     var urlRequest = URLRequest(url: requestURL(for: path), timeoutInterval: timeout)
@@ -136,7 +136,7 @@ public actor APIClient {
       }
       switch event.type {
       case "delta":
-        if let text = event.text, !text.isEmpty { onDelta(text) }
+        if let text = event.text, !text.isEmpty { await onDelta(text) }
       case "result":
         if let result = event.result { return result }
         throw APIClientError.invalidResponse

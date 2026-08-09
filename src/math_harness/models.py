@@ -277,6 +277,9 @@ class ConversationMessage(BaseModel):
     content: str = Field(min_length=1, max_length=80_000)
     provider: str | None = Field(default=None, max_length=120)
     model: str | None = Field(default=None, max_length=120)
+    #: 流式生成在正文完整结束前失败时保留错误。正文仍保存供用户查看，但这条消息
+    #: 不得获得可信度、知识草稿或方法卡。
+    generation_error: str | None = Field(default=None, max_length=2_000)
     attempt_id: str | None = None
     knowledge_draft_id: str | None = None
     verification_status: VerificationStatus | None = None

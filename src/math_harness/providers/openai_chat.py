@@ -5,7 +5,11 @@ from collections.abc import Iterator
 from time import perf_counter
 from typing import Any
 
-from math_harness.conversation import ChatGeneration, ConversationContext
+from math_harness.conversation import (
+    ChatGeneration,
+    ConversationContext,
+    conversation_history_content,
+)
 
 PROMPT_VERSION = "conversation-v1"
 
@@ -83,7 +87,7 @@ class OpenAIConversationResponder:
         context_payload = context.model_payload()
         context_payload.pop("recent_messages", None)
         history = [
-            {"role": item.role.value, "content": item.content}
+            {"role": item.role.value, "content": conversation_history_content(item)}
             for item in context.recent_messages
         ]
         return [

@@ -319,6 +319,10 @@ def create_app(
                         "message": f"{exc.__class__.__name__}: {exc}"[:2_000],
                     }
                 )
+            finally:
+                # 客户端断开时 StreamingResponse 会停止迭代。显式关闭内层生成器，
+                # 让对话锁和 provider 流立即释放，而不是等垃圾回收。
+                stream.close()
 
         return StreamingResponse(
             events(),

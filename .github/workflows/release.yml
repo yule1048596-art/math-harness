@@ -6,14 +6,15 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  test-build-release:
+  python-release:
+    name: Python release gates
     runs-on: ubuntu-latest
     steps:
       - name: Check out tagged source
@@ -31,7 +32,7 @@ jobs:
           enable-cache: true
 
       - name: Install locked dependencies
-        run: uv sync --frozen --no-editable --extra dev
+        run: uv sync --frozen --no-editable --extra dev --extra llm
 
       - name: Check formatting and lint
         run: |
@@ -41,33 +42,31 @@ jobs:
       - name: Run tests
         run: uv run --no-editable pytest
 
+      - name: Run mathematical release gates
+        run: |
+          uv run --no-editable math-harness-loop \
+            --data-root "${RUNNER_TEMP}/loop" --check
+          uv run --no-editable math-harness-attribution \
+            --max-mislabel-rate 0.0 --min-coverage 0.6
+          uv run --no-editable math-harness-cross-eval \
+            --data-root "${RUNNER_TEMP}/cross-eval" --check
+          uv run --no-editable math-harness-mutation --check
+
       - name: Build distributions
         run: uv build
 
-      - name: Create or update GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          tag="${GITHUB_REF_NAME}"
-          notes_file=".github/release-notes/${tag}.md"
-
-          if gh release view "${tag}" >/dev/null 2>&1; then
-            gh release upload "${tag}" dist/* --clobber
-          elif [[ -f "${notes_file}" ]]; then
-            gh release create "${tag}" dist/* \
-              --verify-tag \
-              --title "${tag}" \
-              --notes-file "${notes_file}"
-          else
-            gh release create "${tag}" dist/* \
-              --verify-tag \
-              --title "${tag}" \
-              --generate-notes
-          fi
+      - name: Stage Python release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
 
   macos-app:
-    needs: test-build-release
+    name: macOS package gates
     runs-on: macos-15
     steps:
       - name: Check out tagged source
@@ -100,7 +99,62 @@ jobs:
           ./scripts/test_macos_bundle.sh
           MATH_HARNESS_SKIP_APP_BUILD=true ./scripts/package_macos_dmg.sh
 
-      - name: Upload macOS app to GitHub Release
+      - name: Stage macOS release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: macos-packages
+          path: |
+            dist/Math-Harness-*.zip
+            dist/Math-Harness-*.dmg
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: [python-release, macos-app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download Python distributions
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: python-distributions
+          path: release-assets
+
+      - name: Download macOS packages
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: macos-packages
+          path: release-assets
+
+      - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${GITHUB_REF_NAME}" dist/Math-Harness-* --clobber
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          notes_file=".github/release-notes/${tag}.md"
+          shopt -s nullglob
+          assets=(release-assets/*)
+          if [[ "${#assets[@]}" -eq 0 ]]; then
+            echo "No release assets were downloaded." >&2
+            exit 1
+          fi
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" "${assets[@]}" --clobber
+          elif [[ -f "${notes_file}" ]]; then
+            gh release create "${tag}" "${assets[@]}" \
+              --verify-tag \
+              --title "${tag}" \
+              --notes-file "${notes_file}"
+          else
+            gh release create "${tag}" "${assets[@]}" \
+              --verify-tag \
+              --title "${tag}" \
+              --generate-notes
+          fi

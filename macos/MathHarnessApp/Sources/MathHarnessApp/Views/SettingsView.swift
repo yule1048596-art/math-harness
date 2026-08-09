@@ -362,7 +362,7 @@ struct SettingsView: View {
       apiKeyDraft = ""
       return
     }
-    apiKeyDraft = (try? KeychainStore.readAPIKey(forProfile: id)) as? String ?? ""
+    apiKeyDraft = (try? KeychainStore.readAPIKey(forProfile: id)) ?? ""
   }
 
   private func addProfile(_ preset: ProviderPreset) {
