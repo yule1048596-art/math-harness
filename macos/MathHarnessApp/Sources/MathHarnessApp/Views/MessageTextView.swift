@@ -14,6 +14,8 @@ struct MessageTextView: View {
   private var textSize = MessageTextSize.medium.rawValue
   @AppStorage(AppSettingsKey.rendersMarkdown)
   private var rendersMarkdown = true
+  @AppStorage(AppSettingsKey.typesetsFormulas)
+  private var typesetsFormulas = true
 
   private var size: MessageTextSize {
     MessageTextSize(rawValue: textSize) ?? .medium
@@ -73,10 +75,28 @@ struct MessageTextView: View {
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 7))
 
     case .paragraph(let content):
+      paragraph(content)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+  }
+
+  /// 段落：有公式就走混排，没有就照旧一整段 `Text`。
+  ///
+  /// 分开是有理由的——混排要把文字切成词才折得了行，而那会让没有公式的普通段落
+  /// 白白多做一遍布局，还可能改变标点的断行位置。绝大多数段落里没有公式。
+  @ViewBuilder
+  private func paragraph(_ content: String) -> some View {
+    let segments = typesetsFormulas ? MathTypesetting.segments(in: content) : []
+    if segments.contains(where: { if case .text = $0 { false } else { true } }) {
+      MathTextLine(
+        segments: segments,
+        size: size.pointSize,
+        lineSpacing: size.lineSpacing
+      )
+    } else {
       inline(content)
         .font(.system(size: size.pointSize))
         .lineSpacing(size.lineSpacing)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
   }
 

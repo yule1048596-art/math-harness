@@ -20,6 +20,7 @@ struct SettingsView: View {
   @AppStorage(AppSettingsKey.messageTextSize) private var messageTextSize = MessageTextSize
     .medium.rawValue
   @AppStorage(AppSettingsKey.rendersMarkdown) private var rendersMarkdown = true
+  @AppStorage(AppSettingsKey.typesetsFormulas) private var typesetsFormulas = true
   @AppStorage(AppSettingsKey.notifiesWhenFinished) private var notifiesWhenFinished = true
 
   enum ProbeState: Equatable {
@@ -254,13 +255,17 @@ struct SettingsView: View {
           }
         }
         Toggle("按 Markdown 渲染回答", isOn: $rendersMarkdown)
+        Toggle("排版 LaTeX 公式", isOn: $typesetsFormulas)
         previewCard
       } header: {
         Text("阅读")
       } footer: {
-        Text("渲染前会先把 x**2、a*b、x_1 里的运算符保护起来，公式不会被 Markdown 改写。")
-          .font(.caption)
-          .foregroundStyle(.secondary)
+        Text(
+          "渲染前会先把 x**2、a*b、x_1 里的运算符保护起来，公式不会被 Markdown 改写。"
+            + "LaTeX 只排版认得的那部分记号，认不出来的整条按原文显示。"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
       }
 
       Section {
@@ -304,6 +309,7 @@ struct SettingsView: View {
       MessageTextView(
         text: """
           **幂法则**：对 x**2 求导得到 2*x。
+          由 $\\frac{d}{dx}x^{n} = n x^{n-1}$ 立刻得到 $\\sum_{k=1}^{n} k$ 的形式。
           - 先看指数 n = 2
           - 再乘回原来的系数
           """

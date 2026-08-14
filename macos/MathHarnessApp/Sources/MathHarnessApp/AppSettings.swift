@@ -11,6 +11,7 @@ enum AppSettingsKey {
   static let sendShortcut = "sendShortcut"
   static let messageTextSize = "messageTextSize"
   static let rendersMarkdown = "rendersMarkdown"
+  static let typesetsFormulas = "typesetsFormulas"
   static let notifiesWhenFinished = "notifiesWhenFinished"
   static let didMigrateLegacyMiMo = "didMigrateLegacyMiMo"
 
@@ -165,6 +166,11 @@ enum AppSettings {
   /// 是否按 Markdown 渲染回答正文。
   static var rendersMarkdown: Bool {
     boolean(AppSettingsKey.rendersMarkdown, default: true)
+  }
+
+  /// 是否把 `$...$` 里的 LaTeX 排成真正的公式。认不出来的照旧显示原文。
+  static var typesetsFormulas: Bool {
+    boolean(AppSettingsKey.typesetsFormulas, default: true)
   }
 
   /// 回答完成时，窗口不在前台就跳一下 Dock 图标。

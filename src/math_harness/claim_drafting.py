@@ -10,6 +10,12 @@ from math_harness.checks import Binding, Claim, ClaimKind, SamplingDomain
 from math_harness.errors import UnsafeExpression
 from math_harness.math_parser import SafeMathParser
 from math_harness.models import ExtractionStatus
+from math_harness.provider_config import (
+    ROLE_CLAIM_DRAFTER,
+    ResolvedRole,
+    resolve_role,
+    role_is_configured,
+)
 
 # 从模型的回答里把可检验的断言抽出来。
 #
@@ -411,6 +417,116 @@ def extract_expressions(
     return found
 
 
+class DraftedClaimSource(BaseModel):
+    """模型提出的一条断言，连同它的出处。
+
+    `answer_quote` 和 `problem_quote` 不是装饰：模型版把一个新的失败模式带进来——
+    它可以**凭空造一条断言**。规则版抽错了至少抽的是回答原文；模型版可以编一条看起来
+    对的等式，SymPy 验过，用户看到「符号验证」徽章，而验的根本不是回答里说的话。
+    出处是唯一能机检这件事的东西。
+    """
+
+    lhs: str = Field(min_length=1, max_length=500)
+    rhs: str = Field(min_length=1, max_length=500)
+    #: 回答里支持这条断言的原文，必须逐字出现在回答里。
+    answer_quote: str = Field(min_length=1, max_length=500)
+    #: 题面里支持左边的原文。回答自带完整等式时留空。
+    problem_quote: str = Field(default="", max_length=500)
+    description: str = Field(default="", max_length=200)
+
+
+#: 出处比对前的归一：折叠空白。
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _collapsed(text: str) -> str:
+    return _WHITESPACE.sub("", text)
+
+
+def quote_is_grounded(quote: str, source: str) -> bool:
+    """引文必须真的出现在原文里。
+
+    只折叠空白，不做别的宽松处理——「出处」的意义就在于逐字可查。允许模型改写，
+    这道闸就等于没有。
+    """
+
+    collapsed = _collapsed(quote)
+    return bool(collapsed) and collapsed in _collapsed(source)
+
+
+def _appears_in(expression: str, text: str) -> bool:
+    """这个表达式在这段文本里出现过（按数学写法归一后比对）。"""
+
+    normalized = _collapsed(normalize_math_text(expression))
+    return bool(normalized) and normalized in _collapsed(normalize_math_text(text))
+
+
+def ground_drafted_claims(
+    drafted: list[DraftedClaimSource],
+    *,
+    problem: str,
+    answer: str,
+    parser: SafeMathParser | None = None,
+) -> list[Claim]:
+    """把模型提出的断言逐条过闸，只放行有出处、能解析的那些。
+
+    三道闸：
+
+    1. **出处必须在原文里**——引文对不上就整条丢掉；
+    2. **至少一侧来自回答**——两边都只能追溯到题面，说明模型在自己解题然后验自己的解。
+       那是自查（负收益），而且它验的不是用户看到的那条回答；
+    3. **必须过安全解析器**——模型输出的是字符串，解析不了的丢掉。
+
+    第四道闸是构造性的：这里只产出 `Claim`，检查流水线照常跑，可信度只由 SymPy 给，
+    模型碰不到。
+    """
+
+    parser = parser or SafeMathParser()
+    kept: list[Claim] = []
+    for item in drafted:
+        if not quote_is_grounded(item.answer_quote, answer):
+            continue
+        if item.problem_quote and not quote_is_grounded(item.problem_quote, problem):
+            continue
+        if not (_appears_in(item.lhs, answer) or _appears_in(item.rhs, answer)):
+            continue
+        claim = _claim_from_drafted(item, parser)
+        if claim is not None:
+            kept.append(claim)
+    return kept
+
+
+def _claim_from_drafted(
+    item: DraftedClaimSource, parser: SafeMathParser
+) -> Claim | None:
+    lhs = normalize_math_text(item.lhs)
+    rhs = normalize_math_text(item.rhs)
+    if not lhs or not rhs:
+        return None
+    bindings = infer_bindings([lhs, rhs], parser)
+    # 用不带假设的纯符号表，和实例化检查里那张一致——取值域由 binding 说了算，不该
+    # 由符号假设偷偷决定。这一段与 `extract_claims` 保持同一套做法。
+    table = {binding.symbol: sp.Symbol(binding.symbol) for binding in bindings}
+    try:
+        parser.parse(lhs, table)
+        parser.parse(rhs, table)
+    except (UnsafeExpression, sp.SympifyError, SyntaxError, TypeError, ValueError):
+        return None
+    description = item.description.strip()
+    if item.problem_quote:
+        # 算子是模型从题面解读出来的，不在任何原文里。抽错题的残余风险不可能归零，
+        # 处理方式和 v0.15 一样：让它看得见。
+        marker = f"解读自题面：{item.problem_quote.strip()}"
+        description = f"{description}（{marker}）" if description else marker
+    return Claim(
+        kind=ClaimKind.EQUALITY,
+        lhs=lhs,
+        rhs=rhs,
+        bindings=bindings,
+        description=description[:500],
+    )
+
+
 class RuleBasedClaimDrafter:
     """不调模型，直接从回答文本里扫可检验的等式。"""
 
@@ -441,3 +557,67 @@ class RuleBasedClaimDrafter:
             provider=self.name,
             prompt_version=self.prompt_version,
         )
+
+
+class ModelAssistedClaimDrafter:
+    """规则优先，抽不出来才问模型。
+
+    顺序不是随手定的。规则版免费、只碰回答原文，它能覆盖的场景没必要花钱，也没必要
+    引入解读风险；模型只补规则版够不着的那一类——回答里没有等式，答案得和题面拼起来
+    才成为一条断言。
+
+    副作用是个好性质：只要规则版抽得出来，行为与 v0.18 **逐字相同**。
+    """
+
+    prompt_version = "claim-model-assisted-v1"
+
+    def __init__(
+        self,
+        primary: ClaimDrafterProtocol,
+        fallback: ClaimDrafterProtocol | None = None,
+    ) -> None:
+        self.primary = primary
+        self.fallback = fallback or RuleBasedClaimDrafter()
+        self.name = f"{self.fallback.name}->{primary.name}"
+
+    def draft(self, problem: str, answer: str) -> ClaimDraft:
+        rules = self.fallback.draft(problem, answer)
+        if rules.is_checkable:
+            return rules
+        try:
+            drafted = self.primary.draft(problem, answer)
+        except Exception as exc:  # noqa: BLE001
+            return rules.model_copy(
+                update={"error": f"{exc.__class__.__name__}: {exc}"[:2_000]}
+            )
+        if not drafted.is_checkable:
+            return drafted
+        return drafted
+
+
+def build_claim_drafter_from_resolved(
+    resolved: ResolvedRole | None,
+) -> ClaimDrafterProtocol:
+    """按已解析好的角色参数构造。没配就是纯规则版，一次模型调用都不会发生。"""
+
+    if resolved is None:
+        return RuleBasedClaimDrafter()
+    from math_harness.providers.openai_claims import OpenAIStructuredClaimDrafter
+
+    return ModelAssistedClaimDrafter(
+        primary=OpenAIStructuredClaimDrafter(
+            model=resolved.model,
+            reasoning_effort=resolved.reasoning_effort,
+            timeout_seconds=resolved.timeout_seconds,
+            api_key=resolved.api_key,
+            base_url=resolved.base_url,
+            provider_name=resolved.provider_name,
+            structured_output_mode=resolved.structured_output_mode,
+        )
+    )
+
+
+def build_claim_drafter_from_env() -> ClaimDrafterProtocol:
+    if role_is_configured(ROLE_CLAIM_DRAFTER):
+        return build_claim_drafter_from_resolved(resolve_role(ROLE_CLAIM_DRAFTER))
+    return RuleBasedClaimDrafter()
