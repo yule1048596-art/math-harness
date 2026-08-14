@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from _thread import LockType
+from collections import OrderedDict
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
 from pathlib import Path
@@ -263,6 +264,10 @@ class MathHarnessService:
         # thread-pool worker 上推进/关闭生成器，普通 Lock 允许由关闭方可靠释放。
         self._conversation_turn_locks: dict[tuple[str, str], LockType] = {}
         self._conversation_turn_locks_guard = Lock()
+        # 已被叫停的回合。停止请求走另一个 HTTP 请求（SSE 是单向的），所以这张表要
+        # 跨线程可见；键就是 turn_id，客户端每次发送都生成一个新的。
+        self._stopped_turns: OrderedDict[str, None] = OrderedDict()
+        self._stopped_turns_guard = Lock()
         self._memory_wakeup = Event()
         self._memory_stop = Event()
         self._memory_thread: Thread | None = None
@@ -1092,28 +1097,62 @@ class MathHarnessService:
         没有可以逐字给出的东西。
         """
 
-        with self._conversation_turn_lock(workspace_id, conversation_id):
-            with self._knowledge_lock:
-                setup = self._begin_turn(workspace_id, conversation_id, request)
-            if isinstance(setup, ConversationTurnResult):
-                # 这个 turn_id 已经完整答过了。重放不重新生成，把原文一次给回去。
-                if setup.assistant_message is not None:
-                    yield setup.assistant_message.content
-                return setup
+        try:
+            with self._conversation_turn_lock(workspace_id, conversation_id):
+                with self._knowledge_lock:
+                    setup = self._begin_turn(workspace_id, conversation_id, request)
+                if isinstance(setup, ConversationTurnResult):
+                    # 这个 turn_id 已经完整答过了。重放不重新生成，把原文一次给回去。
+                    if setup.assistant_message is not None:
+                        yield setup.assistant_message.content
+                    return setup
 
-            generation: ChatGeneration | None = None
-            if request.math_target is None:
-                responder = self.resolve_conversation_responder(setup.override)
-                generation = yield from stream_chat_generation(
-                    responder,
-                    setup.context,
-                    request.message,
-                    request.max_output_tokens,
-                )
-            with self._knowledge_lock:
-                return self._finish_turn(
-                    workspace_id, conversation_id, request, setup, generation
-                )
+                generation: ChatGeneration | None = None
+                if request.math_target is None:
+                    responder = self.resolve_conversation_responder(setup.override)
+                    turn_id = setup.turn_id
+                    generation = yield from stream_chat_generation(
+                        responder,
+                        setup.context,
+                        request.message,
+                        request.max_output_tokens,
+                        should_stop=lambda: self._turn_is_stopped(turn_id),
+                    )
+                with self._knowledge_lock:
+                    return self._finish_turn(
+                        workspace_id, conversation_id, request, setup, generation
+                    )
+        finally:
+            if request.turn_id:
+                self._clear_turn_stop(request.turn_id)
+
+    def request_turn_stop(self, turn_id: str) -> None:
+        """标记这一回合应当停止。
+
+        停止**不是取消**：已经吐出去的正文照常落库，只是带上中断标记——不检查、不给
+        可信度、不进知识库。用户按停止和网络断掉在这一点上没有区别，走同一条路。
+
+        故意不校验 turn_id 是否正在生成：停止请求可能比生成请求先到（客户端一发出去
+        就能按），那时拒绝掉，用户看到的就是「按了没反应」。落一个标记等它自己来取，
+        代价只是一条僵尸记录，而下面那个上限管着它。
+        """
+
+        with self._stopped_turns_guard:
+            self._stopped_turns[turn_id] = None
+            self._stopped_turns.move_to_end(turn_id)
+            while len(self._stopped_turns) > self._MAX_TRACKED_STOPS:
+                self._stopped_turns.popitem(last=False)
+
+    #: 停止标记的保留上限。回合结束时会自己清掉，这条只防没人来取的僵尸记录堆积。
+    _MAX_TRACKED_STOPS = 512
+
+    def _turn_is_stopped(self, turn_id: str) -> bool:
+        with self._stopped_turns_guard:
+            return turn_id in self._stopped_turns
+
+    def _clear_turn_stop(self, turn_id: str) -> None:
+        with self._stopped_turns_guard:
+            self._stopped_turns.pop(turn_id, None)
 
     #: 允许晋级的结论档位。
     #

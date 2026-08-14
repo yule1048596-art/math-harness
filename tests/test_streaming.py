@@ -108,8 +108,20 @@ class SecretLeakingResponder(StreamingResponder):
 
 
 def drive(service, workspace_id, conversation_id, message="求导数"):
+    return drive_turn(service, workspace_id, conversation_id, message=message)
+
+
+def drive_turn(
+    service,
+    workspace_id,
+    conversation_id,
+    message="求导数",
+    turn_id=None,
+):
     stream = service.stream_conversation_turn(
-        workspace_id, conversation_id, ConversationTurnRequest(message=message)
+        workspace_id,
+        conversation_id,
+        ConversationTurnRequest(message=message, turn_id=turn_id),
     )
     deltas: list[str] = []
     while True:
@@ -650,3 +662,183 @@ def test_a_failed_fallback_redacts_provider_credentials(service_and_conversation
     assert error
     assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in error
     assert "[redacted]" in error
+
+
+# --- 停止生成 ---------------------------------------------------------
+#
+# 停止**不是取消**。已经吐出去的正文照常落库，只是带上中断标记——不检查、不给可信度、
+# 不进知识库。用户主动叫停和网络断掉在这一点上没有区别，走的是同一条路。
+
+
+class GatedResponder:
+    """吐出第一段后等一个闸门，用来在两段之间稳定地插入停止请求。"""
+
+    name = "gated"
+    model = "m"
+    prompt_version = "v1"
+
+    def __init__(self) -> None:
+        self.released = Event()
+        self.first_sent = Event()
+        self.respond_calls = 0
+
+    def stream(self, context, message, max_output_tokens):
+        del context, message, max_output_tokens
+        yield "先求导：diff(x**2, x) = 2*x\n"
+        self.first_sent.set()
+        self.released.wait(timeout=3)
+        yield "再讨论定义域。"
+
+    def respond(self, context, message, max_output_tokens):
+        del context, message, max_output_tokens
+        self.respond_calls += 1
+        return ChatGeneration(
+            content=WHOLE_ANSWER, provider=self.name, model=self.model
+        )
+
+
+def test_stopping_keeps_what_arrived_and_marks_it_interrupted(
+    service_and_conversation,
+):
+    responder = GatedResponder()
+    service, workspace_id, conversation_id = service_and_conversation(responder)
+    stream = service.stream_conversation_turn(
+        workspace_id,
+        conversation_id,
+        ConversationTurnRequest(message="求 x**2 的导数", turn_id="turn-stop"),
+    )
+
+    first = next(stream)
+    service.request_turn_stop("turn-stop")
+    responder.released.set()
+    with pytest.raises(StopIteration) as stop:
+        next(stream)
+    result = stop.value.value
+    message = result.assistant_message
+
+    assert message.content == first
+    # 停下来之后不再往屏幕上接字。
+    assert "定义域" not in message.content
+    assert message.generation_error is not None
+
+
+def test_a_stopped_reply_is_never_checked_or_learned(service_and_conversation):
+    """这条正文里有一条 SymPy 验得过的等式。它照样不许拿可信度。"""
+
+    responder = GatedResponder()
+    service, workspace_id, conversation_id = service_and_conversation(responder)
+    stream = service.stream_conversation_turn(
+        workspace_id,
+        conversation_id,
+        ConversationTurnRequest(message="求 x**2 的导数", turn_id="turn-stop"),
+    )
+
+    next(stream)
+    service.request_turn_stop("turn-stop")
+    responder.released.set()
+    with pytest.raises(StopIteration) as stop:
+        next(stream)
+    message = stop.value.value.assistant_message
+
+    assert message.conclusion_confidence is None
+    assert message.process_confidence is None
+    assert message.checked_claims == []
+    assert stop.value.value.knowledge_draft is None
+    assert service.list_examples(workspace_id) == []
+
+
+def test_stopping_does_not_trigger_a_full_regeneration(service_and_conversation):
+    """空流会退回非流式再试一次。被叫停的那次**不能**——那是在用户说「别答了」
+    之后再完整生成一遍，既费钱又违背他刚表达的意思。"""
+
+    responder = SilentStreamResponder()
+    service, workspace_id, conversation_id = service_and_conversation(responder)
+    service.request_turn_stop("turn-stop")
+
+    _, result = drive_turn(service, workspace_id, conversation_id, turn_id="turn-stop")
+
+    assert responder.respond_calls == 0
+    assert result.assistant_message.generation_error is not None
+
+
+def test_a_stop_only_applies_to_the_turn_it_names(service_and_conversation):
+    service, workspace_id, conversation_id = service_and_conversation(
+        StreamingResponder()
+    )
+    service.request_turn_stop("some-other-turn")
+
+    deltas, result = drive_turn(
+        service, workspace_id, conversation_id, turn_id="turn-mine"
+    )
+
+    assert "".join(deltas) == WHOLE_ANSWER
+    assert result.assistant_message.generation_error is None
+
+
+def test_resending_after_a_stop_generates_normally(service_and_conversation):
+    """停止之后马上重发是最常见的下一步。它必须是一次干净的生成。"""
+
+    service, workspace_id, conversation_id = service_and_conversation(
+        StreamingResponder()
+    )
+    service.request_turn_stop("turn-1")
+    _, stopped = drive_turn(service, workspace_id, conversation_id, turn_id="turn-1")
+    assert stopped.assistant_message.generation_error is not None
+
+    deltas, result = drive_turn(
+        service, workspace_id, conversation_id, turn_id="turn-2"
+    )
+
+    assert result.assistant_message.generation_error is None
+    assert "".join(deltas) == WHOLE_ANSWER
+
+
+def test_the_stop_endpoint_ends_the_turn_with_a_result_event(tmp_path):
+    """客户端按下停止后**不断开那条流**：中断消息由服务端正常收尾后送回来。"""
+
+    app = create_app(tmp_path)
+    responder = GatedResponder()
+    app.state.service.conversation_responder = responder
+    client = TestClient(app)
+    workspace = client.post("/workspaces", json={"name": "w"}).json()
+    conversation = client.post(
+        f"/workspaces/{workspace['id']}/conversations", json={"title": "t"}
+    ).json()
+    base = f"/workspaces/{workspace['id']}/conversations/{conversation['id']}"
+    events: list[dict] = []
+
+    def read() -> None:
+        with client.stream(
+            "POST",
+            f"{base}/turns/stream",
+            json={"message": "求 x**2 的导数", "turn_id": "turn-http"},
+        ) as response:
+            events.extend(read_events(response))
+
+    reader = Thread(target=read)
+    reader.start()
+    try:
+        assert responder.first_sent.wait(timeout=3)
+        stopped = client.post(f"{base}/turns/turn-http/stop")
+        assert stopped.status_code == 202
+    finally:
+        responder.released.set()
+        reader.join(timeout=5)
+
+    assert events[-1]["type"] == "result"
+    message = events[-1]["result"]["assistant_message"]
+    assert message["generation_error"]
+    assert message["conclusion_confidence"] is None
+    assert events[-1]["result"]["knowledge_draft"] is None
+
+
+def test_stopping_an_unknown_conversation_is_a_not_found(tmp_path):
+    app = create_app(tmp_path)
+    client = TestClient(app)
+    workspace = client.post("/workspaces", json={"name": "w"}).json()
+
+    response = client.post(
+        f"/workspaces/{workspace['id']}/conversations/nope/turns/turn-x/stop"
+    )
+
+    assert response.status_code == 404

@@ -3,32 +3,33 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct RootView: View {
-  private enum InspectorPane: Equatable {
-    case knowledge
-    case memory
-  }
-
   @EnvironmentObject private var model: AppModel
-  @State private var showingCreateWorkspace = false
-  @State private var inspectorPane: InspectorPane? = .knowledge
   @State private var importDraft: CorpusImportDraft?
   @State private var noticeMessage: String?
 
+  /// 面板只在有工作区时才有内容可显示。
+  ///
+  /// 以前它无条件挂在整棵树上：首次启动没有工作区时，右边照样立着一块「没有待复核
+  /// 草稿」，而开关按钮藏在「有工作区」的判断里——于是那块面板关不掉。
+  private var showsInspector: Bool {
+    model.selectedWorkspace != nil && model.inspectorPane != nil
+  }
+
   var body: some View {
     NavigationSplitView {
-      SidebarView(showingCreateWorkspace: $showingCreateWorkspace)
-        .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 300)
+      SidebarView()
+        .navigationSplitViewColumnWidth(min: 210, ideal: 250, max: 320)
     } detail: {
       detail
     }
     .inspector(
       isPresented: Binding(
-        get: { inspectorPane != nil },
-        set: { if !$0 { inspectorPane = nil } }
+        get: { showsInspector },
+        set: { if !$0 { model.inspectorPane = nil } }
       )
     ) {
       Group {
-        switch inspectorPane {
+        switch model.inspectorPane {
         case .knowledge:
           KnowledgeInspectorView()
         case .memory:
@@ -50,18 +51,18 @@ struct RootView: View {
           .help("刷新当前工作区")
 
           Button {
-            inspectorPane = inspectorPane == .knowledge ? nil : .knowledge
+            model.inspectorPane = model.inspectorPane == .knowledge ? nil : .knowledge
           } label: {
             Label("知识库", systemImage: "books.vertical")
           }
-          .help(inspectorPane == .knowledge ? "隐藏知识库" : "显示知识库")
+          .help(model.inspectorPane == .knowledge ? "隐藏知识库（⌥⌘I）" : "显示知识库（⌥⌘I）")
 
           Button {
-            inspectorPane = inspectorPane == .memory ? nil : .memory
+            model.inspectorPane = model.inspectorPane == .memory ? nil : .memory
           } label: {
             Label("记忆", systemImage: "brain.head.profile")
           }
-          .help(inspectorPane == .memory ? "隐藏记忆工坊" : "显示记忆工坊")
+          .help(model.inspectorPane == .memory ? "隐藏记忆工坊（⌥⌘M）" : "显示记忆工坊（⌥⌘M）")
 
           Menu {
             Button("导入题库……", systemImage: "square.and.arrow.down.on.square") {
@@ -89,7 +90,7 @@ struct RootView: View {
         .help("模型服务、角色分配与通用设置（⌘,）")
       }
     }
-    .sheet(isPresented: $showingCreateWorkspace) {
+    .sheet(isPresented: $model.showingCreateWorkspace) {
       CreateWorkspaceSheet()
     }
     .sheet(item: $importDraft) { draft in
@@ -155,7 +156,7 @@ struct RootView: View {
           Text("不同工作区的题目、方法和成长记录彼此隔离。")
         } actions: {
           Button("新建工作区") {
-            showingCreateWorkspace = true
+            model.showingCreateWorkspace = true
           }
           .buttonStyle(.borderedProminent)
         }

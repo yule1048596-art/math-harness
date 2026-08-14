@@ -20,6 +20,9 @@ struct MathHarnessDesktopApp: App {
       RootView()
         .environmentObject(model)
         .preferredColorScheme(colorScheme)
+        // 侧栏 250 + 检查器 280 之外还要留得下一段对话；再窄就只能读半行。
+        .frame(minWidth: 880, minHeight: 560)
+        .background(WindowAccessor(autosaveName: "MathHarnessMainWindow"))
         .task {
           // 迁移必须先于后端启动：BackendProcessController 读的是迁移后的档案。
           AppSettings.migrateLegacySettingsIfNeeded()
@@ -35,6 +38,7 @@ struct MathHarnessDesktopApp: App {
     }
     .defaultSize(width: 1_180, height: 760)
     .windowToolbarStyle(.unifiedCompact)
+    .commands { MathHarnessCommands(model: model) }
 
     Settings {
       SettingsView()
