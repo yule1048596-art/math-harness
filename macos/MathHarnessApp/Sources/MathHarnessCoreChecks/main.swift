@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.17.1"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.18.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.17.1", "ready version")
+require(ready.version == "0.18.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -157,6 +157,20 @@ require(
   "interrupted message preserves generation error"
 )
 require(interruptedMessage.conclusionConfidence == nil, "interrupted message is untrusted")
+require(!interruptedMessage.wasStoppedByUser, "a dropped connection is not a user stop")
+
+let stoppedMessageData = Data(
+  #"{"id":"msg-stopped","workspace_id":"ws-1","conversation_id":"chat-1","turn_id":"turn-stopped","ordinal":5,"role":"assistant","kind":"chat","content":"先求导：","provider":"mimo","model":"mimo-7b","generation_error":"StoppedByUser: 用户中止了这次生成","attempt_id":null,"knowledge_draft_id":null,"verification_status":null,"conclusion_confidence":null,"process_confidence":null,"counterexample":{},"checked_claims":[],"method_keys":[],"created_at":"2026-08-13T00:30:00Z"}"#
+    .utf8
+)
+let stoppedMessage = try JSONDecoder().decode(
+  ConversationMessage.self,
+  from: stoppedMessageData
+)
+// 用户自己按的停止和断线在数据上一样——都不检查、不入库。差别只在怎么说：自己按的
+// 停止不该弹一个「连接中断」的错误提示。
+require(stoppedMessage.wasStoppedByUser, "a user stop is recognised")
+require(stoppedMessage.conclusionConfidence == nil, "a stopped message is untrusted")
 
 let gradedMessageData = Data(
   #"{"id":"msg-2","workspace_id":"ws-1","conversation_id":"chat-1","turn_id":"turn-2","ordinal":4,"role":"assistant","kind":"chat","content":"(a+b)^2 - (a-b)^2 = 4ab","provider":"mimo","model":"mimo-7b","attempt_id":null,"knowledge_draft_id":null,"verification_status":null,"conclusion_confidence":"verified","process_confidence":"step_failed","counterexample":{"a":"7","b":"-4"},"checked_claims":["(a+b)**2 = a**2 + 2*a*b + b**2"],"method_keys":[],"created_at":"2026-08-07T01:00:00Z"}"#
@@ -406,5 +420,61 @@ require(providerObject?["api_key"] == nil, "conversation provider carries no key
 let renameData = try JSONEncoder().encode(ConversationRenameRequest(title: "新标题"))
 let renameObject = try JSONSerialization.jsonObject(with: renameData) as? [String: Any]
 require(renameObject?["title"] as? String == "新标题", "rename encoding")
+
+// --- Markdown 与数学记号的冲突 ---------------------------------------
+//
+// 这一组是本项目里 Markdown 渲染唯一的风险点：把公式改掉。`x**2 + y**2` 交给
+// Markdown 会变成 `x<strong>2 + y</strong>2`，星号凭空消失，用户看不出发生了什么。
+
+let escape = MathMarkdown.escapingMathOperators
+
+// 运算符要被转义掉。
+require(escape("x**2 + y**2") == #"x\*\*2 + y\*\*2"#, "power operator is escaped")
+require(escape("a*b*c") == #"a\*b\*c"#, "multiplication is escaped")
+require(escape("x_1 + x_2") == #"x\_1 + x\_2"#, "subscript is escaped")
+require(escape("(a+b)**2") == #"(a+b)\*\*2"#, "power after a bracket is escaped")
+
+// 中文正文里的强调要活下来。
+require(escape("**重点**内容") == "**重点**内容", "bold around CJK survives")
+require(escape("设 **a** 为常数") == "设 **a** 为常数", "spaced bold survives")
+require(escape("- **步骤 1**：求导") == "- **步骤 1**：求导", "bold before punctuation survives")
+
+// 反引号里的东西已经是代码，再插反斜杠会真的显示出来。
+require(escape("`x**2`") == "`x**2`", "code spans are left alone")
+require(escape(#"\*"#) == #"\*"#, "an existing escape is not doubled")
+
+let sample = """
+  ### 求导步骤
+
+  1. 先用幂法则
+  - 再检查定义域
+
+  ```
+  diff(x**2, x)
+  ```
+
+  结论是 2*x。
+  """
+let sampleBlocks = MathMarkdown.blocks(from: sample)
+require(
+  sampleBlocks.first == .heading(level: 3, text: "求导步骤"),
+  "heading block"
+)
+require(
+  sampleBlocks.contains(.listItem(marker: "1.", text: "先用幂法则")),
+  "ordered list block"
+)
+require(
+  sampleBlocks.contains(.listItem(marker: "•", text: "再检查定义域")),
+  "bullet list block"
+)
+require(sampleBlocks.contains(.code("diff(x**2, x)")), "fenced code block")
+require(sampleBlocks.last == .paragraph("结论是 2*x。"), "trailing paragraph")
+
+// 以数字开头的正常句子不是列表。
+require(
+  MathMarkdown.blocks(from: "2026 年的题目") == [.paragraph("2026 年的题目")],
+  "a sentence starting with digits is not a list"
+)
 
 print("MathHarnessCore checks passed")

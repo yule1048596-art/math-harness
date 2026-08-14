@@ -25,7 +25,7 @@ def test_local_token_protects_every_route(tmp_path):
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
-        "version": "0.17.1",
+        "version": "0.18.0",
         # provider 配置未设置时为 None；设置界面据此判断后端是否读懂了配置。
         "provider_config_error": None,
     }
@@ -44,7 +44,7 @@ def test_ready_file_is_private_and_contains_connection_metadata(tmp_path):
     payload = json.loads(ready_file.read_text(encoding="utf-8"))
     assert payload["base_url"] == "http://127.0.0.1:54321"
     assert payload["port"] == 54321
-    assert payload["version"] == "0.17.1"
+    assert payload["version"] == "0.18.0"
     assert stat.S_IMODE(ready_file.stat().st_mode) == 0o600
 
 

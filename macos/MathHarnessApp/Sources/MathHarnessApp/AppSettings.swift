@@ -7,6 +7,11 @@ enum AppSettingsKey {
   static let verificationRepair = "verificationRepair"
   static let verificationFallback = "verificationFallback"
   static let appearance = "appearance"
+  static let inspectorPane = "inspectorPane"
+  static let sendShortcut = "sendShortcut"
+  static let messageTextSize = "messageTextSize"
+  static let rendersMarkdown = "rendersMarkdown"
+  static let notifiesWhenFinished = "notifiesWhenFinished"
   static let didMigrateLegacyMiMo = "didMigrateLegacyMiMo"
 
   // v0.11 及更早的键。只在迁移时读取，不再写入。
@@ -27,6 +32,68 @@ enum AppAppearance: String, CaseIterable, Identifiable {
     case .system: "跟随系统"
     case .light: "浅色"
     case .dark: "深色"
+    }
+  }
+}
+
+/// 哪个键发送、哪个键换行。
+///
+/// 数学问题经常要分几行写（条件一行、问题一行），所以默认是 ⌘↩ 发送、↩ 换行。
+/// 习惯了聊天软件的人会想要反过来，那就让他改。
+enum SendShortcut: String, CaseIterable, Identifiable {
+  case commandReturn
+  case plainReturn
+
+  var id: String { rawValue }
+
+  var displayName: String {
+    switch self {
+    case .commandReturn: "⌘↩ 发送，↩ 换行"
+    case .plainReturn: "↩ 发送，⇧↩ 换行"
+    }
+  }
+
+  var hint: String {
+    switch self {
+    case .commandReturn: "⌘↩ 发送"
+    case .plainReturn: "↩ 发送 · ⇧↩ 换行"
+    }
+  }
+}
+
+/// 对话正文的字号。数学解答又长又密，这是最常被调的一项。
+enum MessageTextSize: String, CaseIterable, Identifiable {
+  case small
+  case medium
+  case large
+  case extraLarge
+
+  var id: String { rawValue }
+
+  var displayName: String {
+    switch self {
+    case .small: "紧凑"
+    case .medium: "标准"
+    case .large: "宽松"
+    case .extraLarge: "特大"
+    }
+  }
+
+  var pointSize: CGFloat {
+    switch self {
+    case .small: 12
+    case .medium: 13
+    case .large: 15
+    case .extraLarge: 17
+    }
+  }
+
+  var lineSpacing: CGFloat {
+    switch self {
+    case .small: 2
+    case .medium: 3
+    case .large: 4
+    case .extraLarge: 5
     }
   }
 }
@@ -69,6 +136,40 @@ enum AppSettings {
   static var appearance: AppAppearance {
     AppAppearance(rawValue: defaults.string(forKey: AppSettingsKey.appearance) ?? "")
       ?? .system
+  }
+
+  /// 右侧面板上次是开着还是收着。默认打开知识库——它是这个软件的主张所在。
+  static var inspectorPane: InspectorPane? {
+    get {
+      guard let raw = defaults.string(forKey: AppSettingsKey.inspectorPane) else {
+        return .knowledge
+      }
+      return InspectorPane(rawValue: raw)
+    }
+    set {
+      defaults.set(newValue?.rawValue ?? "", forKey: AppSettingsKey.inspectorPane)
+    }
+  }
+
+  static var sendShortcut: SendShortcut {
+    SendShortcut(rawValue: defaults.string(forKey: AppSettingsKey.sendShortcut) ?? "")
+      ?? .commandReturn
+  }
+
+  static var messageTextSize: MessageTextSize {
+    MessageTextSize(
+      rawValue: defaults.string(forKey: AppSettingsKey.messageTextSize) ?? ""
+    ) ?? .medium
+  }
+
+  /// 是否按 Markdown 渲染回答正文。
+  static var rendersMarkdown: Bool {
+    boolean(AppSettingsKey.rendersMarkdown, default: true)
+  }
+
+  /// 回答完成时，窗口不在前台就跳一下 Dock 图标。
+  static var notifiesWhenFinished: Bool {
+    boolean(AppSettingsKey.notifiesWhenFinished, default: true)
   }
 
   private static func boolean(_ key: String, default fallback: Bool) -> Bool {

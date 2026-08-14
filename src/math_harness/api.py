@@ -335,6 +335,26 @@ def create_app(
             },
         )
 
+    @app.post(
+        "/workspaces/{workspace_id}/conversations/{conversation_id}"
+        "/turns/{turn_id}/stop",
+        status_code=202,
+    )
+    def stop_conversation_turn(
+        workspace_id: str,
+        conversation_id: str,
+        turn_id: str,
+    ) -> dict[str, str]:
+        """请求停止某一回合的生成。
+
+        SSE 是单向的，所以停止只能另开一个请求。**客户端停止后不要断开那条流**——
+        已经收到的正文要由服务端正常收尾成一条中断消息，断开就什么都不剩了。
+        """
+
+        service.workspaces.store(workspace_id).get_conversation(conversation_id)
+        service.request_turn_stop(turn_id)
+        return {"turn_id": turn_id}
+
     @app.get(
         "/workspaces/{workspace_id}/memories",
         response_model=list[MemoryItem],

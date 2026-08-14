@@ -15,6 +15,12 @@ struct SettingsView: View {
   @AppStorage(AppSettingsKey.verificationFallback) private var verificationFallback = true
   @AppStorage(AppSettingsKey.appearance) private var appearance = AppAppearance.system
     .rawValue
+  @AppStorage(AppSettingsKey.sendShortcut) private var sendShortcut = SendShortcut
+    .commandReturn.rawValue
+  @AppStorage(AppSettingsKey.messageTextSize) private var messageTextSize = MessageTextSize
+    .medium.rawValue
+  @AppStorage(AppSettingsKey.rendersMarkdown) private var rendersMarkdown = true
+  @AppStorage(AppSettingsKey.notifiesWhenFinished) private var notifiesWhenFinished = true
 
   enum ProbeState: Equatable {
     case idle
@@ -29,6 +35,10 @@ struct SettingsView: View {
         .tabItem { Label("模型服务", systemImage: "cpu") }
       rolesTab
         .tabItem { Label("角色分配", systemImage: "slider.horizontal.3") }
+      // 不用 `textformat`：中文环境下 SF Symbols 会把它画成「格式」两个字，和下面的
+      // 「界面」叠在一起像两个标题。
+      interfaceTab
+        .tabItem { Label("界面", systemImage: "paintbrush") }
       generalTab
         .tabItem { Label("通用", systemImage: "gearshape") }
       aboutTab
@@ -233,6 +243,77 @@ struct SettingsView: View {
     .formStyle(.grouped)
   }
 
+  // MARK: - 界面
+
+  private var interfaceTab: some View {
+    Form {
+      Section {
+        Picker("正文字号", selection: $messageTextSize) {
+          ForEach(MessageTextSize.allCases) { item in
+            Text(item.displayName).tag(item.rawValue)
+          }
+        }
+        Toggle("按 Markdown 渲染回答", isOn: $rendersMarkdown)
+        previewCard
+      } header: {
+        Text("阅读")
+      } footer: {
+        Text("渲染前会先把 x**2、a*b、x_1 里的运算符保护起来，公式不会被 Markdown 改写。")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      Section {
+        Picker("发送快捷键", selection: $sendShortcut) {
+          ForEach(SendShortcut.allCases) { item in
+            Text(item.displayName).tag(item.rawValue)
+          }
+        }
+      } header: {
+        Text("输入")
+      } footer: {
+        Text("默认 ⌘↩ 发送：数学问题常常要分几行写。⌘↩ 在两种设置下都能发送。")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+
+      Section {
+        Picker("主题", selection: $appearance) {
+          ForEach(AppAppearance.allCases) { item in
+            Text(item.displayName).tag(item.rawValue)
+          }
+        }
+        Toggle("回答完成时提醒", isOn: $notifiesWhenFinished)
+      } header: {
+        Text("外观与提醒")
+      } footer: {
+        Text("提醒只在窗口不在最前面时跳一下 Dock 图标，不需要任何系统权限。")
+          .font(.caption)
+          .foregroundStyle(.secondary)
+      }
+    }
+    .formStyle(.grouped)
+  }
+
+  /// 字号和渲染是「看了才知道合不合适」的设置，所以就地给一段样例。
+  private var previewCard: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text("预览")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      MessageTextView(
+        text: """
+          **幂法则**：对 x**2 求导得到 2*x。
+          - 先看指数 n = 2
+          - 再乘回原来的系数
+          """
+      )
+      .padding(10)
+      .frame(maxWidth: .infinity, alignment: .leading)
+      .background(.background.secondary, in: RoundedRectangle(cornerRadius: 8))
+    }
+  }
+
   // MARK: - 通用
 
   private var generalTab: some View {
@@ -251,14 +332,6 @@ struct SettingsView: View {
         Text("两项都会产生额外的模型调用。关闭后验证失败的结果直接进入待复核，不再自动重试。")
           .font(.caption)
           .foregroundStyle(.secondary)
-      }
-
-      Section("外观") {
-        Picker("主题", selection: $appearance) {
-          ForEach(AppAppearance.allCases) { item in
-            Text(item.displayName).tag(item.rawValue)
-          }
-        }
       }
 
       Section("数据") {

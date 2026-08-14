@@ -64,9 +64,13 @@ public actor APIClient {
     )
   }
 
-  public func listConversations(workspaceID: String) async throws -> [Conversation] {
+  public func listConversations(
+    workspaceID: String,
+    includeArchived: Bool = false
+  ) async throws -> [Conversation] {
     try await send(
-      path: "workspaces/\(workspaceID)/conversations",
+      path: "workspaces/\(workspaceID)/conversations"
+        + (includeArchived ? "?include_archived=true" : ""),
       method: "GET"
     )
   }
@@ -90,6 +94,25 @@ public actor APIClient {
       path: "workspaces/\(workspaceID)/conversations/\(conversationID)/turns",
       method: "POST",
       body: request
+    )
+  }
+
+  /// 请求停止某一回合的生成。
+  ///
+  /// **停止之后不要断开那条流。** 已经收到的正文要由服务端正常收尾成一条中断消息，
+  /// 断开就什么都不剩了——用户看着字出现，然后整段消失，比等它答完更糟。
+  public func stopConversationTurn(
+    workspaceID: String,
+    conversationID: String,
+    turnID: String
+  ) async throws {
+    _ = try await sendRaw(
+      path: "workspaces/\(workspaceID)/conversations/\(conversationID)"
+        + "/turns/\(turnID)/stop",
+      method: "POST",
+      body: nil,
+      accept: "application/json",
+      contentType: nil
     )
   }
 

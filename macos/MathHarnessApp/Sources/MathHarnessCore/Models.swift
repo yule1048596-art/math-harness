@@ -225,6 +225,19 @@ public struct ConversationMessage: Codable, Identifiable, Equatable, Sendable {
   }
 }
 
+extension ConversationMessage {
+  /// 这条回复是被用户按停止中断的，而不是断线。
+  ///
+  /// 两者在数据上完全一样——都是中断，都不检查、不入库。差别只在**怎么说**：
+  /// 用户自己按的停止不该弹一个「连接中断」的错误提示。
+  public var wasStoppedByUser: Bool {
+    generationError?.hasPrefix(ConversationMessage.stoppedByUserPrefix) ?? false
+  }
+
+  /// 与后端 `math_harness.conversation.STOPPED_BY_USER` 对应的前缀。
+  public static let stoppedByUserPrefix = "StoppedByUser"
+}
+
 /// 结论轴的展示形态。后端还会加档位，所以未知值必须能安全落地而不是崩掉。
 public enum ConclusionConfidence: String, Sendable {
   case proofVerified = "proof_verified"

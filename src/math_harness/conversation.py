@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Protocol, runtime_checkable
@@ -19,6 +19,12 @@ _INCOMPLETE_HISTORY_PREFIX = (
     "[Previous assistant response was interrupted and is incomplete.]\n"
 )
 _KEY_LIKE_SECRET = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
+
+#: 用户按下停止时记的错误。
+#
+# 它是**错误**而不是一种正常结束，因为下游按 `error` 是否为空决定要不要检查、给可信度、
+# 写知识库——而半条推导无论是被网络掐断的还是被用户叫停的，都不是答案。
+STOPPED_BY_USER = "StoppedByUser: 用户中止了这次生成"
 
 
 def conversation_history_content(message: ConversationMessage) -> str:
@@ -37,6 +43,22 @@ def _generation_error(responder: object, exc: Exception) -> str:
     if isinstance(api_key, str) and api_key:
         detail = detail.replace(api_key, "[redacted]")
     return _KEY_LIKE_SECRET.sub("[redacted]", detail)[:2_000]
+
+
+def _stopped_generation(
+    responder: object, content: str, started: float
+) -> ChatGeneration:
+    """用户叫停后的收尾：正文照常保留，但这一回合是中断，不是回答。"""
+
+    return ChatGeneration(
+        content=content or "这次回答在生成出任何正文之前就被停止了。",
+        provider=getattr(responder, "name", responder.__class__.__name__),
+        model=getattr(responder, "model", None),
+        prompt_version=getattr(responder, "prompt_version", "conversation-v1"),
+        raw_output=content[:8_000] or None,
+        error=STOPPED_BY_USER,
+        duration_ms=max(0, round((perf_counter() - started) * 1_000)),
+    )
 
 
 @dataclass(frozen=True)
@@ -130,6 +152,7 @@ def stream_chat_generation(
     context: ConversationContext,
     message: str,
     max_output_tokens: int,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Generator[str, None, ChatGeneration]:
     """逐段产出正文，结束时返回完整的一次生成。
 
@@ -145,30 +168,51 @@ def stream_chat_generation(
 
     判据是**用户看到字了没有**，不是流空不空：已经显示了半句再去重新生成，用户要么看到
     正文被换掉，要么在已显示的字后面接上另一次生成的后半段。中断就是中断。
+
+    `should_stop` 是用户按下停止的信号，每吐出一段查一次。停下来之后**不退回非流式**：
+    那会在用户明确叫停之后再完整生成一次，既费钱又违背他刚表达的意思。
     """
 
+    started = perf_counter()
     streaming = isinstance(responder, StreamingResponderProtocol) and hasattr(
         responder, "stream"
     )
+    stopped = should_stop is not None and should_stop()
     if not streaming:
+        if stopped:
+            return _stopped_generation(responder, "", started)
         generation = responder.respond(context, message, max_output_tokens)
         if generation.content:
             yield generation.content
         return generation
+    if stopped:
+        return _stopped_generation(responder, "", started)
 
-    started = perf_counter()
     chunks: list[str] = []
     error: str | None = None
+    stream = responder.stream(context, message, max_output_tokens)
     try:
-        for chunk in responder.stream(context, message, max_output_tokens):
+        for chunk in stream:
+            # 先查停止再吐字：按下停止之后还往屏幕上接一段，用户会以为没停住。
+            # 这一段是刚从 provider 收到、用户还没看见的，丢掉不会造成不一致。
+            if should_stop is not None and should_stop():
+                stopped = True
+                break
             if not chunk:
                 continue
             chunks.append(chunk)
             yield chunk
     except Exception as exc:  # noqa: BLE001
         error = _generation_error(responder, exc)
+    finally:
+        # 提前跳出时立刻关掉底层的 HTTP 流，不等垃圾回收——那期间 provider 还在计费。
+        close = getattr(stream, "close", None)
+        if callable(close):
+            close()
 
     content = "".join(chunks)
+    if stopped:
+        return _stopped_generation(responder, content, started)
     if not content:
         try:
             fallback = responder.respond(context, message, max_output_tokens)

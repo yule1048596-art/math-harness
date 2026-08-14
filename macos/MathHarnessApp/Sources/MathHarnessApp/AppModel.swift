@@ -1,6 +1,16 @@
+import AppKit
 import Combine
 import Foundation
 import MathHarnessCore
+
+/// 右侧检查器显示哪一面板。`nil` 表示收起。
+///
+/// 放在模型里而不是某个视图的 `@State`：工具栏、菜单命令和消息上的「待复核」徽章都要
+/// 打开它，而它们分处三棵不同的视图子树。
+enum InspectorPane: String, Equatable {
+  case knowledge
+  case memory
+}
 
 enum BackendPhase: Equatable {
   case idle
@@ -28,6 +38,13 @@ final class AppModel: ObservableObject {
   /// 它是一段**没有可信度**的临时正文：检查要等整条回复吐完才跑，徽章一边流一边变
   /// 会让用户看到「先说对、又说错」。落到 `messages` 里的那一刻才带上徽章。
   @Published private(set) var streamingReply: String = ""
+  /// 正在流式生成、且可以被叫停的那一回合。为 nil 表示没有可停的东西。
+  ///
+  /// 指定了验算目标的回合不在其列：那条路的正文由求解器和验证器一起产出，中途没有
+  /// 可以停下来保留的半成品。
+  @Published private(set) var stoppableTurnID: String?
+  /// 已经按下停止、正在等服务端收尾。按钮据此变灰，不让人连按。
+  @Published private(set) var isStoppingTurn = false
   @Published private(set) var attempts: [SolutionAttempt] = []
   @Published private(set) var examples: [ProblemExample] = []
   @Published private(set) var methods: [MethodCard] = []
@@ -36,6 +53,18 @@ final class AppModel: ObservableObject {
   @Published private(set) var memoryHealth: MemoryHealth?
   @Published private(set) var memoryActivityMessage: String?
   @Published private(set) var isMemoryOperationInProgress = false
+  @Published var inspectorPane: InspectorPane? = AppSettings.inspectorPane {
+    didSet { AppSettings.inspectorPane = inspectorPane }
+  }
+  // 这两个原本是视图自己的 @State。菜单命令够不着视图状态，而「新建工作区」和
+  // 「搜索」正是最该有快捷键的两件事。
+  @Published var showingCreateWorkspace = false
+  @Published var showingConversationSearch = false
+  /// 点了示例问题之后要填进输入框的文本。输入框取走后自己清空。
+  ///
+  /// **只填不发。** 示例是让人看清这个软件能问什么，不是替他决定问什么——填进去还能改。
+  @Published var suggestedPrompt: String?
+  @Published private(set) var showsArchivedConversations = false
   @Published private(set) var isSolving = false
   @Published private(set) var isDraftingTarget = false
   @Published private(set) var isRefreshing = false
@@ -151,9 +180,12 @@ final class AppModel: ObservableObject {
   }
 
   func renameSelectedConversation(_ title: String) async {
-    guard let api, let workspaceID = selectedWorkspaceID,
-      let conversationID = selectedConversationID
-    else { return }
+    guard let conversationID = selectedConversationID else { return }
+    await renameConversation(conversationID, title: title)
+  }
+
+  func renameConversation(_ conversationID: String, title: String) async {
+    guard let api, let workspaceID = selectedWorkspaceID else { return }
     do {
       replaceConversation(
         try await api.renameConversation(
@@ -167,11 +199,14 @@ final class AppModel: ObservableObject {
     }
   }
 
-  /// 归档只改状态，不删除任何消息。
   func toggleConversationArchive() async {
-    guard let api, let workspaceID = selectedWorkspaceID,
-      let conversation = selectedConversation
-    else { return }
+    guard let conversation = selectedConversation else { return }
+    await toggleConversationArchive(conversation)
+  }
+
+  /// 归档只改状态，不删除任何消息。
+  func toggleConversationArchive(_ conversation: Conversation) async {
+    guard let api, let workspaceID = selectedWorkspaceID else { return }
     let next: ConversationStatus = conversation.status == .archived ? .active : .archived
     do {
       _ = try await api.setConversationStatus(
@@ -179,15 +214,39 @@ final class AppModel: ObservableObject {
         conversationID: conversation.id,
         status: next
       )
-      // 归档后列表不再包含它，所以要重新拉取而不是原地替换；当前选中的那个被归档
-      // 时还得切走，否则界面会停在一个已经不在列表里的对话上。
-      conversations = try await api.listConversations(workspaceID: workspaceID)
+      // 归档后列表可能不再包含它，所以要重新拉取而不是原地替换；当前选中的那个被
+      // 归档时还得切走，否则界面会停在一个已经不在列表里的对话上。
+      conversations = try await loadConversations(workspaceID: workspaceID)
       if !conversations.contains(where: { $0.id == selectedConversationID }) {
         selectConversation(conversations.first?.id)
       }
     } catch {
       errorMessage = error.localizedDescription
     }
+  }
+
+  /// 侧栏是否连已归档的会话一起显示。
+  ///
+  /// 默认不显示。但**只能归档、看不到归档**等于单程票：v0.17 之前归档过的会话在界面上
+  /// 再也找不回来，尽管消息一条没少。
+  func setShowsArchivedConversations(_ value: Bool) async {
+    guard value != showsArchivedConversations else { return }
+    showsArchivedConversations = value
+    guard let workspaceID = selectedWorkspaceID else { return }
+    do {
+      conversations = try await loadConversations(workspaceID: workspaceID)
+    } catch {
+      errorMessage = error.localizedDescription
+    }
+  }
+
+  private func loadConversations(workspaceID: String) async throws -> [Conversation] {
+    try await api?
+      .listConversations(
+        workspaceID: workspaceID,
+        includeArchived: showsArchivedConversations
+      )
+      .sorted { $0.updatedAt > $1.updatedAt } ?? []
   }
 
   func searchConversations(_ query: String) async -> [ConversationMessage] {
@@ -344,6 +403,42 @@ final class AppModel: ObservableObject {
     }
   }
 
+  /// 回答完成时提醒一下。
+  ///
+  /// 数学问题的回答动辄几十秒，人会切走去干别的。这里刻意用 Dock 图标跳动而不是系统
+  /// 通知：不需要任何权限，装了就能用，未签名的开发版也一样。
+  private func notifyTurnFinishedIfNeeded() {
+    guard AppSettings.notifiesWhenFinished, !NSApplication.shared.isActive else {
+      return
+    }
+    NSApplication.shared.requestUserAttention(.informationalRequest)
+  }
+
+  /// 停止当前正在流式生成的回合。
+  ///
+  /// 它**不取消**那条 HTTP 流——已经收到的正文要等服务端正常收尾成一条中断消息。
+  /// 直接断开的话，用户看着字出现，然后整段消失。
+  func stopCurrentTurn() async {
+    guard
+      let api,
+      let workspaceID = selectedWorkspaceID,
+      let conversationID = selectedConversationID,
+      let turnID = stoppableTurnID,
+      !isStoppingTurn
+    else { return }
+    isStoppingTurn = true
+    do {
+      try await api.stopConversationTurn(
+        workspaceID: workspaceID,
+        conversationID: conversationID,
+        turnID: turnID
+      )
+    } catch {
+      isStoppingTurn = false
+      errorMessage = "没能停止这次生成：\(error.localizedDescription)"
+    }
+  }
+
   func selectConversation(_ conversationID: String?) {
     guard conversationID != selectedConversationID else { return }
     selectedConversationID = conversationID
@@ -371,6 +466,8 @@ final class AppModel: ObservableObject {
     errorMessage = nil
     defer {
       isSolving = false
+      stoppableTurnID = nil
+      isStoppingTurn = false
       if usesStreaming {
         streamingReply = ""
       }
@@ -393,6 +490,9 @@ final class AppModel: ObservableObject {
         mathTarget: mathTarget,
         maxOutputTokens: AppSettings.maxOutputTokens
       )
+      if usesStreaming {
+        stoppableTurnID = turnRequest.turnID
+      }
       // 指定了验算目标的回合不流式：那条路的正文由求解器和验证器一起产出，
       // 中间没有可以逐字给出的东西。
       let result: ConversationTurnResult
@@ -427,11 +527,16 @@ final class AppModel: ObservableObject {
       if !messages.contains(where: { $0.id == result.assistantMessage.id }) {
         messages.append(result.assistantMessage)
       }
-      if result.assistantMessage.generationError != nil {
+      if result.assistantMessage.generationError != nil,
+        !result.assistantMessage.wasStoppedByUser
+      {
+        // 自己按的停止不弹错误提示：那不是出错，是他要的结果。消息上的橙色徽章
+        // 已经说明了这条回复不完整。
         errorMessage =
           "模型连接中断；已保留收到的内容，但未验算或写入知识库。可以重新生成。"
       }
       messages.sort { $0.ordinal < $1.ordinal }
+      notifyTurnFinishedIfNeeded()
       if let index = conversations.firstIndex(where: { $0.id == result.conversation.id }) {
         conversations[index] = result.conversation
       } else {
@@ -740,7 +845,10 @@ final class AppModel: ObservableObject {
       return
     }
     do {
-      async let loadedConversations = api.listConversations(workspaceID: workspaceID)
+      async let loadedConversations = api.listConversations(
+        workspaceID: workspaceID,
+        includeArchived: showsArchivedConversations
+      )
       async let loadedAttempts = api.listAttempts(workspaceID: workspaceID)
       async let loadedExamples = api.listExamples(workspaceID: workspaceID)
       async let loadedMethods = api.listMethods(workspaceID: workspaceID)

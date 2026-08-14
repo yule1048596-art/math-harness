@@ -8,7 +8,6 @@ struct WorkspaceView: View {
   @State private var renameDraft = ""
   @State private var searchQuery = ""
   @State private var searchHits: [ConversationMessage] = []
-  @State private var showingSearch = false
 
   private var providerProfiles: [ProviderProfile] {
     AppSettings.providerSettings.profiles
@@ -43,71 +42,24 @@ struct WorkspaceView: View {
 
   private var workspaceHeader: some View {
     HStack(spacing: 12) {
-      VStack(alignment: .leading, spacing: 3) {
-        Text(model.selectedWorkspace?.name ?? "")
+      // 标题就是这段对话自己的名字。工作区名归侧栏——它在这里只是重复，却把
+      // 一整行挤到会话名要缩成「求 x…」的地步。
+      VStack(alignment: .leading, spacing: 2) {
+        Text(model.selectedConversation?.title ?? "新会话")
           .font(.headline)
-        if let description = model.selectedWorkspace?.description,
-          !description.isEmpty
-        {
-          Text(description)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-        }
+          .lineLimit(1)
+        Text(headerSubtitle)
+          .font(.caption)
+          .foregroundStyle(.secondary)
+          .lineLimit(1)
+      }
+      .onTapGesture(count: 2) {
+        guard let conversation = model.selectedConversation else { return }
+        renameDraft = conversation.title
+        showingRename = true
       }
 
       Spacer(minLength: 12)
-
-      Menu {
-        if model.conversations.isEmpty {
-          Text("还没有会话")
-        } else {
-          ForEach(model.conversations) { conversation in
-            Button {
-              model.selectConversation(conversation.id)
-            } label: {
-              if conversation.id == model.selectedConversationID {
-                Label(conversation.title, systemImage: "checkmark")
-              } else {
-                Text(conversation.title)
-              }
-            }
-          }
-          Divider()
-        }
-        Button {
-          Task { _ = await model.createConversation() }
-        } label: {
-          Label("新建会话", systemImage: "square.and.pencil")
-        }
-        if model.selectedConversation != nil {
-          Divider()
-          Button {
-            renameDraft = model.selectedConversation?.title ?? ""
-            showingRename = true
-          } label: {
-            Label("重命名……", systemImage: "pencil")
-          }
-          Button {
-            Task { await model.toggleConversationArchive() }
-          } label: {
-            Label(
-              model.selectedConversation?.status == .archived ? "取消归档" : "归档",
-              systemImage: model.selectedConversation?.status == .archived
-                ? "tray.and.arrow.up" : "archivebox"
-            )
-          }
-        }
-      } label: {
-        Label(
-          model.selectedConversation?.title ?? "新会话",
-          systemImage: "bubble.left.and.bubble.right"
-        )
-        .lineLimit(1)
-      }
-      .menuStyle(.borderlessButton)
-      .frame(maxWidth: 220)
-      .disabled(model.isSolving)
 
       // 对话内切换模型：立即生效，不需要重启数学引擎。选择随这个对话持久化。
       Menu {
@@ -147,31 +99,30 @@ struct WorkspaceView: View {
       .help("这个对话使用的模型服务")
       .disabled(model.selectedConversation == nil || model.isSolving)
 
+      // 待复核是唯一一个「需要你去做点什么」的计数，所以它留在这里，而且可以点开。
+      // 方法卡、记忆、消息三个数是纯信息，各自的面板里都写着，这里不再重复占位。
+      if !model.pendingExamples.isEmpty {
+        Button {
+          model.inspectorPane = .knowledge
+        } label: {
+          Label("\(model.pendingExamples.count) 待复核", systemImage: "tray.full")
+            .font(.caption.weight(.medium))
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(.orange)
+        .help("打开知识库，复核待确认的例题")
+      }
+
       Button {
-        showingSearch.toggle()
+        model.showingConversationSearch.toggle()
       } label: {
         Label("搜索", systemImage: "magnifyingglass")
       }
       .buttonStyle(.borderless)
-      .help("搜索本工作区的会话消息")
-
-      if !model.pendingExamples.isEmpty {
-        Label("\(model.pendingExamples.count) 待复核", systemImage: "tray.full")
-          .font(.caption)
-          .foregroundStyle(.orange)
-      }
-      Label("\(model.methods.count) 张方法卡", systemImage: "books.vertical")
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      Label("\(activeMemoryCount) 条记忆", systemImage: "brain.head.profile")
-        .font(.caption)
-        .foregroundStyle(.secondary)
-      Label("\(model.messages.count) 条消息", systemImage: "text.bubble")
-        .font(.caption)
-        .foregroundStyle(.secondary)
+      .help("搜索本工作区的会话消息（⌘F）")
     }
     .padding(.horizontal, 18)
-    .frame(minHeight: 58)
+    .frame(minHeight: 54)
     .alert("重命名会话", isPresented: $showingRename) {
       TextField("标题", text: $renameDraft)
       Button("取消", role: .cancel) {}
@@ -180,7 +131,7 @@ struct WorkspaceView: View {
         Task { await model.renameSelectedConversation(title) }
       }
     }
-    .popover(isPresented: $showingSearch, arrowEdge: .bottom) {
+    .popover(isPresented: $model.showingConversationSearch, arrowEdge: .bottom) {
       searchPanel
     }
   }
@@ -210,7 +161,7 @@ struct WorkspaceView: View {
           .contentShape(Rectangle())
           .onTapGesture {
             model.selectConversation(hit.conversationID)
-            showingSearch = false
+            model.showingConversationSearch = false
           }
         }
         .listStyle(.plain)
@@ -221,8 +172,12 @@ struct WorkspaceView: View {
     .frame(width: 380)
   }
 
-  private var activeMemoryCount: Int {
-    model.memories.count { $0.status == .active }
+  private var headerSubtitle: String {
+    guard let conversation = model.selectedConversation else {
+      return "直接提问就会开一段新会话"
+    }
+    let memories = model.memories.count { $0.status == .active }
+    return "\(conversation.messageCount) 条消息 · \(memories) 条记忆 · 双击可重命名"
   }
 }
 
@@ -246,15 +201,8 @@ private struct ConversationTimeline: View {
             }
             .frame(maxWidth: .infinity, minHeight: 320)
           } else if model.messages.isEmpty {
-            ContentUnavailableView {
-              Label("这是一段新会话", systemImage: "sparkles")
-            } description: {
-              Text(
-                "直接用自然语言提问，任何数学领域都可以。系统会从回答里找出可检验的"
-                  + "断言，自己验一遍并标注可信度。"
-              )
-            }
-            .frame(maxWidth: .infinity, minHeight: 320)
+            NewConversationStart()
+              .frame(maxWidth: .infinity, minHeight: 300)
           } else {
             ForEach(model.messages) { message in
               ConversationMessageRow(message: message)
@@ -291,6 +239,65 @@ private struct ConversationTimeline: View {
   }
 }
 
+/// 新会话的起点。
+///
+/// 以前这里只有一段说明文字，没有任何可点的东西——「任何数学领域都可以」听起来很像
+/// 客套话。给四个真能点的例子，一眼看出跨度：微积分、线性代数、组合、几何证明。
+private struct NewConversationStart: View {
+  @EnvironmentObject private var model: AppModel
+
+  private static let examples = [
+    ("求 x^3·sin(x) 的导数", "function", "微积分"),
+    ("求矩阵 [[2,1],[1,2]] 的特征值", "squareshape.split.2x2", "线性代数"),
+    ("从 5 个不同的球里取 3 个，有多少种取法？", "number", "组合数学"),
+    ("证明 (a+b)^2 - (a-b)^2 = 4ab", "checkmark.seal", "代数证明"),
+  ]
+
+  var body: some View {
+    VStack(spacing: 16) {
+      VStack(spacing: 6) {
+        Image(systemName: "sparkles")
+          .font(.title)
+          .foregroundStyle(.tint)
+        Text("这是一段新会话")
+          .font(.title3.weight(.semibold))
+        Text("直接用自然语言提问，任何数学领域都可以。回答里能被检验的断言会自动验一遍并标注可信度。")
+          .font(.callout)
+          .foregroundStyle(.secondary)
+          .multilineTextAlignment(.center)
+          .frame(maxWidth: 440)
+      }
+
+      LazyVGrid(
+        columns: [GridItem(.adaptive(minimum: 220), spacing: 10)],
+        spacing: 10
+      ) {
+        ForEach(Self.examples, id: \.0) { example in
+          Button {
+            model.suggestedPrompt = example.0
+          } label: {
+            VStack(alignment: .leading, spacing: 4) {
+              Label(example.2, systemImage: example.1)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+              Text(example.0)
+                .font(.callout)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(.background.secondary, in: RoundedRectangle(cornerRadius: 10))
+          }
+          .buttonStyle(.plain)
+        }
+      }
+      .frame(maxWidth: 520)
+    }
+    .padding(.vertical, 24)
+  }
+}
+
 private struct ConversationMessageRow: View {
   @EnvironmentObject private var model: AppModel
   @State private var showingEdit = false
@@ -301,8 +308,7 @@ private struct ConversationMessageRow: View {
     if message.role == "user" {
       HStack {
         Spacer(minLength: 100)
-        Text(message.content)
-          .textSelection(.enabled)
+        UserMessageText(text: message.content)
           .padding(.horizontal, 14)
           .padding(.vertical, 10)
           .background(.tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 15))
@@ -362,10 +368,13 @@ private struct ConversationMessageRow: View {
               .font(.subheadline.weight(.semibold))
             if let generationError = message.generationError {
               ConfidencePill(
-                title: "生成中断",
-                symbol: "wifi.exclamationmark",
+                title: message.wasStoppedByUser ? "已停止" : "生成中断",
+                symbol: message.wasStoppedByUser
+                  ? "stop.circle" : "wifi.exclamationmark",
                 tint: .orange,
-                help: "这条回复没有生成完整，已保留正文，但不会被验算或写入知识库。\n\(generationError)"
+                help: message.wasStoppedByUser
+                  ? "你停止了这次生成。已经收到的正文保留下来，但不会被验算或写入知识库。"
+                  : "这条回复没有生成完整，已保留正文，但不会被验算或写入知识库。\n\(generationError)"
               )
             }
             if let verification = message.verificationStatus {
@@ -411,9 +420,7 @@ private struct ConversationMessageRow: View {
               .foregroundStyle(.tertiary)
           }
 
-          Text(message.content)
-            .textSelection(.enabled)
-            .lineSpacing(3)
+          MessageTextView(text: message.content)
 
           if !message.counterexample.isEmpty {
             // 反例是这套检查最有用的产物：用户据此才分得清「真错」还是「我少说了
@@ -467,10 +474,51 @@ private struct ConversationMessageRow: View {
         }
         .padding(14)
         .background(.background.secondary, in: RoundedRectangle(cornerRadius: 15))
+        .contextMenu {
+          // 助手消息以前一个菜单项都没有：想复制一段答案只能手动划选。
+          Button {
+            copyToPasteboard(message.content)
+          } label: {
+            Label("复制回答", systemImage: "doc.on.doc")
+          }
+          if !message.counterexample.isEmpty {
+            Button {
+              copyToPasteboard(formattedCounterexample)
+            } label: {
+              Label("复制反例", systemImage: "exclamationmark.magnifyingglass")
+            }
+          }
+          if let question = precedingQuestion {
+            Divider()
+            Button {
+              Task {
+                _ = await model.sendConversationTurn(
+                  message: question, tags: [], mathTarget: nil
+                )
+              }
+            } label: {
+              Label("重新生成", systemImage: "arrow.clockwise")
+            }
+            .disabled(model.isSolving)
+          }
+        }
 
         Spacer(minLength: 52)
       }
     }
+  }
+
+  /// 这条回答对应的提问。重新生成是以新回合追加，原始历史不覆盖。
+  private var precedingQuestion: String? {
+    guard let index = model.messages.firstIndex(where: { $0.id == message.id }) else {
+      return nil
+    }
+    return model.messages[..<index].last { $0.role == "user" }?.content
+  }
+
+  private func copyToPasteboard(_ value: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(value, forType: .string)
   }
 
   private var methodLabels: [String] {
@@ -525,9 +573,7 @@ private struct StreamingReplyRow: View {
           Spacer()
         }
 
-        Text(text)
-          .textSelection(.enabled)
-          .lineSpacing(3)
+        MessageTextView(text: text)
 
         Text("回答完成后会自动检查并标注可信度。")
           .font(.caption)
@@ -604,6 +650,8 @@ private enum ComposerMode: String, CaseIterable, Identifiable {
 
 private struct ConversationComposer: View {
   @EnvironmentObject private var model: AppModel
+  @AppStorage(AppSettingsKey.sendShortcut)
+  private var sendShortcut = SendShortcut.commandReturn.rawValue
   @State private var composerMode: ComposerMode = .chat
   @State private var message = ""
   @State private var tags = ""
@@ -669,29 +717,7 @@ private struct ConversationComposer: View {
         .foregroundStyle(.secondary)
       }
 
-      TextEditor(text: $message)
-        .font(.body)
-        .scrollContentBackground(.hidden)
-        .frame(minHeight: 54, maxHeight: 110)
-        .padding(8)
-        .background(.background, in: RoundedRectangle(cornerRadius: 10))
-        .overlay {
-          RoundedRectangle(cornerRadius: 10)
-            .stroke(.separator, lineWidth: 1)
-        }
-        .overlay(alignment: .topLeading) {
-          if message.isEmpty {
-            Text(
-              composerMode == .chat
-                ? "问任何数学问题——微积分、线性代数、几何、组合、证明……"
-                : "输入需要独立验算的数学问题……"
-            )
-            .foregroundStyle(.tertiary)
-            .padding(.horizontal, 13)
-            .padding(.vertical, 16)
-            .allowsHitTesting(false)
-          }
-        }
+      messageEditor
 
       if composerMode == .verifiedSolve {
         targetEditor
@@ -702,24 +728,42 @@ private struct ConversationComposer: View {
           .font(.caption)
           .foregroundStyle(.secondary)
         Spacer()
-        Button {
-          submit()
-        } label: {
-          if model.isSolving || model.isDraftingTarget {
-            ProgressView()
-              .controlSize(.small)
-              .frame(width: 62)
-          } else {
-            Label(buttonTitle, systemImage: buttonIcon)
+        if model.isSolving, model.stoppableTurnID != nil {
+          // 停止是聊天软件的基本盘。它不取消这一回合：已经吐出来的正文照常保留成
+          // 一条「已停止」的消息——不检查、不入库，和断线走同一条路。
+          Button {
+            Task { await model.stopCurrentTurn() }
+          } label: {
+            Label(
+              model.isStoppingTurn ? "正在停止……" : "停止",
+              systemImage: "stop.fill"
+            )
           }
+          .buttonStyle(.bordered)
+          .tint(.red)
+          .disabled(model.isStoppingTurn)
+          .keyboardShortcut(.escape, modifiers: [])
+          .help("停止生成，保留已经收到的正文")
+        } else {
+          Button {
+            submit()
+          } label: {
+            if model.isSolving || model.isDraftingTarget {
+              ProgressView()
+                .controlSize(.small)
+                .frame(width: 62)
+            } else {
+              Label(buttonTitle, systemImage: buttonIcon)
+            }
+          }
+          .keyboardShortcut(.return, modifiers: [.command])
+          .buttonStyle(.borderedProminent)
+          .disabled(
+            message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+              || model.isSolving
+              || model.isDraftingTarget
+          )
         }
-        .keyboardShortcut(.return, modifiers: [.command])
-        .buttonStyle(.borderedProminent)
-        .disabled(
-          message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            || model.isSolving
-            || model.isDraftingTarget
-        )
       }
     }
     .padding(.horizontal, 18)
@@ -738,6 +782,11 @@ private struct ConversationComposer: View {
       composerMode = .chat
       message = ""
       resetTargetFields()
+    }
+    .onChange(of: model.suggestedPrompt) { _, suggestion in
+      guard let suggestion else { return }
+      message = suggestion
+      model.suggestedPrompt = nil
     }
   }
 
@@ -819,14 +868,76 @@ private struct ConversationComposer: View {
     .font(.caption)
   }
 
+  private var messageEditor: some View {
+    TextEditor(text: $message)
+      .font(.body)
+      .scrollContentBackground(.hidden)
+      .scrollIndicators(.hidden)
+      // 高度跟着内容走。以前是固定 54…110，空着也占满——小窗口下对话区被白白
+      // 吃掉一大块，而那正是要读答案的地方。
+      .frame(height: composerHeight)
+      .padding(8)
+      .background(.background, in: RoundedRectangle(cornerRadius: 10))
+      .overlay {
+        RoundedRectangle(cornerRadius: 10)
+          .stroke(.separator, lineWidth: 1)
+      }
+      .overlay(alignment: .topLeading) {
+        if message.isEmpty {
+          Text(placeholder)
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 12)
+            .allowsHitTesting(false)
+        }
+      }
+      .onKeyPress(keys: [.return]) { press in
+        // ↩ 发送是可选的：数学问题常常要分行写，所以默认仍是 ⌘↩ 发送、↩ 换行。
+        guard sendShortcut == SendShortcut.plainReturn.rawValue else {
+          return .ignored
+        }
+        // 带修饰键的回车一律放行给输入框换行——⇧↩ 是这个模式下唯一的换行方式。
+        let modifiers: EventModifiers = [.shift, .option, .control, .command]
+        guard press.modifiers.isDisjoint(with: modifiers) else { return .ignored }
+        guard canSubmit else { return .ignored }
+        submit()
+        return .handled
+      }
+  }
+
+  private var placeholder: String {
+    composerMode == .chat
+      ? "问任何数学问题——微积分、线性代数、几何、组合、证明……"
+      : "输入需要独立验算的数学问题……"
+  }
+
+  /// 输入框高度：按行数长，到六行封顶再滚动。
+  private var composerHeight: CGFloat {
+    let lines = message.reduce(into: 1) { count, character in
+      if character.isNewline { count += 1 }
+    }
+    // 长行也要占位，否则粘一整段进来仍然只显示一行。
+    let wrapped = max(lines, min(6, message.count / 46 + 1))
+    // 每行 20 再加一段余量：给得不够时 TextEditor 会认为内容装不下，右边挂出一条
+    // 滚动条——空输入框上挂着滚动条很难看。
+    return CGFloat(min(max(wrapped, 2), 6)) * 20 + 14
+  }
+
+  private var canSubmit: Bool {
+    !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && !model.isSolving
+      && !model.isDraftingTarget
+  }
+
   private var statusText: String {
     if model.isDraftingTarget { return "正在整理可验证目标……" }
+    if model.isStoppingTurn { return "正在停止，保留已经收到的正文……" }
     if model.isSolving {
       return composerMode == .chat
         ? "正在结合会话记忆生成回复……"
         : "正在检索、求解并独立验证……"
     }
-    return "⌘↩ 发送"
+    return (SendShortcut(rawValue: sendShortcut) ?? .commandReturn).hint
   }
 
   private var buttonTitle: String {
