@@ -137,6 +137,14 @@ def stream_chat_generation(
 
     生成中途失败时，已经吐出去的部分不丢：用户看着字一个个出现，最后告诉他「刚才那些
     不算数」是最糟的处理方式。已收到的内容照常保存，错误记在生成结果里。
+
+    **一个字都还没吐出去时，退回非流式再试一次。** 流式依赖服务端事件的具体形状，而各家
+    OpenAI 兼容服务并不一致：有的不支持在 Responses 上开流，有的事件名不同。那种情况下
+    一条事件都匹配不上，可同一个请求走非流式完全正常——不退回的话，用户每一轮都看到
+    「生成失败」，而模型是好的。
+
+    判据是**用户看到字了没有**，不是流空不空：已经显示了半句再去重新生成，用户要么看到
+    正文被换掉，要么在已显示的字后面接上另一次生成的后半段。中断就是中断。
     """
 
     streaming = isinstance(responder, StreamingResponderProtocol) and hasattr(
@@ -162,10 +170,22 @@ def stream_chat_generation(
 
     content = "".join(chunks)
     if not content:
+        try:
+            fallback = responder.respond(context, message, max_output_tokens)
+        except Exception as exc:  # noqa: BLE001
+            error = error or _generation_error(responder, exc)
+        else:
+            if fallback.content:
+                yield fallback.content
+                return fallback
         content = (
             "这次对话回复生成失败，但你的消息已经保存在当前工作区。"
             "请检查模型设置或网络后重新发送。"
         )
+        # 这句是占位文案，不是回答。`error` 必须非空，否则下游会把它当成一次正常
+        # 生成——去跑检查、给可信度、存进知识库。静默的空流本身不抛异常，所以这里
+        # 要自己补上。
+        error = error or "EmptyStream: 流式与非流式都没有返回正文"
         yield content
     return ChatGeneration(
         content=content,
