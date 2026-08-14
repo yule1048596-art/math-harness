@@ -509,3 +509,144 @@ def test_the_endpoint_reports_a_failure_as_an_event(tmp_path):
         events = read_events(response)
 
     assert events[-1]["type"] == "error"
+
+
+# --- 空流：吐不出东西，也不报错 ---------------------------------------
+#
+# 流式依赖服务端事件的**具体形状**，而各家 OpenAI 兼容服务并不一致：有的不支持在
+# Responses 上开流，有的事件名不同。一条都匹配不上时既没有异常也没有正文，而同一个
+# 请求走非流式完全正常。
+#
+# 不处理的话有两重后果：用户每一轮都看到「生成失败」，而模型其实是好的；而且那句
+# 固定文案 `generation_error` 为空，会被当成正常回答去跑检查、进知识库。
+
+
+class SilentStreamResponder:
+    """实现了 stream()，但一段都不吐、也不抛错。非流式那条路是好的。"""
+
+    name = "silent"
+    model = "m"
+    prompt_version = "v1"
+
+    def __init__(self) -> None:
+        self.respond_calls = 0
+
+    def stream(self, context, message, max_output_tokens):
+        del context, message, max_output_tokens
+        return iter(())
+
+    def respond(self, context, message, max_output_tokens):
+        del context, message, max_output_tokens
+        self.respond_calls += 1
+        return ChatGeneration(
+            content=WHOLE_ANSWER, provider=self.name, model=self.model
+        )
+
+
+def test_an_empty_stream_falls_back_to_a_normal_call(service_and_conversation):
+    responder = SilentStreamResponder()
+    service, workspace_id, conversation_id = service_and_conversation(responder)
+
+    deltas, result = drive(service, workspace_id, conversation_id)
+    message = result.assistant_message
+
+    assert "".join(deltas) == WHOLE_ANSWER
+    assert message.content == WHOLE_ANSWER
+    assert responder.respond_calls == 1
+    # 退回成功就是一次正常回合：该有可信度，该进知识库。
+    assert message.generation_error is None
+    assert message.conclusion_confidence is not None
+
+
+def test_a_provider_that_refuses_to_stream_falls_back(service_and_conversation):
+    """服务端直接拒绝开流，是同一种情况的另一半。"""
+
+    class RefusingResponder(SilentStreamResponder):
+        name = "refusing"
+
+        def stream(self, context, message, max_output_tokens):
+            del context, message, max_output_tokens
+            raise RuntimeError("this provider does not support stream=True")
+            yield ""  # pragma: no cover
+
+    responder = RefusingResponder()
+    service, workspace_id, conversation_id = service_and_conversation(responder)
+
+    deltas, result = drive(service, workspace_id, conversation_id)
+
+    assert "".join(deltas) == WHOLE_ANSWER
+    assert result.assistant_message.content == WHOLE_ANSWER
+    assert responder.respond_calls == 1
+
+
+def test_partial_content_is_never_replaced_by_a_fallback_call(
+    service_and_conversation,
+):
+    """已经吐了一半再断：保留现场，**不能**再调一次。
+
+    再调一次要么让用户看到正文突然被换掉，要么在已显示的字后面接上另一次生成的
+    后半段。中断就是中断。
+    """
+
+    class PartialThenBroken(SilentStreamResponder):
+        name = "partial"
+
+        def stream(self, context, message, max_output_tokens):
+            del context, message, max_output_tokens
+            yield ANSWER_PARTS[0]
+            raise RuntimeError("连接断了")
+
+    responder = PartialThenBroken()
+    service, workspace_id, conversation_id = service_and_conversation(responder)
+
+    deltas, result = drive(service, workspace_id, conversation_id)
+
+    assert "".join(deltas) == ANSWER_PARTS[0]
+    assert responder.respond_calls == 0
+    assert result.assistant_message.generation_error is not None
+
+
+def test_both_paths_failing_leaves_a_readable_interrupted_message(
+    service_and_conversation,
+):
+    class HopelessResponder(SilentStreamResponder):
+        name = "hopeless"
+
+        def respond(self, context, message, max_output_tokens):
+            del context, message, max_output_tokens
+            self.respond_calls += 1
+            raise RuntimeError("模型服务不可用")
+
+    service, workspace_id, conversation_id = service_and_conversation(
+        HopelessResponder()
+    )
+
+    _, result = drive(service, workspace_id, conversation_id)
+    message = result.assistant_message
+
+    assert "生成失败" in message.content
+    # 这不是一次成功的回答：不许拿可信度，不许进知识库。
+    assert message.generation_error is not None
+    assert message.conclusion_confidence is None
+    assert result.knowledge_draft is None
+
+
+def test_a_failed_fallback_redacts_provider_credentials(service_and_conversation):
+    """退回也可能带出密钥——脱敏不能只在流式那一条路上做。"""
+
+    class LeakyResponder(SilentStreamResponder):
+        name = "leaky"
+        api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"
+
+        def respond(self, context, message, max_output_tokens):
+            del context, message, max_output_tokens
+            raise RuntimeError(f"401 with key {self.api_key}")
+
+    service, workspace_id, conversation_id = service_and_conversation(LeakyResponder())
+
+    _, result = drive(service, workspace_id, conversation_id)
+    error = result.assistant_message.generation_error
+
+    assert error
+    assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in error
+    assert "[redacted]" in error
