@@ -157,6 +157,7 @@ public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
   case targetDrafter = "target_drafter"
   case methodExtractor = "method_extractor"
   case memoryExtractor = "memory_extractor"
+  case claimDrafter = "claim_drafter"
   case reviewer
 
   public var id: String { rawValue }
@@ -168,6 +169,7 @@ public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
     case .targetDrafter: "目标整理"
     case .methodExtractor: "方法提炼"
     case .memoryExtractor: "记忆提取"
+    case .claimDrafter: "抽断言"
     case .reviewer: "异模型复核"
     }
   }
@@ -179,6 +181,9 @@ public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
     case .targetDrafter: "把自然语言题目整理成可验证目标，供你确认。"
     case .methodExtractor: "从已验证解答中提炼方法卡。"
     case .memoryExtractor: "从对话中整理用户画像、学习目标和讲解偏好。"
+    case .claimDrafter:
+      "回答里没有等式时，把题面和答案拼成一条可检验的断言。它只提出，判定仍归 SymPy，"
+        + "而且只在规则版抽不出来时才调用。"
     case .reviewer:
       "换一个模型复核答案。必须绑到与「对话」「求解」不同的档案——同模型自查是负收益，"
         + "相同时这一层会自动跳过。"
@@ -188,7 +193,9 @@ public enum ModelRole: String, Codable, CaseIterable, Identifiable, Sendable {
   /// 求解与方法提炼有零成本的离线实现（SymPy / 规则），可以完全不接模型。
   public var supportsOffline: Bool {
     switch self {
-    case .solver, .methodExtractor, .targetDrafter, .memoryExtractor, .conversation: true
+    case .solver, .methodExtractor, .targetDrafter, .memoryExtractor, .conversation,
+      .claimDrafter:
+      true
     // 复核没有离线实现：本地 SymPy 已经在别的层跑过了，再「离线复核」一遍是空转。
     case .reviewer: false
     }

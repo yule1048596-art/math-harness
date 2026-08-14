@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.18.0"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.19.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.18.0", "ready version")
+require(ready.version == "0.19.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -476,5 +476,98 @@ require(
   MathMarkdown.blocks(from: "2026 年的题目") == [.paragraph("2026 年的题目")],
   "a sentence starting with digits is not a list"
 )
+
+// --- LaTeX 排版 ------------------------------------------------------
+//
+// 一条不让步的规则：**任何一处解析不了，整条公式退回原文显示**。不做部分渲染——
+// 半懂半猜地渲出来，丢掉的那个符号不会有任何提示，而这是数学软件。
+
+typealias MathNode = MathTypesetting.Node
+
+require(MathTypesetting.parse("x") == .text("x"), "a bare symbol")
+require(
+  MathTypesetting.parse(#"\frac{1}{x}"#)
+    == .fraction(numerator: .text("1"), denominator: .text("x")),
+  "fraction"
+)
+require(
+  MathTypesetting.parse("x^2")
+    == .script(base: .text("x"), superscript: .text("2"), subscriptNode: nil),
+  "single-character superscript"
+)
+require(
+  MathTypesetting.parse("a_{ij}")
+    == .script(base: .text("a"), superscript: nil, subscriptNode: .text("ij")),
+  "braced subscript"
+)
+require(
+  MathTypesetting.parse(#"\sqrt[3]{x}"#)
+    == .radical(radicand: .text("x"), index: .text("3")),
+  "cube root"
+)
+require(MathTypesetting.parse(#"\alpha"#) == .text("α"), "greek letter")
+require(MathTypesetting.parse(#"\le"#) == .text("≤"), "relation symbol")
+
+// 大算符的上下标是**上下限**，不是角标——要摆在符号上下，不是右边。
+if case .row(let items)? = MathTypesetting.parse(#"\sum_{k=1}^{n} k"#),
+  case .bigOperator(let symbol, let lower, let upper) = items.first
+{
+  require(symbol == "∑", "sum symbol")
+  require(lower != nil && upper != nil, "sum carries both limits")
+  require(upper == .text("n"), "sum upper limit")
+} else {
+  fatalError("Core check failed: sum with limits")
+}
+
+// 矩阵：线性代数是这个软件的主战场之一。
+if case .matrix(let open, _, let rows)? =
+  MathTypesetting.parse(#"\begin{pmatrix}1 & 2 \\ 3 & 4\end{pmatrix}"#)
+{
+  require(open == "(", "pmatrix delimiter")
+  require(rows.count == 2 && rows[0].count == 2, "pmatrix shape")
+} else {
+  fatalError("Core check failed: pmatrix")
+}
+
+// 认不出来的一律整条作废。
+require(MathTypesetting.parse(#"\foobar{x}"#) == nil, "an unknown command fails")
+require(MathTypesetting.parse(#"\frac{1}"#) == nil, "a missing argument fails")
+require(MathTypesetting.parse("{x") == nil, "an unbalanced brace fails")
+require(MathTypesetting.parse("x_1_2") == nil, "a repeated subscript fails")
+require(MathTypesetting.parse("x @ y") == nil, "an unknown character fails")
+
+// 切分：文字与公式分开，落单的 `$` 不算公式起点。
+require(
+  MathTypesetting.segments(in: "所以 $x^2$ 是它的导数。").count == 3,
+  "text, formula, text"
+)
+if case .rawFormula(let source) = MathTypesetting.segments(in: #"公式 $\foobar$ 结束"#)[1] {
+  // 解析失败要**原样带着定界符**，让用户看见他写的是什么。
+  require(source == #"$\foobar$"#, "a failed formula keeps its source")
+} else {
+  fatalError("Core check failed: failed formula falls back to source")
+}
+require(
+  MathTypesetting.segments(in: "这件事花了 $5 元") == [.text("这件事花了 $5 元")],
+  "an unpaired dollar sign is not a formula"
+)
+if case .formula(_, let display, _) = MathTypesetting.segments(in: "$$x+1$$")[0] {
+  require(display, "double dollars are display math")
+} else {
+  fatalError("Core check failed: display math")
+}
+
+// 设置页那张预览卡里的原句。它渲不出来的话，用户打开设置第一眼看到的就是一段
+// 生 LaTeX。
+for source in [
+  #"\frac{d}{dx}x^{n} = n x^{n-1}"#,
+  #"\sum_{k=1}^{n} k = \frac{n(n+1)}{2}"#,
+  #"\lim_{x \to 0} \frac{\sin x}{x} = 1"#,
+  #"\int_{0}^{1} x^2 dx = \frac{1}{3}"#,
+  #"\sqrt{a^2 + b^2} \le |a| + |b|"#,
+  #"\alpha + \beta \equiv \gamma \pmod{n}"#,
+] {
+  require(MathTypesetting.parse(source) != nil, "typesets: \(source)")
+}
 
 print("MathHarnessCore checks passed")

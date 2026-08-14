@@ -30,7 +30,10 @@ from math_harness.checks import (
 )
 from math_harness.checks.peer_review import ReviewerProtocol
 from math_harness.checks.recompute import ToolClientProtocol
-from math_harness.claim_drafting import ClaimDrafterProtocol, RuleBasedClaimDrafter
+from math_harness.claim_drafting import (
+    ClaimDrafterProtocol,
+    build_claim_drafter_from_env,
+)
 from math_harness.classifier import classify_problem
 from math_harness.config import load_local_environment
 from math_harness.conversation import (
@@ -237,9 +240,10 @@ class MathHarnessService:
         self.generator = generator or build_solution_generator_from_env()
         self.normalizer = normalizer or CandidateSolutionNormalizer()
         self.target_drafter = target_drafter or build_target_drafter_from_env()
-        # 规则版不调模型：数学回答里本来就大量存在能直接解析的等式，抽这些一次调用
-        # 都不用花。模型版抽断言留给以后接。
-        self.claim_drafter = claim_drafter or RuleBasedClaimDrafter()
+        # 没配 claim_drafter 角色时就是纯规则版，一次模型调用都不会发生。配了的话
+        # 也是**规则优先**：能直接从回答里解析出等式的场景不花钱，模型只补规则版
+        # 够不着的那一类。
+        self.claim_drafter = claim_drafter or build_claim_drafter_from_env()
         # 这两层都默认关闭，各有各的理由：
         #   复核要额外花一次模型调用，而且只有绑到**另一个** provider 才有价值；
         #   独立重算要发网络请求，离线路径「不发请求」的承诺不能因为加了它而变。

@@ -52,6 +52,7 @@ jobs:
           uv run --no-editable math-harness-cross-eval \
             --data-root "${RUNNER_TEMP}/cross-eval" --check
           uv run --no-editable math-harness-mutation --check
+          uv run --no-editable math-harness-claims --check
 
       - name: Build Python distributions
         run: uv build
