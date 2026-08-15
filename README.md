@@ -9,7 +9,7 @@
 [查看全部版本](https://github.com/yule1048596-art/math-harness/releases) ·
 [MIT License](LICENSE)
 
-> 当前版本：**v0.20.1 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
+> 当前版本：**v0.21.0 Beta**。推荐使用 Apple Silicon Mac 和 macOS 14 或更高版本。
 > 当前公开安装包使用 ad-hoc 签名，尚未完成 Developer ID 公证。
 
 ## 它能做什么
@@ -69,7 +69,7 @@ Math Harness 的“成长”目前指的是**可审计的记忆、方法卡、�
 安装步骤：
 
 1. 打开 [最新 Release](https://github.com/yule1048596-art/math-harness/releases/latest)。
-2. 下载文件名类似 `Math-Harness-0.20.1-macOS-arm64.dmg` 的安装镜像。
+2. 下载文件名类似 `Math-Harness-0.21.0-macOS-arm64.dmg` 的安装镜像。
 3. 打开 DMG，把 `Math Harness.app` 拖入“应用程序”文件夹。
 4. 从“应用程序”中启动 Math Harness。
 
@@ -957,6 +957,8 @@ uv run --no-editable math-harness-cross-eval --data-root /tmp/xeval --check
 uv run --no-editable math-harness-attribution --max-mislabel-rate 0.0 --min-coverage 0.6
 # 抽断言闸门：证明的是四道闸和管道，**不是模型的抽取质量**——语料里的模型输出是手工录的
 uv run --no-editable math-harness-claims --check
+# 入库相关性：误收率与保留率**同时**看——只看误收的话，一道把什么都拦下来的闸门满分
+uv run --no-editable math-harness-relevance --check
 
 # 原生 macOS 开发运行
 ./scripts/run_macos_app.sh

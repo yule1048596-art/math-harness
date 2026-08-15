@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.20.1"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.21.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.20.1", "ready version")
+require(ready.version == "0.21.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -298,6 +298,17 @@ require(
 )
 require(example.methodDrafts.first?.procedure == ["乘共轭"], "method draft preview")
 require(example.revision == 1, "example revision")
+// 上面那份 JSON 里**没有** `looks_irrelevant`。缺键必须解码成 false 而不是抛错——
+// 非可选属性会让整条例题解不出来，知识库直接空掉。
+require(!example.looksIrrelevant, "a missing looks_irrelevant decodes as false")
+
+let flaggedData = Data(
+  String(decoding: exampleData, as: UTF8.self)
+    .replacingOccurrences(of: #""revision":1"#, with: #""revision":1,"looks_irrelevant":true"#)
+    .utf8
+)
+let flagged = try JSONDecoder().decode(ProblemExample.self, from: flaggedData)
+require(flagged.looksIrrelevant, "looks_irrelevant decodes when present")
 
 let updateData = try JSONEncoder().encode(
   ExampleDraftUpdateRequest(
@@ -1053,7 +1064,7 @@ require(
 
 // --- 设置往返 --------------------------------------------------------
 //
-// v0.20.1 修的那个 bug 是「没人调用保存」，视图生命周期的事，这里够不着。但同一类
+// v0.21.0 修的那个 bug 是「没人调用保存」，视图生命周期的事，这里够不着。但同一类
 // 后果——**配置存下去又读不回来**——有一半是可测的：编码往返丢字段。
 
 var roundTrip = ProviderSettings()

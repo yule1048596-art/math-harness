@@ -9,6 +9,9 @@ import SwiftUI
 /// 再渲染；解析失败就退回纯文本，绝不因为渲染而少显示一个字。
 struct MessageTextView: View {
   let text: String
+  /// 固定字号，忽略「阅读」设置。知识库面板那种窄栏里正文是附属信息，跟着会话字号走
+  /// 会把面板撑破——但公式**照样要排出来**，那正是它该显示的东西。
+  var fixedSize: MessageTextSize?
 
   @AppStorage(AppSettingsKey.messageTextSize)
   private var textSize = MessageTextSize.medium.rawValue
@@ -18,7 +21,7 @@ struct MessageTextView: View {
   private var typesetsFormulas = true
 
   private var size: MessageTextSize {
-    MessageTextSize(rawValue: textSize) ?? .medium
+    fixedSize ?? MessageTextSize(rawValue: textSize) ?? .medium
   }
 
   var body: some View {

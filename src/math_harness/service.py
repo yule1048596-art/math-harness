@@ -160,6 +160,11 @@ from math_harness.provider_config import (
     resolve_override,
 )
 from math_harness.providers.openai_reviewer import build_reviewer_from_env
+from math_harness.relevance import (
+    RelevanceGate,
+    RelevanceVerdict,
+    build_relevance_gate_from_env,
+)
 from math_harness.retrieval import MethodRetriever
 from math_harness.solving import (
     SolutionGeneratorProtocol,
@@ -200,6 +205,20 @@ class _TurnSetup:
     override: ProviderOverride | None
 
 
+def _recent_questions(context: ConversationContext) -> list[str]:
+    """判定模型能看到的上文：**只有用户自己说过的话**。
+
+    承接式追问（「这个怎么证明？」）离开上文判不了，所以上文必须给。但给的只有用户这一侧
+    ——把回答一起喂进去，等于请它复现当前这个 bug：回答里有数学，于是什么都算解题。
+    """
+
+    return [
+        message.content
+        for message in context.recent_messages
+        if message.role is ConversationRole.USER
+    ][-5:]
+
+
 @dataclass(frozen=True)
 class _PreparedIngestion:
     request: ExampleCreate
@@ -228,6 +247,7 @@ class MathHarnessService:
         normalizer: CandidateSolutionNormalizer | None = None,
         target_drafter: TargetDrafterProtocol | None = None,
         claim_drafter: ClaimDrafterProtocol | None = None,
+        relevance_gate: RelevanceGate | None = None,
         reviewer: ReviewerProtocol | None = None,
         tool_client: ToolClientProtocol | None = None,
         conversation_responder: ConversationResponderProtocol | None = None,
@@ -246,6 +266,10 @@ class MathHarnessService:
         # 也是**规则优先**：能直接从回答里解析出等式的场景不花钱，模型只补规则版
         # 够不着的那一类。
         self.claim_drafter = claim_drafter or build_claim_drafter_from_env()
+        # 「这一轮到底有没有出题」。抽断言只审回答，审不出这件事——一句「你好」，模型
+        # 顺口回一条正确公式，旧代码就当成解题入了库。没绑 relevance_judge 角色时是
+        # 纯规则版：扎不住即不进库，保守方向。
+        self.relevance_gate = relevance_gate or build_relevance_gate_from_env()
         # 这两层都默认关闭，各有各的理由：
         #   复核要额外花一次模型调用，而且只有绑到**另一个** provider 才有价值；
         #   独立重算要发网络请求，离线路径「不发请求」的承诺不能因为加了它而变。
@@ -1012,11 +1036,26 @@ class MathHarnessService:
         if generation_error is None:
             # 聊天路径也过检查。以前这条路一次检查都不做，于是「只有渐进题能被验证」——
             # 而模型本来就答得了各领域的题，卡住的从来不是模型，是这道闸。
-            assessment, checked_claims = self._check_assistant_answer(
+            assessment, checked_claims, relevance = self._check_assistant_answer(
                 request.message,
                 assistant_content,
                 answer_profile_id=provider,
+                recent_questions=_recent_questions(context),
+                # 求解路径的题面由用户显式给出，不存在「有没有出题」的疑问。
+                gate_relevance=request.math_target is None,
             )
+            if relevance is not None and not relevance.may_enter_knowledge_base:
+                # 跳过必须留痕：度量要靠它，用户日后也要能查「为什么这轮没入库」。
+                store.record_learning_event(
+                    "turn_relevance_skipped",
+                    turn_id,
+                    {
+                        "relevance": relevance.relevance.value,
+                        "source": relevance.source,
+                        "reason": relevance.reason,
+                        "model_calls": relevance.model_calls,
+                    },
+                )
             if knowledge_draft is None:
                 knowledge_draft = self._capture_chat_knowledge(
                     workspace_id,
@@ -1245,7 +1284,10 @@ class MathHarnessService:
         if request.math_payload is not None:
             return self.verifier.verify(request.math_payload)
 
-        assessment, _ = self._check_assistant_answer(request.problem, request.solution)
+        # 手工录入和批量导入的题面是用户自己填的，不存在「有没有出题」的疑问。
+        assessment, _, _ = self._check_assistant_answer(
+            request.problem, request.solution, gate_relevance=False
+        )
         if assessment is None:
             return self.verifier.verify(None)
         return self._report_from(assessment)
@@ -1343,11 +1385,20 @@ class MathHarnessService:
         answer: str,
         *,
         answer_profile_id: str | None = None,
-    ) -> tuple[ConfidenceAssessment | None, list[str]]:
-        """从回答里抽出断言，跑一遍检查流水线。
+        recent_questions: list[str] | None = None,
+        gate_relevance: bool = True,
+    ) -> tuple[ConfidenceAssessment | None, list[str], RelevanceVerdict | None]:
+        """从回答里抽出断言，判一下这一轮在不在解题，再跑检查流水线。
 
-        抽不出可检验内容时返回 `(None, [])`——那不是失败，只是这条回答没有可机检的
+        抽不出可检验内容时返回 `(None, [], None)`——那不是失败，只是这条回答没有可机检的
         部分，照样正常展示。检查本身出问题也不能把用户的回答弄丢，所以整段兜住异常。
+
+        **相关性判定排在检查之前**，顺序是有意的：不是解题的回合一步检查都不该跑。一句
+        「你好」跑完整条流水线（符号化简 + 实例化 + 逐步）既是白花算力，更会让它拿到一个
+        名不副实的徽章——这正是用户报的那个问题。
+
+        `gate_relevance=False` 留给求解路径：那条路的题面由用户显式给出，本就不存在
+        「有没有出题」的疑问。
 
         返回的断言原文要展示给用户：抽错题的风险始终存在（会验证一个你没问的命题），
         处理方式是让它**可见**，而不是事前拦着不让走。
@@ -1356,7 +1407,15 @@ class MathHarnessService:
         try:
             draft = self.claim_drafter.draft(problem, answer)
             if not draft.is_checkable:
-                return None, []
+                return None, [], None
+            verdict: RelevanceVerdict | None = None
+            if gate_relevance:
+                claims = ([draft.claim] if draft.claim else []) + draft.steps
+                verdict = self.relevance_gate.evaluate(
+                    problem, claims, recent_questions
+                )
+                if not verdict.may_enter_knowledge_base:
+                    return None, [], verdict
             checks = [
                 SymbolicEqualityCheck(),
                 InstantiationCheck(),
@@ -1382,10 +1441,12 @@ class MathHarnessService:
                     answer_text=answer,
                 ),
             )
-            claims = [f"{item.lhs} = {item.rhs}" for item in draft.steps if item.rhs]
-            return assess(report), claims
+            claim_texts = [
+                f"{item.lhs} = {item.rhs}" for item in draft.steps if item.rhs
+            ]
+            return assess(report), claim_texts, verdict
         except Exception:  # noqa: BLE001
-            return None, []
+            return None, [], None
 
     def _build_conversation_context(
         self,

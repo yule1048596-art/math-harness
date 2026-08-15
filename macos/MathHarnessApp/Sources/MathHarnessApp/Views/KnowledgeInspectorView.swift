@@ -295,11 +295,27 @@ private struct KnowledgeDraftCard: View {
             }
         }
       } else {
-        Text(example.solution)
-          .font(.caption)
+        // 正文走和会话里同一条渲染路径。以前这里是纯 `Text`，于是待复核面板把
+        // `\[ \frac{d}{dx}x^n = nx^{n-1} \]` 原样摊出来——公式排版只接进了会话正文，
+        // 而这里显示的是同一份内容。
+        //
+        // 折叠时限高而不是限行数：`lineLimit` 是逐个 `Text` 生效的，按块渲染之后
+        // 它管不住整段。
+        MessageTextView(text: example.solution, fixedSize: .small)
           .foregroundStyle(.secondary)
-          .lineLimit(expanded ? nil : 5)
-          .textSelection(.enabled)
+          .frame(maxHeight: expanded ? nil : 96, alignment: .top)
+          .clipped()
+      }
+
+      if example.looksIrrelevant {
+        // v0.21 之前的入库门禁只审回答、不审问题，于是一句「你好」也能留下一条例题。
+        // 新闸门只挡以后的，**不回溯删旧数据**——判据刚改过，删不删由你决定。
+        Label(
+          "这条看起来不像一道数学题。旧版本的入库门禁不审提问，可能收进了闲聊。",
+          systemImage: "questionmark.circle"
+        )
+        .font(.caption2)
+        .foregroundStyle(.orange)
       }
 
       if isEditing {
