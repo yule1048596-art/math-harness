@@ -35,7 +35,9 @@ struct MathFormulaView: View {
     case .op(let value):
       Text(value)
         .font(.system(size: size, design: .serif))
-        .padding(.horizontal, 1.5)
+        // 留白要跟着字号缩。固定 1.5pt 在缩小的角标里显得过宽，`x^{n-1}` 会散成
+        // `n - 1`，看着像三个独立的符号。
+        .padding(.horizontal, size * 0.1)
 
     case .row(let items):
       HStack(alignment: .firstTextBaseline, spacing: 1) {
@@ -142,6 +144,16 @@ struct MathFormulaView: View {
       .alignmentGuide(.firstTextBaseline) { context in
         context[VerticalAlignment.center] + size * 0.35
       }
+
+    case .boxed(let body):
+      child(body, size)
+        .padding(.horizontal, size * 0.35)
+        .padding(.vertical, size * 0.22)
+        .overlay {
+          RoundedRectangle(cornerRadius: 3)
+            .stroke(.secondary, lineWidth: max(0.8, size * 0.045))
+        }
+        .fixedSize()
     }
   }
 

@@ -36,7 +36,7 @@ public enum MathMarkdown {
     var codeLines: [String] = []
     var inCode = false
 
-    for rawLine in text.components(separatedBy: .newlines) {
+    for rawLine in joiningDisplayFormulas(text.components(separatedBy: .newlines)) {
       let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
       if trimmed.hasPrefix("```") {
         if inCode {
@@ -69,6 +69,66 @@ public enum MathMarkdown {
       blocks.append(.code(codeLines.joined(separator: "\n")))
     }
     return blocks
+  }
+
+  /// 行间公式常常跨行写：`\[` 独占一行，公式在中间，`\]` 又独占一行。
+  ///
+  /// 块切分是按行走的，这样的公式会被切成三块，哪一块都找不到自己的另一半定界符,
+  /// 于是整条落回普通文字——而 Markdown 又把 `\[` 当成转义的方括号，屏幕上只剩一个
+  /// `[`，公式源码原样摊在那里。所以在切块之前先把它们合成一行。
+  ///
+  /// 合不拢的一律原样返回（**不吞行**）：没有闭合定界符、中间夹了空行、或者长得离谱，
+  /// 都说明它多半不是一条公式。少认只是显示成几行普通文字，认错会让用户丢掉内容。
+  private static func joiningDisplayFormulas(_ lines: [String]) -> [String] {
+    var result: [String] = []
+    var index = 0
+    var inCode = false
+
+    while index < lines.count {
+      let line = lines[index]
+      if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+        inCode.toggle()
+      } else if !inCode, let joined = joinedDisplayFormula(lines, at: index) {
+        result.append(joined.line)
+        index = joined.nextIndex
+        continue
+      }
+      result.append(line)
+      index += 1
+    }
+    return result
+  }
+
+  /// 行间公式的定界符。行内的 `\(...\)`、`$...$` 不在此列：它们本来就写在一行里。
+  private static let displayDelimiters = [("\\[", "\\]"), ("$$", "$$")]
+
+  /// 一条行间公式最多跨多少行。**流式输出时每来一个字都要重排一遍**，没有上限的话
+  /// 一个落单的 `\[` 会让每一帧都扫到正文结尾。
+  private static let displayFormulaLineLimit = 40
+
+  private static func joinedDisplayFormula(
+    _ lines: [String], at start: Int
+  ) -> (line: String, nextIndex: Int)? {
+    let first = lines[start].trimmingCharacters(in: .whitespaces)
+    guard
+      let delimiter = displayDelimiters.first(where: { first.hasPrefix($0.0) })
+    else { return nil }
+    // 本行之内就收尾了：原来的逐行处理认得，不用合并。
+    guard !first.dropFirst(delimiter.0.count).contains(delimiter.1) else { return nil }
+
+    var parts = [first]
+    var index = start + 1
+    while index < lines.count, parts.count <= displayFormulaLineLimit {
+      let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+      // 行间公式里不该出现空行。出现了就说明这个 `\[` 根本不是公式的开头。
+      guard !trimmed.isEmpty else { return nil }
+      parts.append(trimmed)
+      if trimmed.contains(delimiter.1) {
+        return (parts.joined(separator: " "), index + 1)
+      }
+      index += 1
+    }
+    return nil
   }
 
   private static func headingBlock(_ line: String) -> Block? {

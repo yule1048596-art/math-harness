@@ -10,6 +10,8 @@ struct SettingsView: View {
   @State private var probeState: ProbeState = .idle
   @State private var errorMessage: String?
   @State private var isRestarting = false
+  /// 配置已经存下来了，但跑着的后端还是旧的。后端在启动时读配置，所以改完要重启才生效。
+  @State private var needsRestart = false
   @AppStorage(AppSettingsKey.maxOutputTokens) private var maxOutputTokens = 3_000
   @AppStorage(AppSettingsKey.verificationRepair) private var verificationRepair = true
   @AppStorage(AppSettingsKey.verificationFallback) private var verificationFallback = true
@@ -49,6 +51,17 @@ struct SettingsView: View {
     }
     .frame(width: 640, height: 560)
     .onAppear(perform: load)
+    // 配置改一下存一下，不等按钮。
+    //
+    // 这是一个实打实的数据丢失 bug：v0.20 之前唯一写盘的地方是「应用并重启数学引擎」，
+    // 而那个按钮在「通用」页。于是在「模型服务」页加一个档案、填好密钥、**测试连接
+    // 还显示成功**，然后关掉窗口——全没了。绿色的对勾给的信号是「配置好了」，实际上
+    // 一个字节都没落盘。
+    .onChange(of: settings) { _, _ in persist() }
+    // 密钥不在 `settings` 里（它只进钥匙串），所以单独盯着。写钥匙串是本地操作、不弹
+    // 授权框，每次按键存一下的代价可以忽略；而少存一次的代价是用户得回控制台重取。
+    .onChange(of: apiKeyDraft) { _, _ in saveKey(for: selectedProfileID) }
+    .onDisappear(perform: persist)
     .alert(
       "无法保存设置",
       isPresented: Binding(
@@ -159,9 +172,35 @@ struct SettingsView: View {
             Spacer()
           }
         }
+
+        // 重启提示必须出现在这一页。
+        //
+        // 「测试连接成功」证明的是**密钥能用**，不是**引擎已经拿到它**——后端只在启动
+        // 时读一次配置。这两件事被自然地读成同一件，而代价是下一条消息直接生成失败。
+        if needsRestart {
+          Section {
+            HStack(spacing: 10) {
+              Label(
+                "配置已保存，但数学引擎还在用旧配置",
+                systemImage: "exclamationmark.arrow.circlepath"
+              )
+              .font(.callout)
+              .foregroundStyle(.orange)
+              Spacer()
+              Button("重启数学引擎") { restartEngine() }
+                .buttonStyle(.borderedProminent)
+                .disabled(isRestarting)
+            }
+          }
+        }
       }
       .formStyle(.grouped)
-      .onChange(of: selectedProfileID) { _, _ in loadKeyForSelection() }
+      // 切换档案前先把上一个的密钥存下来。不然编辑框会被下一个档案的密钥直接盖掉，
+      // 刚填的那个连去处都没有。
+      .onChange(of: selectedProfileID) { previous, _ in
+        saveKey(for: previous)
+        loadKeyForSelection()
+      }
     } else {
       ContentUnavailableView(
         "还没有模型服务",
@@ -412,11 +451,25 @@ struct SettingsView: View {
       }
 
       Section {
-        HStack {
+        HStack(spacing: 10) {
+          if needsRestart {
+            Label("配置已保存，重启后生效", systemImage: "info.circle")
+              .font(.caption)
+              .foregroundStyle(.orange)
+          } else {
+            Text("配置改动会自动保存。")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
           Spacer()
-          Button("应用并重启数学引擎") { apply() }
-            .buttonStyle(.borderedProminent)
-            .disabled(isRestarting)
+          if needsRestart {
+            Button("重启数学引擎") { restartEngine() }
+              .buttonStyle(.borderedProminent)
+              .disabled(isRestarting)
+          } else {
+            Button("重启数学引擎") { restartEngine() }
+              .disabled(isRestarting)
+          }
         }
       }
     }
@@ -560,19 +613,46 @@ struct SettingsView: View {
     NSWorkspace.shared.activateFileViewerSelecting([url])
   }
 
-  private func apply() {
+  /// 把当前编辑状态落盘。改一下存一下，不依赖任何按钮。
+  ///
+  /// **保存和重启是两件事**，以前被混在一个按钮里。保存该是自动的；重启不能自动——
+  /// 后端是在启动时读配置的，重启会掐掉正在进行的对话，那必须由用户决定什么时候做。
+  private func persist() {
+    saveKey(for: selectedProfileID)
+    guard AppSettings.providerSettings != settings else { return }
+    AppSettings.providerSettings = settings
+    // 存下来了，但跑着的后端还是旧配置。这件事要说出来，否则用户会以为改完就生效了。
+    needsRestart = true
+  }
+
+  /// 把编辑框里的密钥写进钥匙串。
+  ///
+  /// 空字符串会删掉已存的密钥——这是 `KeychainStore` 的既定语义，用户清空输入框就是
+  /// 要删。但**新建档案时也是空的**，那种情况删一个本来就不存在的条目，无害。
+  ///
+  /// 密钥变了同样要提示重启。**后端只在启动时读一次密钥**：填完密钥不重启，引擎手里
+  /// 还是空的，回答会以「生成中断 / Missing credentials」失败——而设置界面此前对此
+  /// 一个字都不说。
+  private func saveKey(for profileID: String?) {
+    guard let profileID else { return }
     do {
-      if let id = selectedProfileID {
-        try KeychainStore.saveAPIKey(apiKeyDraft, forProfile: id)
-      }
-      AppSettings.providerSettings = settings
-      isRestarting = true
-      Task {
-        await model.restartBackend()
-        isRestarting = false
-      }
+      let stored = (try KeychainStore.readAPIKey(forProfile: profileID)) ?? ""
+      let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard trimmed != stored else { return }
+      try KeychainStore.saveAPIKey(apiKeyDraft, forProfile: profileID)
+      needsRestart = true
     } catch {
-      errorMessage = error.localizedDescription
+      errorMessage = "无法保存 API Key：\(error.localizedDescription)"
+    }
+  }
+
+  private func restartEngine() {
+    persist()
+    isRestarting = true
+    Task {
+      await model.restartBackend()
+      isRestarting = false
+      needsRestart = false
     }
   }
 }
