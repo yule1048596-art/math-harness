@@ -172,6 +172,27 @@ struct SettingsView: View {
             Spacer()
           }
         }
+
+        // 重启提示必须出现在这一页。
+        //
+        // 「测试连接成功」证明的是**密钥能用**，不是**引擎已经拿到它**——后端只在启动
+        // 时读一次配置。这两件事被自然地读成同一件，而代价是下一条消息直接生成失败。
+        if needsRestart {
+          Section {
+            HStack(spacing: 10) {
+              Label(
+                "配置已保存，但数学引擎还在用旧配置",
+                systemImage: "exclamationmark.arrow.circlepath"
+              )
+              .font(.callout)
+              .foregroundStyle(.orange)
+              Spacer()
+              Button("重启数学引擎") { restartEngine() }
+                .buttonStyle(.borderedProminent)
+                .disabled(isRestarting)
+            }
+          }
+        }
       }
       .formStyle(.grouped)
       // 切换档案前先把上一个的密钥存下来。不然编辑框会被下一个档案的密钥直接盖掉，
@@ -608,10 +629,18 @@ struct SettingsView: View {
   ///
   /// 空字符串会删掉已存的密钥——这是 `KeychainStore` 的既定语义，用户清空输入框就是
   /// 要删。但**新建档案时也是空的**，那种情况删一个本来就不存在的条目，无害。
+  ///
+  /// 密钥变了同样要提示重启。**后端只在启动时读一次密钥**：填完密钥不重启，引擎手里
+  /// 还是空的，回答会以「生成中断 / Missing credentials」失败——而设置界面此前对此
+  /// 一个字都不说。
   private func saveKey(for profileID: String?) {
     guard let profileID else { return }
     do {
+      let stored = (try KeychainStore.readAPIKey(forProfile: profileID)) ?? ""
+      let trimmed = apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard trimmed != stored else { return }
       try KeychainStore.saveAPIKey(apiKeyDraft, forProfile: profileID)
+      needsRestart = true
     } catch {
       errorMessage = "无法保存 API Key：\(error.localizedDescription)"
     }

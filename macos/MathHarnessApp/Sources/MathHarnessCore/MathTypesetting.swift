@@ -29,6 +29,8 @@ public enum MathTypesetting {
     case fenced(open: String, close: String, body: Node)
     /// 矩阵。`rows` 的每一行长度相同。
     case matrix(open: String, close: String, rows: [[Node]])
+    /// 方框。模型几乎总是用 `\boxed{}` 圈出最终答案。
+    case boxed(Node)
   }
 
   /// 一段正文里切出来的片段：要么是普通文字，要么是一条公式。
@@ -289,6 +291,11 @@ public enum MathTypesetting {
         skipSpaces()
         guard let modulus = parseGroup() else { return nil }
         return .row([.text(" (mod "), modulus, .text(")")])
+
+      case "boxed":
+        skipSpaces()
+        guard let body = parseGroup() else { return nil }
+        return .boxed(body)
 
       case "text", "mathrm", "mathbf", "operatorname":
         skipSpaces()
