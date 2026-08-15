@@ -64,6 +64,14 @@ final class AppModel: ObservableObject {
   ///
   /// **只填不发。** 示例是让人看清这个软件能问什么，不是替他决定问什么——填进去还能改。
   @Published var suggestedPrompt: String?
+  /// 结构签名来自旧版本提取器的方法卡数量。大于零表示这些卡片在结构检索里暂时是
+  /// 「关着的」——它们的签名和现在算出来的查询特征不在同一个空间里。
+  @Published private(set) var staleSignatureCount = 0
+  @Published private(set) var isRebuildingSignatures = false
+  @Published private(set) var isExportingToVault = false
+  @Published private(set) var lastExportSummary: KnowledgeExporter.Summary?
+  /// 自动导出出的问题。**不弹窗**——它是背景动作，弹窗会打断正在进行的对话。
+  @Published var exportProblem: String?
   @Published private(set) var showsArchivedConversations = false
   @Published private(set) var isSolving = false
   @Published private(set) var isDraftingTarget = false
@@ -795,6 +803,8 @@ final class AppModel: ObservableObject {
       guard workspaceID == selectedWorkspaceID else { return }
       self.examples = examples
       self.methods = methods
+      // 复核是知识库真正变化的那一刻——晋级或退回之后自动同步一次。
+      await exportToVault(automatic: true)
     } catch {
       errorMessage = error.localizedDescription
     }
@@ -871,10 +881,98 @@ final class AppModel: ObservableObject {
       self.attempts = attempts.sorted { $0.createdAt < $1.createdAt }
       self.examples = examples
       self.methods = methods
+      await refreshSignatureHealth(workspaceID: workspaceID)
       await refreshMemoryState(workspaceID: workspaceID)
       await refreshSelectedConversation()
     } catch {
       errorMessage = error.localizedDescription
+    }
+  }
+
+  /// 把当前工作区导出到 vault。
+  ///
+  /// 没配置 vault 就静默跳过——自动导出不该因为「你还没选目录」而每次弹提示。手动
+  /// 触发时由界面自己保证 vault 已就绪。
+  func exportToVault(automatic: Bool = false) async {
+    guard let workspace = selectedWorkspace else { return }
+    if automatic, !AppSettings.exportsAutomatically { return }
+    guard let root = vaultRoot() else { return }
+    guard !isExportingToVault else { return }
+    isExportingToVault = true
+    defer { isExportingToVault = false }
+
+    let exporter = KnowledgeExporter(root: root)
+    let others = workspaces.filter { $0.id != workspace.id }.map(\.name)
+    // 总索引里其它工作区的计数用不上——它们的知识库这次没有加载。只报当前这个的
+    // 真实数字，其余留 0；**不猜**。下次导出到那个工作区时会填上。
+    let summary = exporter.export(
+      workspaceName: workspace.name,
+      otherWorkspaceNames: others,
+      methods: methods,
+      examples: examples,
+      pendingExamples: pendingExamples,
+      staleSignatureCount: staleSignatureCount,
+      allWorkspaces: workspaces.map {
+        (
+          name: $0.name,
+          methodCount: $0.id == workspace.id ? methods.count : nil,
+          pendingCount: $0.id == workspace.id ? pendingExamples.count : 0
+        )
+      }
+    )
+    lastExportSummary = summary
+    if !summary.failures.isEmpty {
+      // 自动导出失败不弹窗——它是背景动作，弹窗会打断正在进行的对话。状态留在设置和
+      // 知识库面板里等人来看。
+      let text = summary.failures.joined(separator: "\n")
+      if automatic {
+        exportProblem = text
+      } else {
+        errorMessage = "导出到 Vault 未完成：\n\(text)"
+      }
+    } else {
+      exportProblem = nil
+    }
+  }
+
+  /// 解析出 vault 根目录。够不着就返回 nil，导出安静跳过。
+  private func vaultRoot() -> URL? {
+    guard let data = AppSettings.vaultBookmark else { return nil }
+    var isStale = false
+    guard
+      let url = try? URL(
+        resolvingBookmarkData: data,
+        options: [.withSecurityScope],
+        relativeTo: nil,
+        bookmarkDataIsStale: &isStale
+      )
+    else { return nil }
+    _ = url.startAccessingSecurityScopedResource()
+    return url
+  }
+
+  /// 结构签名的版本健康度。
+  ///
+  /// 查不到就当作没有问题——这是个提示性指标，不能因为它拿不到就让整个工作区打不开。
+  private func refreshSignatureHealth(workspaceID: String) async {
+    guard let api else { return }
+    let health = try? await api.methodSignatureHealth(workspaceID: workspaceID)
+    guard workspaceID == selectedWorkspaceID else { return }
+    staleSignatureCount = health?.stale ?? 0
+  }
+
+  /// 从来源例题重算过期的结构签名。
+  func rebuildMethodSignatures() async {
+    guard let api, let workspaceID = selectedWorkspaceID, !isRebuildingSignatures else {
+      return
+    }
+    isRebuildingSignatures = true
+    defer { isRebuildingSignatures = false }
+    do {
+      _ = try await api.rebuildMethodSignatures(workspaceID: workspaceID)
+      await refreshSignatureHealth(workspaceID: workspaceID)
+    } catch {
+      errorMessage = "重建结构特征失败：\(error.localizedDescription)"
     }
   }
 

@@ -21,6 +21,20 @@ _PARSER = SafeMathParser()
 # 但 3 的特征维度更低（83 vs 96），优先取低容量的那个。
 PATH_DEPTH = 3
 
+#: 结构特征的版本。**改动下面任何一样东西都必须把它加一**：
+#:
+#:   - `normalize_math_text` 与它调用的记号归一（`expand_latex`、隐式乘、别名表）；
+#:   - `leaf_root_paths` 与 `PATH_DEPTH`；
+#:   - 算子、标志、趋近点的命名或取值集合。
+#:
+#: 存量方法卡的签名是**过去某个版本**算出来的。改了提取器而不改这个数，库里的旧签名
+#: 和新算出来的查询特征就不在同一个空间里了——**而且不会报任何错**，只会让命中率
+#: 悄悄下降。
+#:
+#: 跨领域门禁抓不到这件事：它每次从语料重建整个库，两边永远同版本。真正受损的是用户
+#: 积累了几个月的存量工作区，而那里没有任何人在看。
+FEATURE_VERSION = 1
+
 
 class StructuralFeatures(BaseModel):
     """一道题的数学结构指纹。解析失败时所有字段为空，检索会自然退回词面路径。"""
@@ -51,6 +65,18 @@ class MethodSignature(BaseModel):
     flags: dict[str, int] = Field(default_factory=dict)
     paths: dict[str, int] = Field(default_factory=dict)
     sample_count: int = 0
+    #: 这份签名是哪个版本的提取器算出来的。
+    #
+    # 缺省 0 表示「不知道」——v0.20 之前存的卡片没有这个字段，而它们确实可能来自任何
+    # 一个旧版本。当成未知比当成当前版本安全：检索会跳过它的结构分，而不是拿两个不同
+    # 空间里的向量去比。
+    feature_version: int = 0
+
+    @property
+    def is_current(self) -> bool:
+        """这份签名能不能和当前算出来的查询特征放在一起比。"""
+
+        return self.feature_version == FEATURE_VERSION
 
     def combined_with(self, other: MethodSignature) -> MethodSignature:
         """合并两张方法卡的签名：逐项相加，样本数相加。"""
@@ -68,6 +94,9 @@ class MethodSignature(BaseModel):
             flags=merge(self.flags, other.flags),
             paths=merge(self.paths, other.paths),
             sample_count=self.sample_count + other.sample_count,
+            # 合并两个不同版本的签名，结果不属于任何一个版本。取小的那个（未知=0 最小）
+            # 让它整体失效，等重建——把混过一次的东西当成当前版本，正是安静出错。
+            feature_version=min(self.feature_version, other.feature_version),
         )
 
     def accumulate(self, features: StructuralFeatures) -> MethodSignature:
@@ -99,6 +128,13 @@ class MethodSignature(BaseModel):
             flags=flags,
             paths=paths,
             sample_count=self.sample_count + 1,
+            # 往一份旧签名上叠加新特征，得到的是两个版本的混合物。同样取小的：
+            # 它必须整体重建，不能因为最新一次累加就自称当前版本。
+            feature_version=(
+                FEATURE_VERSION
+                if self.sample_count == 0
+                else min(self.feature_version, FEATURE_VERSION)
+            ),
         )
 
 

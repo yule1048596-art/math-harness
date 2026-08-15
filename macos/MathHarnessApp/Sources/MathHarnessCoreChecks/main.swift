@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.19.0"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.20.0"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.19.0", "ready version")
+require(ready.version == "0.20.0", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -569,5 +569,436 @@ for source in [
 ] {
   require(MathTypesetting.parse(source) != nil, "typesets: \(source)")
 }
+
+// 结构签名的版本健康度。版本对不上的卡片在结构检索里是「关着的」，这件事必须能被
+// 界面读出来——不然用户只会觉得「最近检索变差了」，而没有任何报错。
+let healthData = Data(#"{"stale":3,"feature_version":1}"#.utf8)
+let health = try JSONDecoder().decode(SignatureHealth.self, from: healthData)
+require(health.stale == 3, "signature health stale count")
+require(health.featureVersion == 1, "signature health feature version")
+
+let rebuiltData = Data(#"{"rebuilt":3}"#.utf8)
+let rebuilt = try JSONDecoder().decode(SignatureRebuildResult.self, from: rebuiltData)
+require(rebuilt.rebuilt == 3, "signature rebuild result")
+
+// --- 知识库导出 ------------------------------------------------------
+//
+// 两条不变式撑着整个 v0.20：
+//   1. 渲染逐字符稳定——不稳定的话，正文保护会被自己的输出击穿，用户手写的东西第一次
+//      自动导出就没了；
+//   2. 可信度只降不升——导出的措辞不得比库里的标签更强。
+
+let exportedMethodJSON = #"""
+  {"id":"m-1","workspace_id":"ws-1","key":"differentiate","name":"求导",
+   "goal":"对表达式求导并化简。","applicable_when":["需要求一个表达式的导数"],
+   "procedure":["按和、积、商与复合的求导法则逐层处理"],
+   "failure_modes":["分不清哪一层是内层时会整条算错"],
+   "tags":["微积分"],"status":"promoted","version":3,
+   "success_count":7,"failure_count":1,"confidence":"verified",
+   "signature":{"feature_version":1,"sample_count":2}}
+  """#
+let exportedMethod = try JSONDecoder().decode(
+  MethodCard.self, from: Data(exportedMethodJSON.utf8)
+)
+let methodDocument = KnowledgeExport.methodDocument(
+  exportedMethod, workspaceFolder: "微积分"
+)
+
+require(
+  methodDocument.relativePath == "微积分/方法卡/differentiate.md",
+  "method file name comes from the stable key"
+)
+// vault 靠 `tool_idea` 认出这是一张 M2 级方法笔记；它必须排在最前。
+require(
+  methodDocument.text.contains("tags:\n  - tool_idea\n  - 微积分"),
+  "method card carries the tool_idea tag first"
+)
+require(methodDocument.text.contains("feature_version: 1"), "feature version travels")
+require(
+  methodDocument.body.contains("## 什么时候换"),
+  "the switching section is always present"
+)
+// 不变式 1：同样的输入两次导出必须逐字符一致。
+require(
+  KnowledgeExport.methodDocument(exportedMethod, workspaceFolder: "微积分").text
+    == methodDocument.text,
+  "rendering is byte-for-byte stable"
+)
+// 绝不产出 vault 规范禁止的公式定界符。
+require(
+  !methodDocument.text.contains(#"\("#) && !methodDocument.text.contains(#"\["#),
+  "no forbidden math delimiters"
+)
+
+func exampleJSON(conclusion: String, counterexample: String) -> String {
+  #"""
+  {"id":"ex-8f2a1b2c","workspace_id":"ws-1","problem":"求 x^2*sin(x) 的导数",
+   "solution":"用乘积法则逐项求导。","tags":["微积分"],"method_hint":null,
+   "reviewed":true,"problem_kind":"chat","math_payload":null,
+   "verification":{"status":"verified","summary":"符号验证通过","checks":["diff(x**2, x) = 2*x"],
+     "computed":{},"error":null,"conclusion_confidence":"CONCLUSION",
+     "process_confidence":"step_checked","counterexample":COUNTEREXAMPLE},
+   "extraction":null,"method_drafts":[],"status":"promoted","origin":"conversation",
+   "source_attempt_id":null,"reviewed_at":null,"reviewer_note":"","revision":1,
+   "created_at":"2026-08-14T10:00:00Z","updated_at":"2026-08-14T10:00:00Z"}
+  """#
+  .replacingOccurrences(of: "CONCLUSION", with: conclusion)
+  .replacingOccurrences(of: "COUNTEREXAMPLE", with: counterexample)
+}
+
+let verifiedExample = try JSONDecoder().decode(
+  ProblemExample.self, from: Data(exampleJSON(conclusion: "verified", counterexample: "{}").utf8)
+)
+let exampleDocument = KnowledgeExport.exampleDocument(
+  verifiedExample, workspaceFolder: "微积分", methods: [exportedMethod]
+)
+require(
+  exampleDocument.relativePath == "微积分/例题/2026-08-14-ex8f2a1b.md",
+  "example file name is date plus a stable short id"
+)
+require(exampleDocument.text.contains("proof_state: 已证明"), "verified maps to 已证明")
+require(
+  exampleDocument.body.contains("[[math-harness/微积分/方法卡/differentiate|求导]]"),
+  "example links back to its method by full path with an alias"
+)
+// 被检查的断言是解析器语法，不是排版数学——包成行内代码，顺便躲开 `x**2` 被 Markdown
+// 吃掉星号的问题。
+require(exampleDocument.body.contains("`diff(x**2, x) = 2*x`"), "claims are inline code")
+
+// 不变式 2：可信度只降不升。
+require(KnowledgeExport.proofStateLabel("proof_verified") == "已证明", "proof tier")
+require(KnowledgeExport.proofStateLabel("numerically_checked") == "待检查", "numeric tier")
+require(KnowledgeExport.proofStateLabel("peer_reviewed") == "待检查", "peer review is not proof")
+require(KnowledgeExport.proofStateLabel("unchecked") == "待检查", "unchecked tier")
+// `refuted` 没有对应的正面标签——那四档全是正面状态，硬塞进去等于把「找到反例」说成
+// 一种证明程度。
+require(KnowledgeExport.proofStateLabel("refuted") == nil, "refuted gets no positive label")
+
+let refutedExample = try JSONDecoder().decode(
+  ProblemExample.self,
+  from: Data(
+    exampleJSON(conclusion: "refuted", counterexample: #"{"a":"7","b":"-4"}"#).utf8
+  )
+)
+let refutedDocument = KnowledgeExport.exampleDocument(
+  refutedExample, workspaceFolder: "微积分"
+)
+require(!refutedDocument.text.contains("proof_state:"), "a refuted example claims nothing")
+// 反例进 `[!error]`，不进 `[!example]`——vault 的数学笔记规范专门区分这两种 callout。
+require(refutedDocument.body.contains("> [!error] 反例"), "counterexamples use the error callout")
+require(refutedDocument.body.contains("`a = 7`"), "counterexample values are inline code")
+
+// 正文指纹只归一换行。硬换行的行尾双空格是 Markdown 语义，绝不能顺手清掉。
+require(
+  KnowledgeExport.bodyDigest("a\r\nb") == KnowledgeExport.bodyDigest("a\nb"),
+  "line-ending differences do not count as an edit"
+)
+require(
+  KnowledgeExport.bodyDigest("a\nb\n\n") == KnowledgeExport.bodyDigest("a\nb"),
+  "a trailing newline does not count as an edit"
+)
+require(
+  KnowledgeExport.bodyDigest("a  \nb") != KnowledgeExport.bodyDigest("a\nb"),
+  "a Markdown hard break is meaningful content"
+)
+
+// 文件名安全化。
+require(
+  KnowledgeExport.sanitizedComponent("微积分/上", fallback: "w") == "微积分-上",
+  "path separators are replaced"
+)
+require(KnowledgeExport.sanitizedComponent("...", fallback: "w") == "w", "empty falls back")
+require(
+  KnowledgeExport.sanitizedComponent(String(repeating: "长", count: 200), fallback: "w").count
+    == 80,
+  "over-long names are truncated"
+)
+// 撞名不猜：报出来让用户改名，不自作主张加后缀。
+require(
+  KnowledgeExport.folderCollisions(["微积分/上", "微积分:上", "线性代数"]).count == 1,
+  "collisions are reported, not silently renamed"
+)
+require(KnowledgeExport.folderCollisions(["微积分", "线性代数"]).isEmpty, "distinct names pass")
+
+// --- Vault 边界 ------------------------------------------------------
+//
+// 用户的 vault 里是他自己经年累月的笔记。我们写进去的每一个字节都必须落在
+// `math-harness/` 以内——这条边界不能靠调用方自觉，要在拼路径的地方就挡住。
+
+let vaultRoot = URL(fileURLWithPath: "/Users/someone/Vault")
+let inside = VaultLayout.destination(root: vaultRoot, relativePath: "微积分/方法卡/differentiate.md")
+require(
+  inside?.path == "/Users/someone/Vault/math-harness/微积分/方法卡/differentiate.md",
+  "a normal relative path lands under our own folder"
+)
+require(VaultLayout.isInsideOurFolder(inside!, root: vaultRoot), "and is recognised as ours")
+
+// 越界一律拒绝，**不做「清洗后继续」**：修正之后写到哪里只有我们自己知道。
+for escaping in [
+  "../别人的笔记.md",
+  "微积分/../../逃出去.md",
+  "/绝对路径.md",
+  ".隐藏文件.md",
+  "微积分//空段.md",
+  "",
+] {
+  require(
+    VaultLayout.destination(root: vaultRoot, relativePath: escaping) == nil,
+    "escaping path is refused: \(escaping)"
+  )
+}
+
+// 拼出来之后还要再验一次：字符串前缀比对会被 `..` 骗过去，所以用标准化路径比。
+require(
+  !VaultLayout.isInsideOurFolder(
+    URL(fileURLWithPath: "/Users/someone/Vault/math-harness/../其它/x.md"),
+    root: vaultRoot
+  ),
+  "a path that walks back out is not ours"
+)
+require(
+  !VaultLayout.isInsideOurFolder(
+    URL(fileURLWithPath: "/Users/someone/Vault/其它笔记.md"),
+    root: vaultRoot
+  ),
+  "a sibling of our folder is not ours"
+)
+// 同名前缀不算在里面：`math-harness-backup` 是别的目录。
+require(
+  !VaultLayout.isInsideOurFolder(
+    URL(fileURLWithPath: "/Users/someone/Vault/math-harness-backup/x.md"),
+    root: vaultRoot
+  ),
+  "a folder sharing our prefix is not ours"
+)
+
+// --- 写入策略 --------------------------------------------------------
+//
+// 本版守的一件事：**不许覆盖用户写的正文**。用户会立刻在正文里补触发信号，而回流要等
+// 下一版；自动导出如果覆盖，他第一次写的东西就静默没了。
+
+let draft = methodDocument
+
+// 文件不存在 → 整篇写。
+require(
+  VaultWriter.decide(document: draft, existingText: nil) == .create(draft.text),
+  "an absent file is created")
+
+// 正文还是我们上次写下去的样子 → 内容没变就不写。全量重写会把 vault 的修改时间
+// 全刷一遍，Obsidian 的「最近编辑」就废了。
+require(
+  VaultWriter.decide(document: draft, existingText: draft.text) == .unchanged,
+  "an untouched identical file is skipped"
+)
+
+// 用户改了正文 → 保留他的正文，只刷新 frontmatter。
+// 真实的用户编辑长这样：正文变了，而 frontmatter 里的 `body_sha256` 还是我们上次
+// 写下去的那一份——两者对不上，就是有人动过。
+let userEdited = draft.text + "\n估不动时 → [[积分比较]]\n"
+guard
+  case .keepUserBody(let keptText, let sidecar) =
+    VaultWriter.decide(document: draft, existingText: userEdited)
+else {
+  fatalError("Core check failed: an edited body must be kept")
+}
+require(keptText.contains("[[积分比较]]"), "the user's own text survives")
+require(keptText.contains("body_owner: user"), "ownership flips to the user")
+require(sidecar == nil, "an unchanged draft produces no side-by-side file")
+
+// 归属是**粘的**。上一步我们把用户的正文原样写了回去，它的指纹当然对得上——没有这个
+// 标记的话，下一次导出就会理直气壮地覆盖掉用户写的东西。
+guard case .keepUserBody = VaultWriter.decide(document: draft, existingText: keptText)
+else {
+  fatalError("Core check failed: user ownership must be sticky")
+}
+
+// 机器初稿变了 → 另存一份，仍然不碰用户正文。
+let changedMethodJSON = exportedMethodJSON.replacingOccurrences(
+  of: #""goal":"对表达式求导并化简。""#, with: #""goal":"求导并化简，必要时先换元。""#
+)
+let changedMethod = try JSONDecoder().decode(
+  MethodCard.self, from: Data(changedMethodJSON.utf8)
+)
+let changedDraft = KnowledgeExport.methodDocument(changedMethod, workspaceFolder: "微积分")
+guard
+  case .keepUserBody(_, let newSidecar) =
+    VaultWriter.decide(document: changedDraft, existingText: keptText)
+else {
+  fatalError("Core check failed: a changed draft still keeps the user body")
+}
+require(newSidecar != nil, "a changed draft is offered side by side")
+
+// 认不出形状的文件一律当用户的——可能被整篇重写了，也可能压根不是我们的文件。
+guard
+  case .keepUserBody(let foreignText, _) =
+    VaultWriter.decide(document: draft, existingText: "这是用户自己写的一篇笔记。")
+else {
+  fatalError("Core check failed: an unrecognised file is treated as the user's")
+}
+require(foreignText.contains("这是用户自己写的一篇笔记。"), "foreign content is preserved")
+
+// --- 事务 ------------------------------------------------------------
+
+func readBack(_ url: URL) -> String {
+  (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+}
+
+let sandbox = FileManager.default.temporaryDirectory
+  .appendingPathComponent("mh-vault-check-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
+defer { try? FileManager.default.removeItem(at: sandbox) }
+
+let fileA = sandbox.appendingPathComponent("a.md")
+let fileB = sandbox.appendingPathComponent("nested/b.md")
+
+let applied = VaultWriter.apply([
+  VaultWriter.FileWrite(url: fileA, text: "A1", expectedDigest: nil),
+  VaultWriter.FileWrite(url: fileB, text: "B1", expectedDigest: nil),
+])
+require(applied.status == .applied, "a clean transaction applies")
+require(readBack(fileA) == "A1", "first file written")
+require(readBack(fileB) == "B1", "nested file written")
+
+// 计划之后文件被别人改过 → 前置检查就拦下，**一个字节都不写**。
+try "外部改动".write(to: fileA, atomically: true, encoding: .utf8)
+let raced = VaultWriter.apply([
+  VaultWriter.FileWrite(
+    url: fileA, text: "A2", expectedDigest: VaultWriter.digest(of: Data("A1".utf8))),
+  VaultWriter.FileWrite(
+    url: fileB, text: "B2", expectedDigest: VaultWriter.digest(of: Data("B1".utf8))),
+])
+require(raced.status == .preflightFailed, "a raced file fails preflight")
+require(raced.written.isEmpty, "preflight failure writes nothing")
+// 关键：**同一批里没被改的那个也不许写**。半批写入比整批不写难收拾得多。
+require(readBack(fileB) == "B1", "the sibling file is untouched")
+
+// --- 索引与链接 ------------------------------------------------------
+
+// 链接必须写全路径。两个工作区都可能有一张 `differentiate.md`，也各有一份 `索引.md`；
+// 只写文件名的话 Obsidian 会在同名文件里任选一个，**而且不报错**。
+require(
+  KnowledgeExport.wikilink(to: "微积分/方法卡/differentiate.md", alias: "求导")
+    == "[[math-harness/微积分/方法卡/differentiate|求导]]",
+  "links carry the full path so same-named files cannot collide"
+)
+let methodWithSources = KnowledgeExport.methodDocument(
+  exportedMethod, workspaceFolder: "微积分", sources: [verifiedExample]
+)
+require(
+  methodWithSources.body.contains("[[math-harness/微积分/例题/2026-08-14-ex8f2a1b|"),
+  "a method card links to its sources by full path"
+)
+
+let workspaceIndex = KnowledgeExport.workspaceIndexDocument(
+  workspaceName: "微积分",
+  workspaceFolder: "微积分",
+  methods: [exportedMethod],
+  pendingExamples: [refutedExample],
+  staleSignatureCount: 2,
+  pendingMerges: ["微积分/方法卡/differentiate.updated.md"]
+)
+require(
+  workspaceIndex.relativePath == "微积分/索引.md", "workspace index path")
+require(workspaceIndex.body.contains("### 符号验证"), "cards are grouped by confidence")
+require(workspaceIndex.body.contains("（用过 7 次）"), "reuse count is visible")
+require(workspaceIndex.body.contains("2 张方法卡的结构特征待重建"), "stale count surfaces")
+require(workspaceIndex.body.contains("新初稿等着合并"), "pending merges surface")
+require(workspaceIndex.body.contains("## 待复核"), "the review queue surfaces")
+
+// 索引是生成物，但保护规则一视同仁——所以先把话说在前面。
+require(
+  workspaceIndex.body.contains("这一页由 Math Harness 生成"),
+  "generated pages say so up front"
+)
+
+let rootIndex = KnowledgeExport.rootIndexDocument(workspaces: [
+  (name: "微积分", folder: "微积分", methodCount: 12, pendingCount: 3),
+  (name: "线性代数", folder: "线性代数", methodCount: nil, pendingCount: 0),
+])
+require(rootIndex.relativePath == "MATH-HARNESS.md", "root index path")
+require(rootIndex.body.contains("12 张方法卡 · 3 条待复核"), "known counts are reported")
+// **不知道就别说。** 写个 0 上去是假的，会让人以为那个工作区空了。
+require(!rootIndex.body.contains("0 张方法卡"), "unknown counts are omitted, not faked")
+require(rootIndex.body.contains("|线性代数]]"), "the unloaded workspace is still linked")
+
+// --- 端到端：真的写一遍文件 ------------------------------------------
+//
+// 前面各段验的是决策和渲染。这一段把整条路跑通：建工作区目录、写文件、模拟一次用户
+// 编辑、再导出一次，确认改动还在。这是本版最该被自动化守住的场景。
+
+let vault = FileManager.default.temporaryDirectory
+  .appendingPathComponent("mh-vault-e2e-\(UUID().uuidString)")
+try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+defer { try? FileManager.default.removeItem(at: vault) }
+
+let exporter = KnowledgeExporter(root: vault)
+let first = exporter.export(
+  workspaceName: "微积分",
+  otherWorkspaceNames: ["线性代数"],
+  methods: [exportedMethod],
+  examples: [verifiedExample],
+  pendingExamples: [],
+  staleSignatureCount: 0,
+  allWorkspaces: [(name: "微积分", methodCount: 1, pendingCount: 0)]
+)
+require(first.status == .applied, "the first export applies")
+require(first.created == 4, "method, example and two indexes are created")
+
+let cardURL = vault.appendingPathComponent("math-harness/微积分/方法卡/differentiate.md")
+require(FileManager.default.fileExists(atPath: cardURL.path), "the card landed in our folder")
+// 只碰 math-harness/，vault 根目录下不该多出别的东西。
+let topLevel = try FileManager.default.contentsOfDirectory(atPath: vault.path)
+require(topLevel == ["math-harness"], "nothing is written outside our own folder")
+
+// 什么都没变 → 一个字节都不写。
+let second = exporter.export(
+  workspaceName: "微积分",
+  otherWorkspaceNames: ["线性代数"],
+  methods: [exportedMethod],
+  examples: [verifiedExample],
+  allWorkspaces: [(name: "微积分", methodCount: 1, pendingCount: 0)]
+)
+require(second.created == 0 && second.updated == 0, "an unchanged export writes nothing")
+require(second.skipped == 4, "everything is skipped")
+
+// 用户在正文里补了一条切换关系。
+let edited = readBack(cardURL) + "\n估不动时 → [[math-harness/微积分/方法卡/积分比较|积分比较]]\n"
+try edited.write(to: cardURL, atomically: true, encoding: .utf8)
+
+let third = exporter.export(
+  workspaceName: "微积分",
+  otherWorkspaceNames: ["线性代数"],
+  methods: [changedMethod],
+  examples: [verifiedExample],
+  allWorkspaces: [(name: "微积分", methodCount: 1, pendingCount: 0)]
+)
+require(third.status == .applied, "the third export applies")
+let afterEdit = readBack(cardURL)
+// **本版最要紧的一条**：用户写的东西还在。
+require(afterEdit.contains("积分比较"), "the user's own text survives a later export")
+require(afterEdit.contains("body_owner: user"), "ownership stays with the user")
+require(third.preserved >= 1, "the export reports what it preserved")
+require(!third.pendingMerge.isEmpty, "a changed draft is offered side by side")
+require(
+  FileManager.default.fileExists(
+    atPath: vault.appendingPathComponent(
+      "math-harness/微积分/方法卡/differentiate.updated.md"
+    ).path
+  ),
+  "the new draft is written next to it, not over it"
+)
+
+// 撞名不猜：报出来让用户改名。
+let clashing = exporter.export(
+  workspaceName: "微积分/上",
+  otherWorkspaceNames: ["微积分:上"],
+  methods: [],
+  examples: []
+)
+require(clashing.status == .preflightFailed, "colliding workspace names stop the export")
+require(
+  clashing.failures.first?.contains("改名") == true,
+  "and say what to do about it"
+)
 
 print("MathHarnessCore checks passed")

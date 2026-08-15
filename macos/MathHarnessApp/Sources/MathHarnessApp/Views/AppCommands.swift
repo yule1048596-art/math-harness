@@ -55,6 +55,14 @@ struct MathHarnessCommands: Commands {
 
       Divider()
 
+      Button("导出到 Vault") {
+        Task { await model.exportToVault() }
+      }
+      .keyboardShortcut("e", modifiers: [.command, .shift])
+      .disabled(model.selectedWorkspaceID == nil || model.isExportingToVault)
+
+      Divider()
+
       Button("停止生成") {
         Task { await model.stopCurrentTurn() }
       }

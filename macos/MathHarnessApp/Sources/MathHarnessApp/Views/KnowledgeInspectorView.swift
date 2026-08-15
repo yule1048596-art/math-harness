@@ -114,6 +114,12 @@ struct KnowledgeInspectorView: View {
     } else {
       ScrollView {
         LazyVStack(spacing: 10) {
+          if model.staleSignatureCount > 0 {
+            staleSignatureNotice
+          }
+          if let problem = model.exportProblem {
+            exportProblemNotice(problem)
+          }
           ForEach(filteredMethods) { method in
             MethodCardView(method: method)
           }
@@ -121,6 +127,72 @@ struct KnowledgeInspectorView: View {
         .padding(12)
       }
     }
+  }
+
+  /// 自动导出出的问题。
+  ///
+  /// **不弹窗**——它是背景动作，弹窗会打断正在进行的对话。但也不能不说：导出失败而
+  /// 用户不知道，他会以为 vault 里的东西是最新的。
+  private func exportProblemNotice(_ problem: String) -> some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Label("导出到 Vault 未完成", systemImage: "externaldrive.badge.exclamationmark")
+        .font(.callout.weight(.medium))
+      Text(problem)
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .textSelection(.enabled)
+      HStack {
+        Spacer()
+        Button("知道了") { model.exportProblem = nil }
+        Button {
+          Task { await model.exportToVault() }
+        } label: {
+          if model.isExportingToVault {
+            ProgressView().controlSize(.small)
+          } else {
+            Text("重试")
+          }
+        }
+        .disabled(model.isExportingToVault)
+      }
+    }
+    .padding(10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+  }
+
+  /// 结构检索这一路对某些卡片是关着的——这件事必须说出来。
+  ///
+  /// 它们的签名来自旧版本的特征提取器，和现在算出来的查询特征不在同一个空间里。跨版本
+  /// 比出来的相似度没有意义，所以系统选择不比；代价是这些卡片暂时只靠词面被找到，
+  /// **而且不会有任何报错**。不显示的话，用户只会觉得「最近检索变差了」。
+  private var staleSignatureNotice: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Label(
+        "\(model.staleSignatureCount) 张方法卡的结构特征待重建",
+        systemImage: "arrow.triangle.2.circlepath"
+      )
+      .font(.callout.weight(.medium))
+      Text("它们的结构特征是旧版本算出来的，暂时只靠词面参与检索。重建从来源例题重算，不改卡片内容。")
+        .font(.caption)
+        .foregroundStyle(.secondary)
+      HStack {
+        Spacer()
+        Button {
+          Task { await model.rebuildMethodSignatures() }
+        } label: {
+          if model.isRebuildingSignatures {
+            ProgressView().controlSize(.small)
+          } else {
+            Text("重建")
+          }
+        }
+        .disabled(model.isRebuildingSignatures)
+      }
+    }
+    .padding(10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
   }
 }
 

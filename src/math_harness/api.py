@@ -78,6 +78,7 @@ from math_harness.portability import ARCHIVE_MEDIA_TYPE, MAX_ARCHIVE_BYTES
 from math_harness.provider_config import provider_config_error
 from math_harness.provider_probe import probe_provider
 from math_harness.service import MathHarnessService
+from math_harness.structure import FEATURE_VERSION
 
 
 def _sse(payload: dict[str, object]) -> str:
@@ -561,6 +562,25 @@ def create_app(
             include_pending=include_pending,
             include_deprecated=include_deprecated,
         )
+
+    @app.get("/workspaces/{workspace_id}/methods/signature-health")
+    def method_signature_health(workspace_id: str) -> dict[str, int]:
+        """有多少张方法卡的结构签名是旧版本提取器算出来的。
+
+        版本对不上的签名不参与结构检索——两个不同空间里的向量比出来的相似度没有意义，
+        而且不会报错。这个数字让用户看得见「有一路信号现在是关着的」。
+        """
+
+        return {
+            "stale": service.stale_signature_count(workspace_id),
+            "feature_version": FEATURE_VERSION,
+        }
+
+    @app.post("/workspaces/{workspace_id}/methods/signature-rebuild")
+    def rebuild_method_signatures(workspace_id: str) -> dict[str, int]:
+        """从来源例题重算过期的结构签名。只重建，不改卡片内容，也不动版本号。"""
+
+        return {"rebuilt": service.rebuild_method_signatures(workspace_id)}
 
     @app.get(
         "/workspaces/{workspace_id}/methods/{method_id}/versions",
