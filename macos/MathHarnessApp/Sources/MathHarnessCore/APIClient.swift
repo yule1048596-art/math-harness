@@ -392,6 +392,30 @@ public actor APIClient {
     )
   }
 
+  /// 有多少张方法卡的结构签名来自旧版本的特征提取器。
+  ///
+  /// 版本对不上的签名不参与结构检索——两个不同空间里的向量比出来的相似度没有意义，
+  /// 而且不会报错。这个数字让「有一路信号现在是关着的」这件事看得见。
+  public func methodSignatureHealth(
+    workspaceID: String
+  ) async throws -> SignatureHealth {
+    try await send(
+      path: "workspaces/\(workspaceID)/methods/signature-health",
+      method: "GET"
+    )
+  }
+
+  /// 从来源例题重算过期的结构签名。只重建，不改卡片内容，也不动版本号。
+  @discardableResult
+  public func rebuildMethodSignatures(
+    workspaceID: String
+  ) async throws -> SignatureRebuildResult {
+    try await send(
+      path: "workspaces/\(workspaceID)/methods/signature-rebuild",
+      method: "POST"
+    )
+  }
+
   public func updateMethodStatus(
     workspaceID: String,
     methodID: String,

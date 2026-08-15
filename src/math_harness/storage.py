@@ -2278,6 +2278,43 @@ class WorkspaceStore:
             for item in json.loads(row["method_drafts_json"] or "[]")
         ]
 
+    def list_examples_for_method(self, method_id: str) -> list[ProblemExample]:
+        """支撑这张方法卡的例题。重建结构签名时要从它们重新算特征。"""
+
+        with self.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT example_id FROM method_examples
+                WHERE workspace_id = ? AND method_id = ?
+                ORDER BY example_id
+                """,
+                (self.workspace_id, method_id),
+            ).fetchall()
+        return [self.get_example(row["example_id"]) for row in rows]
+
+    def replace_method_signature(
+        self, method_id: str, signature: MethodSignature
+    ) -> None:
+        """整份换掉一张方法卡的结构签名。
+
+        **不动 `version`**：签名重建不是知识内容的修订，卡片说了什么一个字没变。把它
+        计入版本历史会让「这张卡被改过几次」这个数字失去意义。
+        """
+
+        with self.connection() as connection:
+            connection.execute(
+                """
+                UPDATE methods SET signature_json = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    signature.model_dump_json(),
+                    utc_now().isoformat(),
+                    method_id,
+                    self.workspace_id,
+                ),
+            )
+
     def list_methods_for_example(self, example_id: str) -> list[MethodCard]:
         with self.connection() as connection:
             rows = connection.execute(

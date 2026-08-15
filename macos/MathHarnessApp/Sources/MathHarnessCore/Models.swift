@@ -815,6 +815,60 @@ public struct VerificationReport: Codable, Equatable, Sendable {
   public let checks: [String]
   public let computed: [String: String]
   public let error: String?
+  /// 结论轴。为 nil 表示这条记录是双轴可信度之前写的。
+  public let conclusionConfidence: String?
+  /// 过程轴。结论对不对和推导站不站得住是两件事。
+  public let processConfidence: String?
+  /// 反例。有它用户才分得清「真错」和「缺前提」——这套检查最有用的产物就是它。
+  public let counterexample: [String: String]
+
+  enum CodingKeys: String, CodingKey {
+    case status, summary, checks, computed, error, counterexample
+    case conclusionConfidence = "conclusion_confidence"
+    case processConfidence = "process_confidence"
+  }
+
+  /// 手写解码，因为 Swift 合成的 `Decodable` **不会**使用属性默认值：缺字段就抛错。
+  ///
+  /// 和 `ConversationMessage` 同一个理由——App 和 helper 各自升级，新 App 配旧 helper
+  /// 必须还能读出例题，不能因为多了几个字段就整条解码失败。
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    status = try container.decode(String.self, forKey: .status)
+    summary = try container.decode(String.self, forKey: .summary)
+    checks = try container.decodeIfPresent([String].self, forKey: .checks) ?? []
+    computed =
+      try container.decodeIfPresent([String: String].self, forKey: .computed) ?? [:]
+    error = try container.decodeIfPresent(String.self, forKey: .error)
+    conclusionConfidence = try container.decodeIfPresent(
+      String.self, forKey: .conclusionConfidence
+    )
+    processConfidence = try container.decodeIfPresent(
+      String.self, forKey: .processConfidence
+    )
+    counterexample =
+      try container.decodeIfPresent([String: String].self, forKey: .counterexample) ?? [:]
+  }
+
+  public init(
+    status: String,
+    summary: String,
+    checks: [String] = [],
+    computed: [String: String] = [:],
+    error: String? = nil,
+    conclusionConfidence: String? = nil,
+    processConfidence: String? = nil,
+    counterexample: [String: String] = [:]
+  ) {
+    self.status = status
+    self.summary = summary
+    self.checks = checks
+    self.computed = computed
+    self.error = error
+    self.conclusionConfidence = conclusionConfidence
+    self.processConfidence = processConfidence
+    self.counterexample = counterexample
+  }
 }
 
 public struct MethodExtractionSummary: Codable, Equatable, Sendable {
@@ -883,6 +937,25 @@ public struct ProblemExample: Codable, Identifiable, Equatable, Sendable {
   }
 }
 
+/// 结构签名的版本健康度。
+///
+/// `stale` 大于零意味着这些卡片在结构检索里暂时是「关着的」——它们的签名来自旧版本的
+/// 特征提取器，和现在算出来的查询特征不在同一个空间里。不比是对的：跨版本比出来的
+/// 相似度没有意义，而且不会报错。
+public struct SignatureHealth: Codable, Equatable, Sendable {
+  public let stale: Int
+  public let featureVersion: Int
+
+  enum CodingKeys: String, CodingKey {
+    case stale
+    case featureVersion = "feature_version"
+  }
+}
+
+public struct SignatureRebuildResult: Codable, Equatable, Sendable {
+  public let rebuilt: Int
+}
+
 public struct MethodCard: Codable, Identifiable, Equatable, Sendable {
   public let id: String
   public let workspaceID: String
@@ -897,14 +970,86 @@ public struct MethodCard: Codable, Identifiable, Equatable, Sendable {
   public let version: Int
   public let successCount: Int
   public let failureCount: Int
+  /// 支撑这张卡的例题里**最强**的那一档结论可信度。nil 表示这张卡建于双轴之前。
+  public let confidence: String?
+  /// 结构签名。导出只读其中的 `feature_version`，其余是检索内部用的计数。
+  public let signature: [String: JSONValue]
 
   enum CodingKeys: String, CodingKey {
-    case id, key, name, goal, procedure, tags, status, version
+    case id, key, name, goal, procedure, tags, status, version, confidence, signature
     case workspaceID = "workspace_id"
     case applicableWhen = "applicable_when"
     case failureModes = "failure_modes"
     case successCount = "success_count"
     case failureCount = "failure_count"
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.container(keyedBy: CodingKeys.self)
+    id = try container.decode(String.self, forKey: .id)
+    workspaceID = try container.decode(String.self, forKey: .workspaceID)
+    key = try container.decode(String.self, forKey: .key)
+    name = try container.decode(String.self, forKey: .name)
+    goal = try container.decode(String.self, forKey: .goal)
+    applicableWhen =
+      try container.decodeIfPresent([String].self, forKey: .applicableWhen) ?? []
+    procedure = try container.decodeIfPresent([String].self, forKey: .procedure) ?? []
+    failureModes =
+      try container.decodeIfPresent([String].self, forKey: .failureModes) ?? []
+    tags = try container.decodeIfPresent([String].self, forKey: .tags) ?? []
+    status = try container.decode(String.self, forKey: .status)
+    version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+    successCount = try container.decodeIfPresent(Int.self, forKey: .successCount) ?? 0
+    failureCount = try container.decodeIfPresent(Int.self, forKey: .failureCount) ?? 0
+    confidence = try container.decodeIfPresent(String.self, forKey: .confidence)
+    signature =
+      try container.decodeIfPresent([String: JSONValue].self, forKey: .signature) ?? [:]
+  }
+}
+
+/// 只够读一份自由字典的最小 JSON 值。结构签名里除了版本号我们什么都不解释。
+public enum JSONValue: Codable, Equatable, Sendable {
+  case string(String)
+  case number(Double)
+  case bool(Bool)
+  case object([String: JSONValue])
+  case array([JSONValue])
+  case null
+
+  public var intValue: Int? {
+    if case .number(let value) = self { return Int(value) }
+    return nil
+  }
+
+  public init(from decoder: Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if container.decodeNil() {
+      self = .null
+    } else if let value = try? container.decode(Bool.self) {
+      self = .bool(value)
+    } else if let value = try? container.decode(Double.self) {
+      self = .number(value)
+    } else if let value = try? container.decode(String.self) {
+      self = .string(value)
+    } else if let value = try? container.decode([String: JSONValue].self) {
+      self = .object(value)
+    } else if let value = try? container.decode([JSONValue].self) {
+      self = .array(value)
+    } else {
+      self = .null
+    }
+  }
+
+  public func encode(to encoder: Encoder) throws {
+    var container = encoder.singleValueContainer()
+    switch self {
+    case .string(let value): try container.encode(value)
+    case .number(let value): try container.encode(value)
+    case .bool(let value): try container.encode(value)
+    case .object(let value): try container.encode(value)
+    case .array(let value): try container.encode(value)
+    case .null: try container.encodeNil()
+    }
   }
 }
 

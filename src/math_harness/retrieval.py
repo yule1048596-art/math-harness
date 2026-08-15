@@ -63,11 +63,20 @@ class MethodRetriever:
             method.id: MethodSignature.model_validate(method.signature or {})
             for method in methods
         }
-        # 路径 IDF 只对本次候选集有意义，现算一次给所有方法共用。
-        idf = path_idf(list(signatures.values())) if use_structure else {}
+        # 版本对不上的签名一律不参与结构那一路。
+        #
+        # 它是**过去某个提取器**算出来的，和现在算出来的查询特征不在同一个空间里。
+        # 拿它们比不会报错，只会给出一个没有意义的相似度——安静出错比不出结果糟得多。
+        # IDF 和背景分布也只能在同版本的签名之间统计，否则整个候选集的分布都是歪的。
+        current = {
+            method_id: signature
+            for method_id, signature in signatures.items()
+            if signature.is_current
+        }
+        idf = path_idf(list(current.values())) if use_structure else {}
         # 背景分布把打分从似然折算成后验：一条路径若在所有方法里都常见，命中它
         # 不构成证据。
-        background = path_background(list(signatures.values())) if use_structure else {}
+        background = path_background(list(current.values())) if use_structure else {}
 
         for method in methods:
             method_text = "\n".join(
@@ -88,12 +97,16 @@ class MethodRetriever:
                 method.success_count + method.failure_count + 1
             )
             history_score = history_volume * reliability
+            # 这张卡这一轮能不能用结构那一路。签名版本过期时它单独退回词面公式——
+            # 不是给它一个 0 分的结构项。给 0 分等于让过期的卡片系统性地排在后面，
+            # 哪怕它就是正确答案；退回词面是让它在同一套词面权重下公平竞争。
+            method_uses_structure = use_structure and signatures[method.id].is_current
             structure_score = (
                 signature_score(signatures[method.id], features, idf, background)
-                if use_structure
+                if method_uses_structure
                 else 0.0
             )
-            if use_structure and inferred_structure:
+            if method_uses_structure and inferred_structure:
                 # 从提问文本猜出来的结构，权重要比用户确认过的目标低。
                 #
                 # 两个理由，都是实测出来的：抽片段可能抓错东西；而提问的词面本身携带
@@ -107,7 +120,7 @@ class MethodRetriever:
                     + tag_score * 0.35
                     + history_score * 0.10,
                 )
-            elif use_structure:
+            elif method_uses_structure:
                 score = min(
                     1.0,
                     structure_score * 0.45

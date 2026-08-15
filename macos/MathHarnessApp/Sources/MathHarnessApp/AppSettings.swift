@@ -13,6 +13,9 @@ enum AppSettingsKey {
   static let rendersMarkdown = "rendersMarkdown"
   static let typesetsFormulas = "typesetsFormulas"
   static let notifiesWhenFinished = "notifiesWhenFinished"
+  static let vaultBookmark = "vaultBookmark"
+  static let vaultDisplayPath = "vaultDisplayPath"
+  static let exportsAutomatically = "exportsAutomatically"
   static let didMigrateLegacyMiMo = "didMigrateLegacyMiMo"
 
   // v0.11 及更早的键。只在迁移时读取，不再写入。
@@ -176,6 +179,30 @@ enum AppSettings {
   /// 回答完成时，窗口不在前台就跳一下 Dock 图标。
   static var notifiesWhenFinished: Bool {
     boolean(AppSettingsKey.notifiesWhenFinished, default: true)
+  }
+
+  /// Obsidian vault 根目录的访问凭据。存 bookmark 而不是路径：路径在下次启动时可能
+  /// 已经不对，而 bookmark 能跟着文件走，也能明确告诉我们「找不到了」。
+  static var vaultBookmark: Data? {
+    get { defaults.data(forKey: AppSettingsKey.vaultBookmark) }
+    set {
+      if let newValue {
+        defaults.set(newValue, forKey: AppSettingsKey.vaultBookmark)
+      } else {
+        defaults.removeObject(forKey: AppSettingsKey.vaultBookmark)
+      }
+    }
+  }
+
+  /// 上次选中的路径，只用于显示。够不着的时候还能告诉用户「你选的是哪儿」。
+  static var vaultDisplayPath: String {
+    get { defaults.string(forKey: AppSettingsKey.vaultDisplayPath) ?? "" }
+    set { defaults.set(newValue, forKey: AppSettingsKey.vaultDisplayPath) }
+  }
+
+  /// 晋级、复核之后是否自动导出。
+  static var exportsAutomatically: Bool {
+    boolean(AppSettingsKey.exportsAutomatically, default: true)
   }
 
   private static func boolean(_ key: String, default fallback: Bool) -> Bool {

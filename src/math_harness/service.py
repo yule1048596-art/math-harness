@@ -168,6 +168,8 @@ from math_harness.solving import (
 )
 from math_harness.storage import WorkspaceManager, WorkspaceStore
 from math_harness.structure import (
+    FEATURE_VERSION,
+    MethodSignature,
     StructuralFeatures,
     extract_features,
     features_from_text,
@@ -1171,6 +1173,47 @@ class MathHarnessService:
             ConclusionConfidence.CROSS_CHECKED,
         }
     )
+
+    def stale_signature_count(self, workspace_id: str) -> int:
+        """有多少张方法卡的结构签名是旧版本提取器算出来的。"""
+
+        store = self.workspaces.store(workspace_id)
+        return sum(
+            1
+            for method in store.list_methods()
+            if not MethodSignature.model_validate(method.signature or {}).is_current
+        )
+
+    def rebuild_method_signatures(self, workspace_id: str) -> int:
+        """把过期的结构签名从来源例题重新算一遍，返回重建了几张。
+
+        只重建，不改卡片内容，也不动版本号——签名是派生数据，重建它不是一次知识修订。
+
+        没有来源例题可依据的卡片会拿到一份**空的当前版本签名**：它在结构那一路本来就
+        贡献不了什么，但至少不再被当成「版本未知」而每次都触发重建提示。
+        """
+
+        store = self.workspaces.store(workspace_id)
+        rebuilt = 0
+        with self._knowledge_lock:
+            for method in store.list_methods():
+                stored = MethodSignature.model_validate(method.signature or {})
+                if stored.is_current:
+                    continue
+                signature = MethodSignature(feature_version=FEATURE_VERSION)
+                for example in store.list_examples_for_method(method.id):
+                    signature = signature.accumulate(
+                        self._signature_features(example.problem, example.math_payload)
+                    )
+                store.replace_method_signature(method.id, signature)
+                rebuilt += 1
+        if rebuilt:
+            store.record_learning_event(
+                "method_signatures_rebuilt",
+                workspace_id,
+                {"rebuilt": rebuilt, "feature_version": FEATURE_VERSION},
+            )
+        return rebuilt
 
     @staticmethod
     def _signature_features(

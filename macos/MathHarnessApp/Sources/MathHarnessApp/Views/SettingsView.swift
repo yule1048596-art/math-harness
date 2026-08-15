@@ -22,6 +22,8 @@ struct SettingsView: View {
   @AppStorage(AppSettingsKey.rendersMarkdown) private var rendersMarkdown = true
   @AppStorage(AppSettingsKey.typesetsFormulas) private var typesetsFormulas = true
   @AppStorage(AppSettingsKey.notifiesWhenFinished) private var notifiesWhenFinished = true
+  @AppStorage(AppSettingsKey.exportsAutomatically) private var exportsAutomatically = true
+  @StateObject private var vault = VaultLocation()
 
   enum ProbeState: Equatable {
     case idle
@@ -300,6 +302,50 @@ struct SettingsView: View {
     .formStyle(.grouped)
   }
 
+  /// Vault 位置这一行。
+  ///
+  /// 够不着时**只报原因加一个重试**，不弹模态、不阻塞、也不清掉配置——vault 可能只是
+  /// 这次没挂上外置盘，下次就回来了。清掉的话用户还得重新找一遍。
+  @ViewBuilder
+  private var vaultRow: some View {
+    switch vault.status {
+    case .notConfigured:
+      LabeledContent("Vault 位置") {
+        Button("选择文件夹……") { vault.chooseFolder() }
+      }
+    case .ready(let url):
+      LabeledContent("Vault 位置") {
+        HStack(spacing: 8) {
+          Text(url.path)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.head)
+          Button("更改……") { vault.chooseFolder() }
+          Button("移除") { vault.forget() }
+        }
+      }
+    case .unavailable(let reason):
+      VStack(alignment: .leading, spacing: 6) {
+        Label(reason, systemImage: "exclamationmark.triangle")
+          .font(.callout)
+          .foregroundStyle(.orange)
+        if !vault.displayPath.isEmpty {
+          Text(vault.displayPath)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .truncationMode(.head)
+        }
+        HStack {
+          Spacer()
+          Button("重试") { vault.retry() }
+          Button("重新选择……") { vault.chooseFolder() }
+        }
+      }
+    }
+  }
+
   /// 字号和渲染是「看了才知道合不合适」的设置，所以就地给一段样例。
   private var previewCard: some View {
     VStack(alignment: .leading, spacing: 6) {
@@ -347,6 +393,22 @@ struct SettingsView: View {
         Text("每个工作区一个独立 SQLite 数据库。密钥不在其中。")
           .font(.caption)
           .foregroundStyle(.secondary)
+      }
+
+      Section {
+        vaultRow
+        if vault.isConfigured {
+          Toggle("晋级和复核后自动导出", isOn: $exportsAutomatically)
+        }
+      } header: {
+        Text("导出到 Obsidian")
+      } footer: {
+        Text(
+          "只写 Vault 根目录下的 math-harness 文件夹，不碰其它笔记。"
+            + "frontmatter 由本 App 维护，正文归你——你改过的正文不会被导出覆盖。"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
       }
 
       Section {
