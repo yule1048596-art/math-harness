@@ -9,6 +9,7 @@ from math_harness.math_parser import SafeMathParser
 from math_harness.models import (
     ConversationCreate,
     ConversationTurnRequest,
+    ExampleCreate,
     WorkspaceCreate,
 )
 from math_harness.providers.openai_relevance import (
@@ -365,3 +366,32 @@ def test_a_real_question_still_gets_checked_and_captured(tmp_path):
     )
     assert result.assistant_message.conclusion_confidence is not None
     assert result.knowledge_draft is not None
+
+
+def test_an_old_chitchat_draft_is_flagged_not_deleted(tmp_path):
+    """v0.21 之前收进来的脏数据。
+
+    **打标，不删。** 判据刚改过，拿新闸门去回溯删旧数据，等于把一次没验证过的判断
+    直接作用在已有内容上。
+    """
+
+    service = MathHarnessService(tmp_path)
+    workspace = service.create_workspace(WorkspaceCreate(name="旧数据"))
+    stale = service.ingest_example(
+        workspace.id,
+        ExampleCreate(problem="你好", solution="diff(x**3, x) = 3*x**2", tags=[]),
+    ).example
+    real = service.ingest_example(
+        workspace.id,
+        ExampleCreate(
+            problem="求 x**3 的导数", solution="diff(x**3, x) = 3*x**2", tags=[]
+        ),
+    ).example
+
+    assert stale.looks_irrelevant
+    assert not real.looks_irrelevant
+    # 还在库里——标只是提醒。
+    assert {item.id for item in service.list_examples(workspace.id)} == {
+        stale.id,
+        real.id,
+    }

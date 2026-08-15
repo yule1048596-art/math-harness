@@ -298,6 +298,17 @@ require(
 )
 require(example.methodDrafts.first?.procedure == ["乘共轭"], "method draft preview")
 require(example.revision == 1, "example revision")
+// 上面那份 JSON 里**没有** `looks_irrelevant`。缺键必须解码成 false 而不是抛错——
+// 非可选属性会让整条例题解不出来，知识库直接空掉。
+require(!example.looksIrrelevant, "a missing looks_irrelevant decodes as false")
+
+let flaggedData = Data(
+  String(decoding: exampleData, as: UTF8.self)
+    .replacingOccurrences(of: #""revision":1"#, with: #""revision":1,"looks_irrelevant":true"#)
+    .utf8
+)
+let flagged = try JSONDecoder().decode(ProblemExample.self, from: flaggedData)
+require(flagged.looksIrrelevant, "looks_irrelevant decodes when present")
 
 let updateData = try JSONEncoder().encode(
   ExampleDraftUpdateRequest(

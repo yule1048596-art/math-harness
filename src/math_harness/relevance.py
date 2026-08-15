@@ -8,6 +8,7 @@ import sympy as sp
 from pydantic import BaseModel, Field
 
 from math_harness.checks import Claim
+from math_harness.chitchat import is_obvious_chitchat
 from math_harness.claim_drafting import infer_bindings, normalize_math_text
 from math_harness.math_parser import SafeMathParser
 
@@ -161,25 +162,6 @@ class GroundedRelevanceRule:
         return None
 
 
-#: 整条消息就是这么一句时，它不可能是在解题。
-#:
-#: 这张表**刻意只收最明显的**，而且必须**整条匹配**——「你好，帮我求 x^3 的导数」不算。
-#: 它的作用不是判断「什么是数学」（那个判不准，也不该用关键词判），而是在没配判定模型
-#: 时守住最常见的那一类。宁可漏掉九成闲聊，也不能误伤一条解题。
-_OBVIOUS_CHITCHAT = frozenset(
-    {
-        "你好", "您好", "嗨", "哈喽", "hi", "hello", "hey",
-        "早上好", "中午好", "晚上好", "晚安", "在吗", "在么",
-        "谢谢", "谢谢你", "多谢", "感谢", "thanks", "thankyou", "thx",
-        "再见", "拜拜", "bye", "ok", "好的", "好", "嗯", "哈哈", "哈哈哈",
-        "你是谁", "你叫什么", "你能干什么", "你会什么", "你能做什么",
-    }
-)  # fmt: skip
-
-#: 匹配前要剥掉的东西：空白、标点、以及表情符号那一段。
-_STRIP_FOR_MATCH = re.compile(r"[\s\W_]+", re.UNICODE)
-
-
 class ObviousChitchatRule:
     """整条消息就是一句寒暄时判闲聊。
 
@@ -197,8 +179,7 @@ class ObviousChitchatRule:
     ) -> RelevanceVerdict | None:
         if anchors:
             return None
-        normalized = _STRIP_FOR_MATCH.sub("", question).lower()
-        if normalized and normalized in _OBVIOUS_CHITCHAT:
+        if is_obvious_chitchat(question):
             return RelevanceVerdict(
                 relevance=TurnRelevance.CHITCHAT,
                 source=self.name,

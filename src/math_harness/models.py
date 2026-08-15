@@ -5,7 +5,16 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
+
+from math_harness.chitchat import is_obvious_chitchat
 
 
 def utc_now() -> datetime:
@@ -670,6 +679,20 @@ class ProblemExample(BaseModel):
     revision: int = Field(default=1, ge=1)
     created_at: datetime
     updated_at: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def looks_irrelevant(self) -> bool:
+        """题面根本不是一道题——v0.21 之前的入库门禁放进来的那些。
+
+        **读的时候算，不落库。** 判据刚改过，拿新闸门去回溯改写旧数据，等于把一次没验证
+        过的判断直接作用在已有内容上；算出来的标只是给复核界面提个醒，删不删由用户定。
+
+        只认最明显的那一类（整条就是一句寒暄）。这里宁可漏标，也不能给一条正经例题挂上
+        「不像数学题」——那会诱导用户把真东西删掉。
+        """
+
+        return is_obvious_chitchat(self.problem)
 
 
 class ExampleReviewRequest(BaseModel):

@@ -920,10 +920,21 @@ public struct ProblemExample: Codable, Identifiable, Equatable, Sendable {
   public let revision: Int
   public let createdAt: String
   public let updatedAt: String
+  /// 题面根本不是一道题——v0.21 之前的入库门禁放进来的那些。
+  ///
+  /// 服务端读的时候算，不落库：判据刚改过，拿新闸门回溯改写旧数据等于把一次没验证过的
+  /// 判断直接作用在已有内容上。这里只是提个醒，删不删由用户在复核界面自己决定。
+  ///
+  /// 存成可选是为了**缺键不炸**：Swift 合成的解码器对非可选属性用 `decode`，键不在
+  /// 就直接抛错，属性上的默认值它不看。可选属性走 `decodeIfPresent`，旧后端没有这个
+  /// 字段时得到 nil。
+  private let looksIrrelevantRaw: Bool?
+  public var looksIrrelevant: Bool { looksIrrelevantRaw ?? false }
 
   enum CodingKeys: String, CodingKey {
     case id, problem, solution, tags, reviewed, verification, extraction, status, origin
     case revision
+    case looksIrrelevantRaw = "looks_irrelevant"
     case workspaceID = "workspace_id"
     case methodHint = "method_hint"
     case problemKind = "problem_kind"
