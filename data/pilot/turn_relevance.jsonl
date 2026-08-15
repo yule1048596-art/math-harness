@@ -1,0 +1,40 @@
+{"id": "solve-derivative", "kind": "solving_grounded", "question": "求 x^3 的导数", "claims": [["Derivative(x**3, x)", "3*x**2"]], "judge_verdict": "solving"}
+{"id": "solve-integral", "kind": "solving_grounded", "question": "计算 Integral(x*exp(x), x)", "claims": [["Integral(x*exp(x), x)", "x*exp(x) - exp(x)"]], "judge_verdict": "solving"}
+{"id": "solve-difference-of-squares", "kind": "solving_grounded", "question": "证明 (a+b)^2-(a-b)^2 = 4ab", "claims": [["(a+b)**2-(a-b)**2", "4*a*b"]], "judge_verdict": "solving"}
+{"id": "solve-limit-radical", "kind": "solving_grounded", "question": "求 sqrt(25x^2+7x)-5x 当 x 趋于无穷的极限", "claims": [["Limit(sqrt(25*x**2+7*x)-5*x, x, oo)", "7/10"]], "judge_verdict": "solving"}
+{"id": "solve-sum-binomial", "kind": "solving_grounded", "question": "求 Sum(binomial(n, k), (k, 0, n)) 的闭式", "claims": [["Sum(binomial(n, k), (k, 0, n))", "2**n"]], "judge_verdict": "solving"}
+{"id": "solve-matrix-det", "kind": "solving_grounded", "question": "计算 Matrix([[1, 2], [3, 4]]) 的行列式", "claims": [["det(Matrix([[1, 2], [3, 4]]))", "-2"]], "judge_verdict": "solving"}
+{"id": "solve-expand-cube", "kind": "solving_grounded", "question": "展开 (x+1)^3", "claims": [["(x+1)**3", "x**3 + 3*x**2 + 3*x + 1"]], "judge_verdict": "solving"}
+{"id": "solve-trig-identity", "kind": "solving_grounded", "question": "验证 sin(x)**2 + cos(x)**2 = 1", "claims": [["sin(x)**2 + cos(x)**2", "1"]], "judge_verdict": "solving"}
+{"id": "solve-factor", "kind": "solving_grounded", "question": "分解 x^2-5x+6", "claims": [["x**2-5*x+6", "(x-2)*(x-3)"]], "judge_verdict": "solving"}
+{"id": "solve-complex-modulus", "kind": "solving_grounded", "question": "求 z*conjugate(z) 当 z = 3+4*I", "claims": [["z*conjugate(z)", "25"]], "judge_verdict": "solving"}
+{"id": "ask-plain", "kind": "solving_ungrounded", "question": "请解这道题", "claims": [["Derivative(x**3 + 2*x, x)", "3*x**2 + 2"]], "judge_verdict": "solving"}
+{"id": "ask-help", "kind": "solving_ungrounded", "question": "帮我算算这个", "claims": [["Integral(x**2, x)", "x**3/3"]], "judge_verdict": "solving"}
+{"id": "ask-photo", "kind": "solving_ungrounded", "question": "这道题怎么做", "claims": [["Sum(k, (k, 1, n))", "n*(n+1)/2"]], "judge_verdict": "solving"}
+{"id": "ask-steps", "kind": "solving_ungrounded", "question": "详细写一下步骤", "claims": [["(a+b)**2", "a**2 + 2*a*b + b**2"]], "judge_verdict": "solving"}
+{"id": "ask-check", "kind": "solving_ungrounded", "question": "帮我检查一下我的做法对不对", "claims": [["diff(sin(x), x)", "cos(x)"]], "judge_verdict": "solving"}
+{"id": "follow-prove", "kind": "follow_up", "question": "这个怎么证明？", "recent_questions": ["证明 (a+b)^2 = a^2+2ab+b^2"], "claims": [["(a+b)**2", "a**2 + 2*a*b + b**2"]], "judge_verdict": "solving"}
+{"id": "follow-another-way", "kind": "follow_up", "question": "换个方法呢", "recent_questions": ["求 Integral(x*exp(x), x)"], "claims": [["Integral(x*exp(x), x)", "x*exp(x) - exp(x)"]], "judge_verdict": "solving"}
+{"id": "follow-why-step", "kind": "follow_up", "question": "刚才那步为什么成立？", "recent_questions": ["求 sqrt(25x^2+7x)-5x 的极限"], "claims": [["Limit(sqrt(25*x**2+7*x)-5*x, x, oo)", "7/10"]], "judge_verdict": "solving"}
+{"id": "follow-continue", "kind": "follow_up", "question": "接着往下推", "recent_questions": ["展开 (x+1)^3"], "claims": [["(x+1)**3", "x**3 + 3*x**2 + 3*x + 1"]], "judge_verdict": "solving"}
+{"id": "follow-generalize", "kind": "follow_up", "question": "推广到 n 次呢", "recent_questions": ["展开 (x+1)^3"], "claims": [["Sum(binomial(n, k)*x**k, (k, 0, n))", "(1+x)**n"]], "judge_verdict": "solving"}
+{"id": "follow-simpler", "kind": "follow_up", "question": "有没有更简单的写法", "recent_questions": ["化简 x**2-5*x+6"], "claims": [["x**2-5*x+6", "(x-2)*(x-3)"]], "judge_verdict": "solving"}
+{"id": "follow-wrong-step", "kind": "follow_up", "question": "第二步是不是写反了", "recent_questions": ["证明 (a+b)^2-(a-b)^2 = 4ab"], "claims": [["(a+b)**2-(a-b)**2", "4*a*b"]], "judge_verdict": "solving"}
+{"id": "chit-hello", "kind": "chitchat_obvious", "question": "你好", "claims": [["Derivative(x**3, x)", "3*x**2"]], "judge_verdict": "chitchat"}
+{"id": "chit-hello-punct", "kind": "chitchat_obvious", "question": "你好！", "claims": [["Derivative(x**3, x)", "3*x**2"]], "judge_verdict": "chitchat"}
+{"id": "chit-thanks", "kind": "chitchat_obvious", "question": "谢谢", "claims": [["Integral(x**2, x)", "x**3/3"]], "judge_verdict": "chitchat"}
+{"id": "chit-thanks-en", "kind": "chitchat_obvious", "question": "thanks", "claims": [["Integral(x**2, x)", "x**3/3"]], "judge_verdict": "chitchat"}
+{"id": "chit-hi-en", "kind": "chitchat_obvious", "question": "Hello", "claims": [["(x+1)**2", "x**2+2*x+1"]], "judge_verdict": "chitchat"}
+{"id": "chit-what-can-you-do", "kind": "chitchat_obvious", "question": "你能干什么", "claims": [["Sum(k, (k, 1, n))", "n*(n+1)/2"]], "judge_verdict": "chitchat"}
+{"id": "chit-who-are-you", "kind": "chitchat_obvious", "question": "你是谁", "claims": [["diff(sin(x), x)", "cos(x)"]], "judge_verdict": "chitchat"}
+{"id": "chit-bye", "kind": "chitchat_obvious", "question": "再见", "claims": [["x**2-5*x+6", "(x-2)*(x-3)"]], "judge_verdict": "chitchat"}
+{"id": "chit-laugh", "kind": "chitchat_obvious", "question": "哈哈哈", "claims": [["(a+b)**2", "a**2+2*a*b+b**2"]], "judge_verdict": "chitchat"}
+{"id": "chit-ok", "kind": "chitchat_obvious", "question": "好的", "claims": [["det(Matrix([[1, 2], [3, 4]]))", "-2"]], "judge_verdict": "chitchat"}
+{"id": "chit-weather", "kind": "chitchat_subtle", "question": "今天天气不错啊", "claims": [["Derivative(x**3, x)", "3*x**2"]], "judge_verdict": "chitchat"}
+{"id": "chit-is-math-hard", "kind": "chitchat_subtle", "question": "你觉得数学难吗", "claims": [["Sum(k, (k, 1, n))", "n*(n+1)/2"]], "judge_verdict": "chitchat"}
+{"id": "chit-which-model", "kind": "chitchat_subtle", "question": "你后台用的是什么模型", "claims": [["Integral(x**2, x)", "x**3/3"]], "judge_verdict": "chitchat"}
+{"id": "chit-how-to-switch", "kind": "chitchat_subtle", "question": "怎么切换到别的模型", "claims": [["(x+1)**2", "x**2+2*x+1"]], "judge_verdict": "chitchat"}
+{"id": "chit-praise", "kind": "chitchat_subtle", "question": "你答得挺快的", "claims": [["diff(cos(x), x)", "-sin(x)"]], "judge_verdict": "chitchat"}
+{"id": "chit-tired", "kind": "chitchat_subtle", "question": "今天学得有点累了", "claims": [["x**2-5*x+6", "(x-2)*(x-3)"]], "judge_verdict": "chitchat"}
+{"id": "chit-export", "kind": "chitchat_subtle", "question": "知识库能导出到 Obsidian 吗", "claims": [["(a+b)**2", "a**2+2*a*b+b**2"]], "judge_verdict": "chitchat"}
+{"id": "chit-greeting-then-math", "kind": "solving_grounded", "question": "你好，帮我求 x^3 的导数", "claims": [["Derivative(x**3, x)", "3*x**2"]], "judge_verdict": "solving"}

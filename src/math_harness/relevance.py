@@ -111,7 +111,13 @@ def question_expressions(question: str, parser: SafeMathParser) -> list[sp.Expr]
             if parsed is None:
                 continue
             # 单符号、纯数字都太容易偶然撞上，不作为 grounding 依据。
-            if parsed.is_Symbol or parsed.is_Number:
+            #
+            # 用 `getattr` 而不是直接取属性：解析结果不一定是 `Expr`，`Matrix` 就没有
+            # 这两个属性。写成 `parsed.is_Symbol` 的话，提问里出现一个矩阵字面量就会
+            # 把整个回合打崩。
+            if getattr(parsed, "is_Symbol", False) or getattr(
+                parsed, "is_Number", False
+            ):
                 continue
             expressions.append(parsed)
             break  # 整段解析成功就不必再拆词。
