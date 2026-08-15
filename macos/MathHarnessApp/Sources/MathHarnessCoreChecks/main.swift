@@ -8,12 +8,12 @@ func require(_ condition: @autoclosure () -> Bool, _ message: String) {
 }
 
 let readyData = Data(
-  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.20.0"}"#.utf8
+  #"{"base_url":"http://127.0.0.1:54321","pid":42,"port":54321,"version":"0.20.1"}"#.utf8
 )
 let ready = try JSONDecoder().decode(BackendReady.self, from: readyData)
 require(ready.baseURL == "http://127.0.0.1:54321", "ready base URL")
 require(ready.port == 54321, "ready port")
-require(ready.version == "0.20.0", "ready version")
+require(ready.version == "0.20.1", "ready version")
 
 let solveRequest = SolveRequest(
   problem: "求渐进展开",
@@ -1000,5 +1000,33 @@ require(
   clashing.failures.first?.contains("改名") == true,
   "and say what to do about it"
 )
+
+// --- 设置往返 --------------------------------------------------------
+//
+// v0.20.1 修的那个 bug 是「没人调用保存」，视图生命周期的事，这里够不着。但同一类
+// 后果——**配置存下去又读不回来**——有一半是可测的：编码往返丢字段。
+
+var roundTrip = ProviderSettings()
+roundTrip.profiles = [
+  ProviderPreset.deepseek.makeProfile(),
+  ProviderPreset.openai.makeProfile(),
+]
+roundTrip.simpleProfileID = roundTrip.profiles[0].id
+roundTrip.useSimpleMode = false
+roundTrip.roles = [
+  ModelRole.conversation.rawValue: RoleBinding(profile: roundTrip.profiles[0].id),
+  ModelRole.claimDrafter.rawValue: RoleBinding(profile: roundTrip.profiles[1].id),
+]
+
+let encodedSettings = try JSONEncoder().encode(roundTrip)
+let decodedSettings = try JSONDecoder().decode(ProviderSettings.self, from: encodedSettings)
+require(decodedSettings.profiles.count == 2, "both profiles survive a round trip")
+require(decodedSettings.profiles == roundTrip.profiles, "profile fields survive verbatim")
+require(decodedSettings.simpleProfileID == roundTrip.simpleProfileID, "simple binding survives")
+require(decodedSettings.roles == roundTrip.roles, "role bindings survive")
+// 密钥绝不能跟着配置走——它只属于钥匙串。备份和项目文件都不加密。
+let settingsJSON = String(decoding: encodedSettings, as: UTF8.self)
+require(!settingsJSON.contains("api_key"), "settings never carry an api key")
+require(!settingsJSON.contains("apiKey"), "settings never carry an api key")
 
 print("MathHarnessCore checks passed")
