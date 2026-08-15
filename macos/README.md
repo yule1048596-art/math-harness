@@ -1,6 +1,6 @@
 # Math Harness for macOS
 
-v0.20.1 是面向 macOS 14+ / Apple Silicon 的原生 SwiftUI App。界面通过仅监听
+v0.21.0 是面向 macOS 14+ / Apple Silicon 的原生 SwiftUI App。界面通过仅监听
 `127.0.0.1` 的本地 Python helper 使用 Math Harness 核心能力；发布包已经嵌入 Python、
 SymPy、FastAPI 和 OpenAI-compatible 客户端，最终用户不需要安装开发环境。
 
@@ -48,8 +48,8 @@ MATH_HARNESS_SKIP_APP_BUILD=true ./scripts/package_macos_dmg.sh
 当前版本的默认产物为：
 
 ```text
-dist/Math-Harness-0.20.1-macOS-arm64.zip
-dist/Math-Harness-0.20.1-macOS-arm64.dmg
+dist/Math-Harness-0.21.0-macOS-arm64.zip
+dist/Math-Harness-0.21.0-macOS-arm64.dmg
 ```
 
 `build_macos_app.sh` 使用 PyInstaller 打包 Python helper，再编译 SwiftUI App、生成图标、
