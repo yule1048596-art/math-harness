@@ -36,6 +36,9 @@ ROLE_CLAIM_DRAFTER = "claim_drafter"
 #: 复核角色。绑到**另一个** provider 才有意义——同模型自查是负收益，检查层会在
 #: 复核方与作答方是同一个档案时直接跳过。
 ROLE_REVIEWER = "reviewer"
+#: 相关性判定角色。只判「用户这一轮在不在推进一道数学题」，**看不到回答**，也不判
+#: 对错——对错永远归 SymPy。配个便宜模型就够，它读的是一句话。
+ROLE_RELEVANCE_JUDGE = "relevance_judge"
 
 ROLES: tuple[str, ...] = (
     ROLE_CONVERSATION,
@@ -45,6 +48,7 @@ ROLES: tuple[str, ...] = (
     ROLE_MEMORY_EXTRACTOR,
     ROLE_CLAIM_DRAFTER,
     ROLE_REVIEWER,
+    ROLE_RELEVANCE_JUDGE,
 )
 
 # 绑定到这个值表示该角色走零成本的离线路径（求解用 SymPy，提炼用规则）。
